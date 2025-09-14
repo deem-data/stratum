@@ -3,23 +3,16 @@ requires = ["setuptools>=64", "setuptools_scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skrub"
-dynamic = ["version", "readme"]
-description = "Machine learning with dataframes"
-authors = [
-    {name = "Riccardo Cappuzzo"},
-    {name = "Jerome Dockes"},
-    {name = "Guillaume Lemaitre"},
-    {name = "Vincent Maladiere"},
-    {name = "Gael Varoquaux"},
-]
+name = "stratum"
+version = "0.0.1"
+description = "skrub with Rust backend"
+authors = [{name = "Arnab Phani"}]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -27,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Libraries",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.23.5",
     "pandas>=1.5.3",
@@ -39,8 +32,12 @@ dependencies = [
     "pydot",
 ]
 
+[tool.maturin]
+manifest-path = "_rust/Cargo.toml"
+module-name = "skrub._rust_backend_native"
+python-source = "."
+
 [tool.setuptools.dynamic]
-version = { file = "skrub/VERSION.txt" }
 readme = { file = "README.rst" }
 
 [project.optional-dependencies]

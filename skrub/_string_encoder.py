@@ -1,4 +1,5 @@
 import warnings
+import time
 
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import (
@@ -12,6 +13,18 @@ from . import _dataframe as sbd
 from ._apply_to_cols import SingleColumnTransformer
 from ._scaling_factor import scaling_factor
 from ._to_str import ToStr
+
+# Imports for Rust monkey-patching at the end of the file
+import os
+import numpy as np
+import scipy.sparse as sp
+from . import _rust_backend as rb
+
+# Load the native Rust extension
+#try:
+#    import skrub_rust
+#except Exception:
+#    skrub_rust = None
 
 
 class StringEncoder(SingleColumnTransformer):
@@ -184,7 +197,10 @@ class StringEncoder(SingleColumnTransformer):
                 f" 'hashing', got {self.vectorizer!r}"
             )
 
+        #t0 = time.perf_counter()
         X_out = self.vectorizer_.fit_transform(X_filled).astype("float32")
+        #t1 = time.perf_counter()
+        #print(f"Time for vectorizer = {(t1 - t0):8.3f}s")
         del X_filled  # optimizes memory: we no longer need X
 
         if (min_shape := min(X_out.shape)) > self.n_components:
@@ -263,3 +279,113 @@ class StringEncoder(SingleColumnTransformer):
         result = sbd.copy_index(X, result)
 
         return result
+
+# ========================== RUST BACKEND =======================================
+
+# ----- Utility functions -----
+
+def _rust_supported_subset(enc) ->tuple[bool, str]:
+    # Supports vectorizer="hashing" with char/char_wb analyzer, no stopwords.
+    if getattr(enc, "vectorizer", None) != "hashing":
+        return False, "vectorizer != hashing"
+    if getattr(enc, "stop_words", None) is not None:
+        return False, "stop_words not supported yet"
+    if getattr(enc, "analyzer", None) not in ("char", "char_wb"):
+        return False, "analyzer not in {char, char_wb}"
+    ngr = getattr(enc, "ngram_range", (3, 5))
+    if not (isinstance(ngr, tuple) and len(ngr) == 2 and 1 <= ngr[0] <= ngr[1]):
+        return False, f"invalid ngram_range {ngr!r}"
+    return True, ""
+
+def _svd_and_post_process(enc, X_out_csr: sp.csr_matrix, X_original):
+    # FIXME: Redundant code taken from original fit_transform. Move to a common function.
+    X_out = X_out_csr.astype("float32")
+    min_shape = min(X_out.shape)
+    if min_shape > enc.n_components:
+        enc.tsvd_ = TruncatedSVD(n_components=enc.n_components, random_state=enc.random_state)
+        result = enc.tsvd_.fit_transform(X_out)
+    elif X_out.shape[1] == enc.n_components:
+        result = X_out.toarray()
+    else:
+        warnings.warn(
+            f"The matrix shape is {(X_out.shape)}, and its minimum is "
+            f"{min_shape}, which is too small to fit a truncated SVD with "
+            f"n_components={enc.n_components}. "
+            "The embeddings will be truncated by keeping the first "
+            f"{enc.n_components} dimensions instead. "
+        )
+        result = X_out[:, : enc.n_components].toarray().copy()
+    del X_out  # optimize memory: we no longer need X_out
+
+    # block normalize
+    enc.scaling_factor_ = scaling_factor(result)
+    result /= enc.scaling_factor_
+    enc.n_components_ = result.shape[1]
+    enc.input_name_ = sbd.name(X_original) or "string_enc"
+    enc.all_outputs_ = enc.get_feature_names_out()
+    return enc._post_process(X_original, result)
+
+# ----- Main glue function -----
+def _rusty_fit_transform(self, X, y=None):
+    del y
+
+    # Identical pre-processing as original
+    self.to_str = ToStr(convert_category=True)
+    X_filled = self.to_str.fit_transform(X)
+    X_filled = sbd.fill_nulls(X_filled, "")
+
+    # Fallback to original if rust unavailable or unsupported params
+    #if not (rb.USE_RUST and rb.HAVE_RUST and skrub_rust is not None):
+    if not (rb.USE_RUST and rb.HAVE_RUST):
+        return _original_fit_transform(self, X)
+
+    ok, reason = _rust_supported_subset(self)
+    if not ok:
+        # Record the reason for later inspection
+        self._rust_state_ = {"backend": "rust", "enabled": False, "reason": reason}
+        return _original_fit_transform(self, X)
+
+    # Prepare inputs for Rust
+    strings = rb._to_list(X_filled)
+    ngram_min, ngram_max = self.ngram_range
+    analyzer = self.analyzer    #"char" or "char_wb"
+    n_features = 1 << 20    #TODO: expose via parameter
+
+    # Call Rust function. Returns CSR parts + idf vector (float32)
+    #t0 = time.perf_counter()
+    print("INFO: Delegating StringEncoder to Rust backend") #TODO: proper logging
+    data, indices, indptr, n_rows, n_cols, idf = rb.hashing_tfidf_csr(
+        strings, analyzer, int(ngram_min), int(ngram_max), int(n_features)
+    )
+    #t1 = time.perf_counter()
+    #print(f"Time for rb.hashing_tfidf_csr = {(t1 - t0):8.3f}s")
+    X_csr = sp.csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
+
+    # Maintain states for transform (in future)
+    self._rust_state_ = {
+        "backend": "rust",
+        "path": "hashing->tfidf",
+        "n_features": n_features,
+        "idf": idf,
+    }
+
+    # Original SVD + post-processing
+    #t0 = time.perf_counter()
+    res = _svd_and_post_process(self, X_csr, X)
+    #t1 = time.perf_counter()
+    #print(f"Time for svd_and_post_process = {(t1 - t0):8.3f}s")
+    return res
+
+
+# ----- Monkey-patch -----
+try:
+    _original_fit_transform = StringEncoder.fit_transform
+except Exception:
+    _original_fit_transform = None
+    raise RuntimeError("Could not access StringEncoder.fit_transform")
+
+#if rb.USE_RUST and rb.HAVE_RUST and skrub_rust is not None:
+if rb.USE_RUST and rb.HAVE_RUST and rb.hashing_tfidf_csr is not None:
+    StringEncoder.fit_transform = _rusty_fit_transform
+
+# ================================================================
