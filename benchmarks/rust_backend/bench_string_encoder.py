@@ -32,7 +32,7 @@ def make_series (n_rows, seed, vocab_size, avg_words, words_len_range=(3, 10)) -
 
 def main():
     n_rows = 100_000        #number of rows (=200K)
-    vocab_size = 20000       #number of unique words (=5K). Large -> more distinct tokens -> sparser matrix
+    vocab_size = 20000      #number of unique words (=5K). Large -> more distinct tokens -> sparser matrix
     avg_words = 8           #average number of words per row (=8)
     words_len = (3, 10)     #length of each word (low to high)
 
@@ -45,8 +45,8 @@ def main():
     enc = StringEncoder(
         vectorizer="hashing", #hashing->tfidf
         analyzer="char",
-        ngram_range=(3, 5),
-        n_components=64,
+        ngram_range=(3, 4),
+        n_components= 30,
         random_state=0
     )
 

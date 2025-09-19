@@ -197,17 +197,20 @@ class StringEncoder(SingleColumnTransformer):
                 f" 'hashing', got {self.vectorizer!r}"
             )
 
-        #t0 = time.perf_counter()
+        t0 = time.perf_counter()
         X_out = self.vectorizer_.fit_transform(X_filled).astype("float32")
-        #t1 = time.perf_counter()
-        #print(f"Time for vectorizer = {(t1 - t0):8.3f}s")
+        t1 = time.perf_counter()
+        print(f"Time for vectorizer = {(t1 - t0):8.3f}s")
         del X_filled  # optimizes memory: we no longer need X
 
         if (min_shape := min(X_out.shape)) > self.n_components:
             self.tsvd_ = TruncatedSVD(
                 n_components=self.n_components, random_state=self.random_state
             )
+            t0 = time.perf_counter()
             result = self.tsvd_.fit_transform(X_out)
+            t1 = time.perf_counter()
+            print(f"Time taken for sklearn svd = {(t1 - t0):8.3f}s")
         elif X_out.shape[1] == self.n_components:
             result = X_out.toarray()
         else:
@@ -236,7 +239,8 @@ class StringEncoder(SingleColumnTransformer):
 
         self.all_outputs_ = self.get_feature_names_out()
 
-        return self._post_process(X, result)
+        out = self._post_process(X, result)
+        return out
 
     def transform(self, X):
         """Transform a column.
@@ -302,6 +306,7 @@ def _svd_and_post_process(enc, X_out_csr: sp.csr_matrix, X_original):
     X_out = X_out_csr.astype("float32")
     min_shape = min(X_out.shape)
     if min_shape > enc.n_components:
+        # Reducing n_iter from 5(default) to 2 yields 2x speedup.
         enc.tsvd_ = TruncatedSVD(n_components=enc.n_components, random_state=enc.random_state)
         result = enc.tsvd_.fit_transform(X_out)
     elif X_out.shape[1] == enc.n_components:
@@ -317,7 +322,7 @@ def _svd_and_post_process(enc, X_out_csr: sp.csr_matrix, X_original):
         result = X_out[:, : enc.n_components].toarray().copy()
     del X_out  # optimize memory: we no longer need X_out
 
-    # block normalize
+    # Block normalize
     enc.scaling_factor_ = scaling_factor(result)
     result /= enc.scaling_factor_
     enc.n_components_ = result.shape[1]
@@ -352,14 +357,13 @@ def _rusty_fit_transform(self, X, y=None):
     n_features = 1 << 20    #TODO: expose via parameter
 
     # Call Rust function. Returns CSR parts + idf vector (float32)
-    #t0 = time.perf_counter()
+    t0 = time.perf_counter()
     print("INFO: Delegating StringEncoder to Rust backend") #TODO: proper logging
     data, indices, indptr, n_rows, n_cols, idf = rb.hashing_tfidf_csr(
         strings, analyzer, int(ngram_min), int(ngram_max), int(n_features)
     )
-    #t1 = time.perf_counter()
-    #print(f"Time for rb.hashing_tfidf_csr = {(t1 - t0):8.3f}s")
-    X_csr = sp.csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
+    t1 = time.perf_counter()
+    print(f"Time for rb.hashing_tfidf_csr = {(t1 - t0):8.3f}s")
 
     # Maintain states for transform (in future)
     self._rust_state_ = {
@@ -369,11 +373,32 @@ def _rusty_fit_transform(self, X, y=None):
         "idf": idf,
     }
 
-    # Original SVD + post-processing
-    #t0 = time.perf_counter()
+    # Frequent Directions (FD) path in Rust.
+    # TODO: Write a truncated SVD in Rust for sklearn equivalent result
+    if rb.fd_embedding is not None:
+        print("INFO: Taking FD path in Rust")
+        t0 = time.perf_counter()
+        Z = rb.fd_embedding(data, indices, indptr, int(n_rows), int(n_cols),
+                            int(self.n_components), 16, self.random_state, 0) #last argument n_threads
+        result = np.asarray(Z, dtype=np.float32, order="C")
+        t1 = time.perf_counter()
+        print(f"Time for rb.fd_embedding = {(t1 - t0):8.3f}s")
+
+        # Block normalize as original
+        self.scaling_factor_ = scaling_factor(result)
+        result /= self.scaling_factor_
+        self.n_components_ = result.shape[1]
+        self.input_name_ = sbd.name(X) or "string_enc"
+        self.all_outputs_ = self.get_feature_names_out()
+        return self._post_process(X, result)
+
+
+    # Fallback to sklearn SVD + post-processing
+    X_csr = sp.csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
+    t0 = time.perf_counter()
     res = _svd_and_post_process(self, X_csr, X)
-    #t1 = time.perf_counter()
-    #print(f"Time for svd_and_post_process = {(t1 - t0):8.3f}s")
+    t1 = time.perf_counter()
+    print(f"Time for svd_and_post_process = {(t1 - t0):8.3f}s")
     return res
 
 
@@ -384,7 +409,6 @@ except Exception:
     _original_fit_transform = None
     raise RuntimeError("Could not access StringEncoder.fit_transform")
 
-#if rb.USE_RUST and rb.HAVE_RUST and skrub_rust is not None:
 if rb.USE_RUST and rb.HAVE_RUST and rb.hashing_tfidf_csr is not None:
     StringEncoder.fit_transform = _rusty_fit_transform
 

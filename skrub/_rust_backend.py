@@ -24,3 +24,4 @@ def _to_list(col):
 
 # Re-export compiled functions if present
 hashing_tfidf_csr = getattr(native, "hashing_tfidf_csr", None)
+fd_embedding = getattr(native, "fd_embed_from_csr", None)
