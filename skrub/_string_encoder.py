@@ -197,20 +197,18 @@ class StringEncoder(SingleColumnTransformer):
                 f" 'hashing', got {self.vectorizer!r}"
             )
 
-        t0 = time.perf_counter()
+        t0 = rb.start_timing()
         X_out = self.vectorizer_.fit_transform(X_filled).astype("float32")
-        t1 = time.perf_counter()
-        print(f"Time for vectorizer = {(t1 - t0):8.3f}s")
+        rb.print_timing("vectorizer", t0)
         del X_filled  # optimizes memory: we no longer need X
 
         if (min_shape := min(X_out.shape)) > self.n_components:
             self.tsvd_ = TruncatedSVD(
                 n_components=self.n_components, random_state=self.random_state
             )
-            t0 = time.perf_counter()
+            t0 = rb.start_timing()
             result = self.tsvd_.fit_transform(X_out)
-            t1 = time.perf_counter()
-            print(f"Time taken for sklearn svd = {(t1 - t0):8.3f}s")
+            rb.print_timing("TruncatedSVD", t0)
         elif X_out.shape[1] == self.n_components:
             result = X_out.toarray()
         else:
@@ -339,9 +337,8 @@ def _rusty_fit_transform(self, X, y=None):
     X_filled = self.to_str.fit_transform(X)
     X_filled = sbd.fill_nulls(X_filled, "")
 
-    # Fallback to original if rust unavailable or unsupported params
-    #if not (rb.USE_RUST and rb.HAVE_RUST and skrub_rust is not None):
-    if not (rb.USE_RUST and rb.HAVE_RUST):
+    # Fallback to original if hashing_tfidf_csr function is unavailable
+    if getattr(rb, "hashing_tfidf_csr", None) is None:
         return _original_fit_transform(self, X)
 
     ok, reason = _rust_supported_subset(self)
@@ -357,13 +354,12 @@ def _rusty_fit_transform(self, X, y=None):
     n_features = 1 << 20    #TODO: expose via parameter
 
     # Call Rust function. Returns CSR parts + idf vector (float32)
-    t0 = time.perf_counter()
+    t0 = rb.start_timing()
     print("INFO: Delegating StringEncoder to Rust backend") #TODO: proper logging
     data, indices, indptr, n_rows, n_cols, idf = rb.hashing_tfidf_csr(
         strings, analyzer, int(ngram_min), int(ngram_max), int(n_features)
     )
-    t1 = time.perf_counter()
-    print(f"Time for rb.hashing_tfidf_csr = {(t1 - t0):8.3f}s")
+    rb.print_timing("hashing_tfidf_csr", t0)
 
     # Maintain states for transform (in future)
     self._rust_state_ = {
@@ -375,32 +371,26 @@ def _rusty_fit_transform(self, X, y=None):
 
     # Frequent Directions (FD) path in Rust.
     # TODO: Write a truncated SVD in Rust for sklearn equivalent result
-    if rb.fd_embedding is not None:
-        print("INFO: Taking FD path in Rust")
-        t0 = time.perf_counter()
-        Z = rb.fd_embedding(data, indices, indptr, int(n_rows), int(n_cols),
-                            int(self.n_components), 16, self.random_state, 0) #last argument n_threads
-        result = np.asarray(Z, dtype=np.float32, order="C")
-        t1 = time.perf_counter()
-        print(f"Time for rb.fd_embedding = {(t1 - t0):8.3f}s")
+    # Fallback if fd_embedding is not found
+    if getattr(rb, "fd_embedding", None) is None:
+        X_csr = sp.csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
+        res = _svd_and_post_process(self, X_csr, X)
+        return res
 
-        # Block normalize as original
-        self.scaling_factor_ = scaling_factor(result)
-        result /= self.scaling_factor_
-        self.n_components_ = result.shape[1]
-        self.input_name_ = sbd.name(X) or "string_enc"
-        self.all_outputs_ = self.get_feature_names_out()
-        return self._post_process(X, result)
+    print("INFO: Taking FD path in Rust")
+    t0 = rb.start_timing()
+    Z = rb.fd_embedding(data, indices, indptr, int(n_rows), int(n_cols),
+           int(self.n_components), 16, self.random_state)
+    result = np.asarray(Z, dtype=np.float32, order="C")
+    rb.print_timing("fd_embedding", t0)
 
-
-    # Fallback to sklearn SVD + post-processing
-    X_csr = sp.csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
-    t0 = time.perf_counter()
-    res = _svd_and_post_process(self, X_csr, X)
-    t1 = time.perf_counter()
-    print(f"Time for svd_and_post_process = {(t1 - t0):8.3f}s")
-    return res
-
+    # Block normalize as original
+    self.scaling_factor_ = scaling_factor(result)
+    result /= self.scaling_factor_
+    self.n_components_ = result.shape[1]
+    self.input_name_ = sbd.name(X) or "string_enc"
+    self.all_outputs_ = self.get_feature_names_out()
+    return self._post_process(X, result)
 
 # ----- Monkey-patch -----
 try:
@@ -409,7 +399,12 @@ except Exception:
     _original_fit_transform = None
     raise RuntimeError("Could not access StringEncoder.fit_transform")
 
-if rb.USE_RUST and rb.HAVE_RUST and rb.hashing_tfidf_csr is not None:
-    StringEncoder.fit_transform = _rusty_fit_transform
+def _dispatch_fit_transform(self, X, y=None):
+    # Call time flag check to allow dynamic configuration
+    if getattr(rb, "ALLOW_PATCH", True) and getattr(rb, "USE_RUST", False) and getattr(rb, "HAVE_RUST", False):
+        return _rusty_fit_transform(self, X, y)
+    return _original_fit_transform(self, X, y)
+
+StringEncoder.fit_transform = _dispatch_fit_transform
 
 # ================================================================

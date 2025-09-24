@@ -362,6 +362,96 @@ def config_context(
         set_config(**original_config)
 
 
+# ------- Rust backend (stratum) config group ---------------
+
+def _rust_env_bool(name, default=False):
+    val = os.getenv(name)
+    if val is None:
+        return bool(default)
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    # fall back to existing convention if someone sets "True"/"False"
+    return s == "true"
+
+def _rust_env_int(name, default):
+    v = os.getenv(name)
+    return int(v) if v is not None else int(default)
+
+def _rust_env_choice(name, default, choices):
+    v = os.getenv(name)
+    x = (v if v is not None else default).strip().lower()
+    if x not in choices:
+        raise ValueError(f"{name!r} must be one of {sorted(choices)}, got {x!r}")
+    return x
+
+# Thread-local storage, similar to _get_threadlocal_config()
+if not hasattr(_threadlocal, "rust_config"):
+    _threadlocal.rust_config = {
+        "enable_rust": _rust_env_bool("SKRUB_RUST", False),
+        "num_threads": _rust_env_int("SKRUB_RUST_THREADS", 0),           # 0 => global threadpool
+        "debug_timing": _rust_env_bool("SKRUB_RUST_DEBUG_TIMING", False),
+        "allow_monkeypatch": _rust_env_bool("SKRUB_RUST_ALLOW_MONKEYPATCH", True),
+    }
+
+def get_rust_config():
+    # Return a shallow copy of the current Rust backend config
+    return _threadlocal.rust_config.copy()
+
+def set_rust_config(**kwargs):
+    """ Update Rust backend related knobs.
+
+    Parameter:
+    -----------
+
+        enable_rust: bool, default false
+            Enable/disable rust backend. It is a feature flag for the Rust backend.
+
+        num_threads: int >= 0 (0 lets backend decide), default 0
+            Set the number of threads for the multithreaded rust operations.
+
+        debug_timing: bool, default false
+            Print the timing in standard output.
+
+        allow_monkeypatch: bool, default true
+            Allows disabling runtime monkey-patch in sensitive contexts. This is a soft
+            kill-switch for disabling all non-sklearn backends, even if their flags are set.
+    """
+    rc = _threadlocal.rust_config.copy()
+    for k, v in kwargs.items():
+        if k not in rc:
+            raise KeyError(f"Unknown rust option {k!r}. Valid keys: {sorted(rc)}")
+        if k in {"enable_rust", "debug_timing", "allow_monkeypatch"}:
+            if not isinstance(v, bool):
+                raise ValueError(f"rust[{k}] must be bool, got {v!r}")
+        elif k in {"num_threads"}:
+            if not (isinstance(v, int) and v >= 0):
+                raise ValueError(f"rust[{k}] must be an int >= 0, got {v!r}")
+        rc[k] = v
+        _threadlocal.rust_config = rc
+
+from contextlib import contextmanager as _ctxmgr  # reuse imported contextmanager
+
+@_ctxmgr
+def rust_config_context(**kwargs):
+    """ Context manager for Rust backend config.
+
+    Example:
+        with rust_config_context(enabled=True, threads=8):
+            ...
+    """
+    _orig = get_rust_config()
+    set_rust_config(**kwargs)
+    try:
+        yield
+    finally:
+        set_rust_config(**_orig)
+# ---------------------------------------------------------------------------
+
+
+
 # Apply patching set by environment variables. Without it, setting SKB_USE_TABLE_REPORT
 # or SKB_USE_TABLE_REPORT_DATA_OPS would not have an effect.
 _apply_external_patches(get_config())

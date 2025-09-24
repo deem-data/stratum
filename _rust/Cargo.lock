@@ -1315,6 +1315,7 @@ dependencies = [
  "ndarray",
  "ndarray-linalg",
  "numpy",
+ "once_cell",
  "pyo3",
  "rand 0.10.0-rc.0",
  "rayon",

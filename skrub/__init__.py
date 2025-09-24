@@ -9,7 +9,7 @@ from ._agg_joiner import AggJoiner, AggTarget
 from ._apply_to_cols import ApplyToCols
 from ._apply_to_frame import ApplyToFrame
 from ._column_associations import column_associations
-from ._config import config_context, get_config, set_config
+from ._config import config_context, get_config, set_config, get_rust_config, set_rust_config, rust_config_context
 from ._data_ops import (
     DataOp,
     ParamSearch,
@@ -101,6 +101,9 @@ __all__ = [
     "get_config",
     "set_config",
     "config_context",
+    "get_rust_config",
+    "set_rust_config",
+    "rust_config_context",
     "ApplyToCols",
     "ApplyToFrame",
 ]

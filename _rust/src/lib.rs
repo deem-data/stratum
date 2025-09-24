@@ -7,12 +7,14 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
 use std::time::Instant;
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use crate::util::{start_timing, print_timing, get_num_threads};
 
 mod tokenize;   //n-gram extraction for char/char_wb
 mod hashing;    //stable fast hashing to [0, n_features)
 mod tfidf;      //DF counting, IDF vector, TF*IDF, per-row L2 norm
 mod csr;
-mod fd;
+mod fd;         //Frequent Directions
+mod util;
 
 // Simple mapping from domain error to PyErr
 fn to_pyerr(err: tfidf::Error) -> PyErr {
@@ -26,10 +28,10 @@ fn to_pyerr(err: tfidf::Error) -> PyErr {
 }
 
 #[pyfunction]
-#[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, oversample=16, seed=None, n_threads=0))]
+#[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, oversample=16, seed=None))]
 fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<PyArray1<i32>>,
     indptr: Bound<PyArray1<i64>>, n_rows: usize, n_cols: usize, k: usize,
-    oversample: usize, seed: Option<u64>, n_threads: usize) -> PyResult<Py<PyArray2<f32>>>
+    oversample: usize, seed: Option<u64>) -> PyResult<Py<PyArray2<f32>>>
 {
     // Step 1: Zero-copy view of NumPy arrays
     let data = unsafe { data.as_slice()? };
@@ -55,13 +57,14 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
     }
 
     // Create rayon thread pool
-    let pool: Option<ThreadPool> = if n_threads > 0 {
+    let num_threads = get_num_threads();
+    let pool: Option<ThreadPool> = if num_threads > 0 {
         let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(n_threads).build()
+            .num_threads(num_threads).build()
             .map_err(|e| PyErr::new::<PyValueError, _>(format!("Failed to build rayon pool: {e}")))?;
         Some(thread_pool)
     }
-    else { //n_threads = 0. Use global threadpool
+    else { //num_threads = 0. Use global threadpool
         None
     };
     let pool_ref = pool.as_ref();
@@ -69,7 +72,8 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
 
     // Step 4: Compute Y = X · Ω  (n x out_w) in a single pass over CSR rows
     // TODO: Move this to CSR utility module
-    let t0 = Instant::now();
+    //let t0 = Instant::now();
+    let t0 = start_timing();
     let mut y = Array2::<f32>::zeros((n_rows, out_w)); //dense y
     let mut build_y = || {
         y.axis_iter_mut(Axis(0))
@@ -93,17 +97,13 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
         Some(pool) => pool.install(build_y), //use custom threadpool
         None => build_y() //use global threadpool
     }
-
-
-    let X_dot_Omega = t0.elapsed().as_millis();
-    eprintln!("[fd] Y(ms)={X_dot_Omega}");
+    print_timing("build y", t0);
 
     // Step 5: Run FD on Y (n x out_w) -> Z (n x k)
     // FD operates on small width (out_w), making it cheap
-    let t0 = Instant::now();
+    let t0 = start_timing();
     let z = fd::fd_reduce(y.view(), k, pool_ref)?;
-    let fd_ms = t0.elapsed().as_millis();
-    eprintln!("[fd] FD(ms)={fd_ms}");
+    print_timing("fd_reduce", t0);
 
     // Step 6: Return NumPy (zero-copy)
     let py_z = z.into_pyarray(py).to_owned();

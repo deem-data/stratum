@@ -1,11 +1,13 @@
-# Run
-# SKRUB_RUST=0 python bench_string_encoder.py
-# SKRUB_RUST=1 python bench_string_encoder.py
-
+"""
+This script runs StringEncoder on a synthetic dataset and compares Sklearn and Rust backends.
+It is used to show the performance benefits of the Rust backend (~5.8x w/ 24*2 cores).
+This script also shows the use various config flags related to the Rust backend.
+"""
 import gc
 import time
 import numpy as np
 import pandas as pd
+import skrub
 from skrub import StringEncoder
 
 # Create a synthetic test column
@@ -50,18 +52,33 @@ def main():
         random_state=0
     )
 
-    # Warmup small run to load code paths, JIT caches inside SciPy, etc.
+    # Warm-up small runs to load code paths, JIT caches inside SciPy, etc.
+    skrub.set_rust_config(enable_rust=False) #sklearn backend
+    X_small = X.iloc[: min(2048, len(X))]
+    _ = enc.fit_transform(X_small)
+    gc.collect()
+    skrub.set_rust_config(enable_rust=True) #rust backend
     X_small = X.iloc[: min(2048, len(X))]
     _ = enc.fit_transform(X_small)
     gc.collect()
 
-    # Run on the entire dataset
+    # Main benchmark: Run on the entire dataset
+    print("\nStarting main benchmark")
+    skrub.set_rust_config(enable_rust=False, debug_timing=True) #sklearn
     t0 = time.perf_counter()
     X_enc = enc.fit_transform(X)
     print(f"Shape = {X_enc.shape}")
     t1 = time.perf_counter()
     exec_time = t1 - t0
-    print(f"Execution time = {exec_time:8.3f}s")
+    print(f"Sklearn - Execution time = {exec_time:8.3f}s\n")
+
+    skrub.set_rust_config(enable_rust=True, debug_timing=True, num_threads=0) #rust
+    t0 = time.perf_counter()
+    X_enc = enc.fit_transform(X)
+    print(f"Shape = {X_enc.shape}")
+    t1 = time.perf_counter()
+    exec_time = t1 - t0
+    print(f"stratum - Execution time = {exec_time:8.3f}s\n")
 
 
 if __name__ == '__main__':
