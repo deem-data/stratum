@@ -25,11 +25,17 @@ Requirements:
 
 ## Usage
 
-At runtime, enable the Rust backend by setting an environment variable:
+To enable the Rust backend and other related features, use the environment variables or Python configuration flags:
 
 ```bash
 export SKRUB_RUST=1     # Linux / macOS
 setx SKRUB_RUST 1       # Windows PowerShell
+```
+or
+
+```Python
+import skrub
+skrub.set_rust_config(enable_rust=True)
 ```
 
 #### Test Code
@@ -38,9 +44,10 @@ setx SKRUB_RUST 1       # Windows PowerShell
 
 import os
 import pandas as pd
-# os.environ['SKRUB_RUST'] = '1'
-
+import skrub
 from skrub import StringEncoder
+
+skrub.set_rust_config(enable_rust=True, debug_timing=True, num_threads=0) #rust flags
 s = pd.Series(["foo", "bar", None, "lorem ipsum dolor"]) # nulls handled upstream
 enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
 Z = enc.fit_transform(s)
