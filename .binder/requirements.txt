@@ -1,0 +1,7 @@
+sphinx-gallery
+dirty-cat
+sphinxext-opengraph
+matplotlib
+seaborn
+statsmodels
+pydata-sphinx-theme
