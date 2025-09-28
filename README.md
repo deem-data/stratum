@@ -7,7 +7,7 @@
 ## Goals
 
 - Provide an **opt-in Rust backend** for performance-critical parts of skrub.
-- Preserve skrub’s **Python API**; developers can flip an environment variable to enable Rust.
+- Preserve skrub’s **Python API**; developers can flip a flag to enable Rust.
 - Build cross-platform wheels (Windows / Linux / macOS) so users can install without a Rust toolchain.
 
 ---
@@ -25,17 +25,18 @@ Requirements:
 
 ## Usage
 
-To enable the Rust backend and other related features, use the environment variables or Python configuration flags:
+To enable the Rust backend and other related features, import stratum as skrub and enable the Rust backend:
 
-```bash
-export SKRUB_RUST=1     # Linux / macOS
-setx SKRUB_RUST 1       # Windows PowerShell
-```
-or
-
+Replace
 ```Python
 import skrub
-skrub.set_rust_config(enable_rust=True)
+from skrub import ...
+```
+with
+```Python
+import stratum
+from stratum import ...
+skrub.set_config(rust_backend=True)
 ```
 
 #### Test Code
@@ -44,11 +45,12 @@ skrub.set_rust_config(enable_rust=True)
 
 import os
 import pandas as pd
-import skrub
-from skrub import StringEncoder
+import stratum as skrub
+from stratum import StringEncoder
+skrub.set_config(rust_backend=True)
 
-skrub.set_rust_config(enable_rust=True, debug_timing=True, num_threads=0) #rust flags
-s = pd.Series(["foo", "bar", None, "lorem ipsum dolor"]) # nulls handled upstream
+#skrub.set_config(debug_timing=True, num_threads=0) # other rust flags
+s = pd.Series(["foo", "bar", None, "lorem ipsum dolor"])
 enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
 Z = enc.fit_transform(s)
 print(type(Z), Z.shape)
@@ -58,17 +60,19 @@ assert Z.shape[0] == len(s)
 
 ## Repository Layout
 
-```bash
+```bash  
 stratum/
-├─ pyproject.toml           # Python + Rust build config (maturin)
-├─ skrub/                   # Python sources (fork of skrub)
-│   ├─ __init__.py
-│   ├─ _string_encoder.py
-│   ├─ _rust_backend.py     # shim: checks env, exposes USE_RUST/HAVE_RUST
-│   └─ …
-└─ _rust/                   # Rust crate (PyO3 extension)
-   ├─ Cargo.toml
-   └─ src/lib.rs            # defines #[pymodule] fn _rust_backend_native
+├─ pyproject.toml             # Python + Rust build config (maturin)
+├─ stratum/
+│ ├─ __init__.py              # Façade over skrub
+│ ├─ config.py                # set_config/get_config + env sync
+│ ├─ _rust_backend.py         # Python <-> Rust shim (re-exports native fns)
+│ ├─ adapters/                # Public API (dispatch to Rust or fallback to skrub)
+│ │ └─ string_encoder.py      # RustyStringEncoder (subclass)
+│ └─ _rust_backend_native.*   # Compiled PyO3 extension (built)
+└─ _rust/                     # Rust crate (PyO3 extension)
+├─ Cargo.toml
+└─ src/lib.rs                 # Defines #[pymodule] fn _rust_backend_native(...)
 ```
 ---
 

@@ -1,13 +1,13 @@
 import os
 import pandas as pd
-import skrub
-from skrub import StringEncoder
-skrub.set_rust_config(enable_rust=True)
+import stratum as skrub
+from stratum import StringEncoder
+skrub.set_config(rust_backend=True)
 
 #os.environ['SKRUB_RUST'] = '1'
 #os.environ['SKRUB_RUST_DEBUG_TIMING'] = '1'
-skrub.set_rust_config(debug_timing=True)
-skrub.set_rust_config(num_threads=8)
+skrub.set_config(debug_timing=True)
+skrub.set_config(num_threads=8)
 
 s = pd.Series(["foo", "bar", None, "lorem ipsum dolor"]) # nulls handled upstream
 enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
@@ -15,14 +15,13 @@ Z = enc.fit_transform(s)
 print(type(Z), Z.shape)
 assert Z.shape[0] == len(s)
 
-skrub.set_rust_config(enable_rust=False)
+skrub.set_config(rust_backend=False)
 enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
 Z = enc.fit_transform(s)
 print(type(Z), Z.shape)
 
-skrub.set_rust_config(enable_rust=True)
-skrub.set_rust_config(debug_timing=False)
-# skrub.set_rust_config(allow_monkeypatch=False) #kill-switch
+skrub.set_config(rust_backend=True, debug_timing=False)
+# skrub.set_rust_config(allow_patch=False) #kill-switch
 enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
 Z = enc.fit_transform(s)
 print(type(Z), Z.shape)
