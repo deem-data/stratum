@@ -3,8 +3,8 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "stratum"
-version = "0.0.1"
+name = "stratum-ai" # PyPi name
+version = "0.0.0.dev0"
 description = "skrub with a Rust backend"
 readme = "README.md"
 authors = [{name = "Arnab Phani"}]
@@ -26,6 +26,10 @@ requires-python = ">=3.10"
 dependencies = [
     "skrub>=0.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/deem-data/stratum"
+Issues = "https://github.com/deem-data/stratum/issues"
 
 [tool.maturin]
 manifest-path = "_rust/Cargo.toml"

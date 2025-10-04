@@ -1,15 +1,19 @@
-#from __future__ import annotations
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from typing import Any, List
 
 from .config import set_config, get_config
 
+def _first_version(*names):
+    for n in names:
+        try:
+            return _dist_version(n)
+        except PackageNotFoundError:
+            pass
+    return "0+unknown"
+
 # Our own version
-try:
-    __version__ = _dist_version("stratum")
-except PackageNotFoundError:
-    __version__ = "0+unknown"
+__version__ = _first_version("stratum-ai", "stratum")
 
 # Import original skrub
 _skrub = import_module("skrub")
