@@ -5,8 +5,15 @@ import pytest
 import stratum as skrub
 from stratum import StringEncoder
 from stratum.adapters.string_encoder import RustyStringEncoder
-
 skrub.set_config(rust_backend=True, debug_timing=True, num_threads=8)
+
+def capture_std_out(capfd):
+    # Capture timing output
+    sys.stdout.flush()
+    sys.stderr.flush()
+    captured = capfd.readouterr()
+    combined_output = (captured.out or "") + (captured.err or "")
+    return combined_output
 
 @pytest.mark.parametrize("analyzer", ["char", "char_wb"])
 def test_string_encoder_result(analyzer, capfd):
@@ -19,13 +26,6 @@ def test_string_encoder_result(analyzer, capfd):
     Z = enc.fit_transform(s)
     assert Z.shape[0] == len(s)
 
-    # Capture timing output
-    sys.stdout.flush()
-    sys.stderr.flush()
-    captured = capfd.readouterr()
-    combined_output = (captured.out or "") + (captured.err or "")
-    #print(combined_output)
-
     # Assert if rust timing appeared (verifies that rust code is executed)
-    assert "[rust]" in combined_output
+    assert "[rust]" in capture_std_out(capfd)
 

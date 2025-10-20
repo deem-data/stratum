@@ -1,13 +1,12 @@
-use ndarray::{indices, Array, Array2, ArrayView2, Axis};
+use ndarray::{Array2, Axis};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyModule};
 use pyo3::{PyErr, exceptions::PyValueError};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
-use std::time::Instant;
-use rayon::{ThreadPool, ThreadPoolBuilder};
-use crate::util::{start_timing, print_timing, get_num_threads};
+use crate::threads::{get_thread_pool};
+use crate::util::{start_timing, print_timing};
 
 mod tokenize;   //n-gram extraction for char/char_wb
 mod hashing;    //stable fast hashing to [0, n_features)
@@ -15,6 +14,8 @@ mod tfidf;      //DF counting, IDF vector, TF*IDF, per-row L2 norm
 mod csr;
 mod fd;         //Frequent Directions
 mod util;
+mod threads;
+mod one_hot_encoder;
 
 // Simple mapping from domain error to PyErr
 fn to_pyerr(err: tfidf::Error) -> PyErr {
@@ -56,23 +57,11 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
         omega_t.push(col);
     }
 
-    // Create rayon thread pool
-    let num_threads = get_num_threads();
-    let pool: Option<ThreadPool> = if num_threads > 0 {
-        let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(num_threads).build()
-            .map_err(|e| PyErr::new::<PyValueError, _>(format!("Failed to build rayon pool: {e}")))?;
-        Some(thread_pool)
-    }
-    else { //num_threads = 0. Use global threadpool
-        None
-    };
-    let pool_ref = pool.as_ref();
-
+    // Get rayon thread pool
+    let pool = get_thread_pool();
 
     // Step 4: Compute Y = X · Ω  (n x out_w) in a single pass over CSR rows
     // TODO: Move this to CSR utility module
-    //let t0 = Instant::now();
     let t0 = start_timing();
     let mut y = Array2::<f32>::zeros((n_rows, out_w)); //dense y
     let mut build_y = || {
@@ -93,8 +82,8 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
                 }
             });
     };
-    match pool_ref {
-        Some(pool) => pool.install(build_y), //use custom threadpool
+    match pool {
+        Some(p) => p.install(build_y), //use custom threadpool
         None => build_y() //use global threadpool
     }
     print_timing("build y", t0);
@@ -102,7 +91,7 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
     // Step 5: Run FD on Y (n x out_w) -> Z (n x k)
     // FD operates on small width (out_w), making it cheap
     let t0 = start_timing();
-    let z = fd::fd_reduce(y.view(), k, pool_ref)?;
+    let z = fd::fd_reduce(y.view(), k, pool)?;
     print_timing("fd_reduce", t0);
 
     // Step 6: Return NumPy (zero-copy)
@@ -158,5 +147,7 @@ fn hashing_tfidf_csr(
 fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hashing_tfidf_csr, m)?)?;
     m.add_function(wrap_pyfunction!(fd_embed_from_csr, m)?)?;
+    m.add_function(wrap_pyfunction!(one_hot_encoder::ohe_transform_csr, m)?)?;
+    m.add_function(wrap_pyfunction!(one_hot_encoder::csr_to_dense, m)?)?;
     Ok(())
 }

@@ -26,19 +26,21 @@ employees_enc = vectorizer.fit_transform(employees)
 # pr.disable()
 print(f"Encoded data shape: {employees_enc.shape}")
 t2 = time()
-print(f"Encoding time: {t2 - t1:.3f} seconds")
+print(f"Encoding time: {t2 - t1:.3f} seconds\n")
 print(employees_enc.columns)
 
 # Explore the encodings
 print(vectorizer.kind_to_columns_)
 print("Fitted transformers to department column")
-print(vectorizer.transformers_["department"])
+print(vectorizer.transformers_["department"]) #low_cardinality
 print("Fitted transformers to division column")
-print(vectorizer.transformers_["division"])
-print(vectorizer.input_to_outputs_["date_first_hired"])
-# print(employees_enc[vectorizer.input_to_outputs_["date_first_hired"]])
-print(vectorizer.output_to_input_["department_BOA"])
-# print(vectorizer.all_processing_steps_["date_first_hired"])
+print(vectorizer.transformers_["division"]) #high_cardinality
+print("Fitted transformers to year_first_hired column")
+print(vectorizer.transformers_["year_first_hired"]) #numeric
+#print(vectorizer.input_to_outputs_["date_first_hired"])
+#print(employees_enc[vectorizer.input_to_outputs_["date_first_hired"]]) #datetime
+#print(vectorizer.output_to_input_["department_BOA"])
+#print(vectorizer.all_processing_steps_["date_first_hired"])
 print(vectorizer.all_processing_steps_["department"])
 
 # stats = pstats.Stats(pr).sort_stats("cumtime")
@@ -69,7 +71,7 @@ X, M = F1.transform_encode(spec=jspec)
 X_imputed = na_locf(X)
 X_cl = X_imputed.compute()
 t2 = time()
-print(f"Encoding time (SystemDS): {t2 - t1:.3f} seconds")
+print(f"\nEncoding time (SystemDS): {t2 - t1:.3f} seconds")
 # pr.disable()
 print(X_cl.shape)
 

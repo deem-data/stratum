@@ -67,3 +67,5 @@ def _to_list(col):
 # Re-export compiled rust functions
 hashing_tfidf_csr = getattr(native, "hashing_tfidf_csr", None) if native else None
 fd_embedding = getattr(native, "fd_embed_from_csr", None) if native else None
+ohe_transform_csr = getattr(native, "ohe_transform_csr", None) if native else None
+csr_to_dense = getattr(native, "csr_to_dense", None) if native else None

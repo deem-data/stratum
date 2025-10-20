@@ -1,8 +1,8 @@
 use ndarray::{Array2, ArrayView2, Axis, s};
-use ndarray_linalg::{Lapack, SVDInto, SVD};
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use ndarray_linalg::{SVDInto, SVD};
+use rayon::{ThreadPool};
 use rayon::prelude::*;
-use pyo3::{exceptions, exceptions::PyValueError, PyErr};
+use pyo3::{exceptions::PyValueError, PyErr};
 
 // Simple Frequent Directions (FD) implementation for a tall matrix Y (n x m), where
 // m is small (≈ k+p). Maintain a sketch B (l x m) with l = 2k (or slightly larger), then shrinks.
@@ -14,19 +14,6 @@ pub fn fd_reduce(y: ArrayView2<f32>, k: usize, pool_ref: Option<&ThreadPool>) ->
     }
 
     let ell = (2 * k).min(4 * k).max(k + 1); //TODO: tune
-
-    // Create rayon thread pool
-    /*let pool: Option<ThreadPool> = if n_threads > 0 {
-        let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(n_threads).build()
-            .map_err(|e| PyErr::new::<PyValueError, _>(format!("Failed to build rayon pool: {e}")))?;
-        Some(thread_pool)
-    }
-    else { //n_threads = 0. Use global threadpool
-        None
-    };
-    let pool_ref = pool.as_ref();*/
-
 
     // The sketch
     let mut b = Array2::<f32>::zeros((ell, m));

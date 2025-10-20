@@ -12,13 +12,16 @@ skrub.set_config(num_threads=8)
 s = pd.Series(["foo", "bar", None, "lorem ipsum dolor"]) # nulls handled upstream
 enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
 Z = enc.fit_transform(s)
+print(Z.columns)
 print(type(Z), Z.shape)
-assert Z.shape[0] == len(s)
+print(Z)
 
 skrub.set_config(rust_backend=False)
 enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
 Z = enc.fit_transform(s)
+print(Z.columns)
 print(type(Z), Z.shape)
+print(Z)
 
 skrub.set_config(rust_backend=True, debug_timing=False)
 # skrub.set_rust_config(allow_patch=False) #kill-switch

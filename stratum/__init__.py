@@ -24,10 +24,12 @@ from . import config as config
 
 # Expose our subclasses under the same names
 from .adapters.string_encoder import RustyStringEncoder as StringEncoder
+from .adapters.one_hot_encoder import RustyOneHotEncoder as OneHotEncoder
 
 # __all__ passthrough. Keep __all__ minimal
 __all__ = [
     "StringEncoder",
+    "OneHotEncoder",
     "config",
     "__version__",
     "__skrub_version__",
