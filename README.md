@@ -30,12 +30,12 @@ To enable the Rust backend and other related features, import stratum as skrub a
 Replace
 ```Python
 import skrub
-from skrub import ...
+from skrub import StringEncoder
 ```
 with
 ```Python
-import stratum
-from stratum import ...
+import stratum as skrub
+from stratum import StringEncoder
 skrub.set_config(rust_backend=True)
 ```
 
