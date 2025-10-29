@@ -27,16 +27,25 @@ dependencies = [
     "skrub>=0.3",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+benchmark = [
+    "lightgbm>=4.6.0",
+    "xgboost>=3.1.1",
+]
+
 [project.urls]
 Homepage = "https://github.com/deem-data/stratum"
 Issues = "https://github.com/deem-data/stratum/issues"
-
-[project.optional-dependencies]
-test = [
-    "pytest>=7.0",
-]
 
 [tool.maturin]
 manifest-path = "_rust/Cargo.toml"
 module-name = "stratum._rust_backend_native"
 python-source = "."
+
+[dependency-groups]
+dev = [
+    "maturin>=1.10.1",
+]
