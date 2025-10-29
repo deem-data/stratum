@@ -1,0 +1,73 @@
+name: Build & Test (Rust + Python)
+
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'examples/**'
+      - 'benchmarks/**'
+      - '.github/workflows/test.yml'
+      - '.gitignore'
+      - 'LICENSE.txt'
+    branches: [main, master]
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'examples/**'
+      - 'benchmarks/**'
+      - '.github/workflows/test.yml'
+      - '.gitignore'
+      - 'LICENSE.txt'
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]  # macOS 14 = Apple Silicon
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache Cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            _rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('_rust/Cargo.lock') }}
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Run Rust tests
+        working-directory: _rust
+        run: cargo test --release
+
+      - name: Build Rust extension
+        working-directory: _rust
+        run: maturin develop --release
+
+      - name: Install Python test dependencies
+        working-directory: stratum
+        run: |
+          pip install -r requirements.txt || true
+          pip install pytest
+
+      - name: Run Python tests
+        working-directory: stratum
+        run: pytest -v tests
