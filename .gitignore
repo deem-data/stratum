@@ -84,7 +84,6 @@ jupyterlite_contents
 .venv
 venv
 env_skrub
-uv.lock
 
 stratum/_rust_backend_native.abi3.so
 
