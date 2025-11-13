@@ -40,6 +40,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
       - name: Cache Cargo build
         uses: actions/cache@v4
         with:
@@ -49,18 +54,11 @@ jobs:
             _rust/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('_rust/Cargo.lock') }}
 
-      - name: Create virtual environment
-        run: python -m venv .venv
+      - name: Create virtual environment with uv
+        run: uv venv
 
-      - name: Activate virtual environment and install maturin in it
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            source .venv/Scripts/activate
-          else
-            source .venv/bin/activate
-          fi
-          pip install maturin
+      - name: Install maturin
+        run: uv pip install maturin
 
       - name: Run Rust tests
         working-directory: _rust
@@ -77,17 +75,8 @@ jobs:
           fi
           maturin develop --release
 
-      - name: Install Python test dependencies
-        shell: bash
-        working-directory: stratum
-        run: |
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            source ../.venv/Scripts/activate
-          else
-            source ../.venv/bin/activate
-          fi
-          pip install -r requirements.txt || true
-          pip install pytest
+      - name: Install project with test dependencies
+        run: uv sync --extra test
 
       - name: Run Python tests
         shell: bash
