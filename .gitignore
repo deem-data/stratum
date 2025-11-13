@@ -87,3 +87,10 @@ env_skrub
 uv.lock
 
 stratum/_rust_backend_native.abi3.so
+
+# Ignore input folders in benchmarks
+benchmarks/**/input/
+
+# Ignore any data files
+*.zip
+*.csv
