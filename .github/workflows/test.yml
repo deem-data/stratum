@@ -51,23 +51,53 @@ jobs:
             _rust/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('_rust/Cargo.lock') }}
 
-      - name: Install maturin
-        run: pip install maturin
+      - name: Create virtual environment
+        run: python -m venv .venv
+
+      - name: Activate virtual environment and install maturin in it
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            source .venv/Scripts/activate
+          else
+            source .venv/bin/activate
+          fi
+          pip install maturin
 
       - name: Run Rust tests
         working-directory: _rust
         run: cargo test --release
 
       - name: Build Rust extension
+        shell: bash
         working-directory: _rust
-        run: maturin develop --release
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            source ../.venv/Scripts/activate
+          else
+            source ../.venv/bin/activate
+          fi
+          maturin develop --release
 
       - name: Install Python test dependencies
+        shell: bash
         working-directory: stratum
         run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            source ../.venv/Scripts/activate
+          else
+            source ../.venv/bin/activate
+          fi
           pip install -r requirements.txt || true
           pip install pytest
 
       - name: Run Python tests
+        shell: bash
         working-directory: stratum
-        run: pytest -v tests
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            source ../.venv/Scripts/activate
+          else
+            source ../.venv/bin/activate
+          fi
+          pytest -v tests
