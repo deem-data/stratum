@@ -7,7 +7,6 @@ on:
       - '*.md'
       - 'examples/**'
       - 'benchmarks/**'
-      - '.github/workflows/test.yml'
       - '.gitignore'
       - 'LICENSE.txt'
     branches: [main, master]
@@ -17,7 +16,6 @@ on:
       - '*.md'
       - 'examples/**'
       - 'benchmarks/**'
-      - '.github/workflows/test.yml'
       - '.gitignore'
       - 'LICENSE.txt'
     branches: [main, master]
