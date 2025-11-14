@@ -5,27 +5,14 @@ use rayon::prelude::*;
 use crate::threads::get_thread_pool;
 use crate::util::{print_timing, start_timing};
 
-// Build a CSR one-hot matrix from per-feature integer codes
-#[pyfunction]
-#[pyo3(signature = (codes, n_cats, drop_idx))]
-pub fn ohe_transform_csr(
-    py: Python<'_>, codes: Vec<PyReadonlyArray1<i32>>, n_cats: Vec<usize>, drop_idx: Vec<Option<usize>>,
-) -> PyResult<(
-    Py<PyArray1<f32>>,  //data
-    Py<PyArray1<i32>>,  //indices
-    Py<PyArray1<i64>>,  //indptr
-    i64,                //n_rows
-    i64,                //n_cols (n_features)
-)> {
-    // Basic assertions
-    // Row i of codes contains the recoded feature i
-    let n_features = codes.len();
-    // assert n_features > 0
-    if n_features == 0 {return Err(pyo3::exceptions::PyValueError::new_err("code is empty"));}
-    // Borrow as Rust slices for fast access.
-    let code_slices: Vec<&[i32]> = codes.iter().map(|a| a.as_slice().unwrap()).collect();
-    let n_rows = code_slices[0].len();
-    // assert code length for all entries in code_slices are equal
+// Pure Rust compute to run without GIL
+fn compute_ohe_transform_csr(
+    codes_slices: &[&[i32]], 
+    n_cats: &[usize], 
+    drop_idx: &[Option<usize>]
+) -> (Vec<f32>, Vec<i32>, Vec<i64>, i64, i64) {
+    let n_features = codes_slices.len();
+    let n_rows = codes_slices[0].len();
 
     // Derive per-feature width after drop and global offsets
     let mut widths: Vec<usize> = Vec::with_capacity(n_features);
@@ -37,7 +24,7 @@ pub fn ohe_transform_csr(
         }
     }
     let mut offsets: Vec<usize> = vec![0; n_features];
-    let mut n_cols: usize = 0;
+    let mut n_cols:usize = 0;
     for j in 0..n_features {
         offsets[j] = n_cols;
         n_cols += widths[j];
@@ -53,7 +40,7 @@ pub fn ohe_transform_csr(
             .for_each(|(i, rc)| {
                 let mut c = 0usize; //per-row #nnz
                 for j in 0..n_features {
-                    let code = code_slices[j][i];
+                    let code = codes_slices[j][i];
                     if code >= 0 {
                         if let Some(d) = drop_idx[j] {
                             if (code as usize) == d {
@@ -64,7 +51,7 @@ pub fn ohe_transform_csr(
                     }
                 }
                 *rc = c;
-        });
+            });
     };
     match pool {
         Some(p) => p.install(count_nnz), //use custom threadpool
@@ -80,7 +67,7 @@ pub fn ohe_transform_csr(
     }
     let nnz = *indptr.last().unwrap() as usize;
 
-    // Allocate indices and data
+    // Allocate data
     let mut indices: Vec<i32> = vec![0; nnz];
     let mut data: Vec<f32> = vec![0f32; nnz];
 
@@ -95,7 +82,7 @@ pub fn ohe_transform_csr(
 
         let mut w = 0usize;
         for j in 0..n_features {
-            let k = code_slices[j][i];
+            let k = codes_slices[j][i];
             if k < 0 { continue; } // unknown/NaN → zeros
             if let Some(d) = drop_idx[j] {
                 if (k as usize) == d {
@@ -119,6 +106,34 @@ pub fn ohe_transform_csr(
         cursor = row_end;
     }
 
+    (data, indices, indptr, n_rows as i64, n_cols as i64)
+}
+
+// Build a CSR one-hot matrix from per-feature integer codes
+#[pyfunction]
+#[pyo3(signature = (codes, n_cats, drop_idx))]
+pub fn ohe_transform_csr(
+    py: Python<'_>, codes: Vec<PyReadonlyArray1<i32>>, n_cats: Vec<usize>, drop_idx: Vec<Option<usize>>,
+) -> PyResult<(
+    Py<PyArray1<f32>>,  //data
+    Py<PyArray1<i32>>,  //indices
+    Py<PyArray1<i64>>,  //indptr
+    i64,                //n_rows
+    i64,                //n_cols (n_features)
+)> {
+    // Basic assertions
+    // Row i of codes contains the recoded feature i
+    let n_features = codes.len();
+    // assert n_features > 0
+    if n_features == 0 {return Err(pyo3::exceptions::PyValueError::new_err("code is empty"));}
+    // Borrow as Rust slices for fast access.
+    let code_slices: Vec<&[i32]> = codes.iter().map(|a| a.as_slice().unwrap()).collect();
+
+    // Heavy compute without GIL
+    let (data, indices, indptr, n_rows, n_cols) = py.allow_threads(|| {
+        compute_ohe_transform_csr(&code_slices, &n_cats, &drop_idx)
+    });
+
     // Convert to NumPy without copying where possible. from_vec is zero-copy.
     let py_data = PyArray1::from_vec(py, data).to_owned();
     let py_indices = PyArray1::from_vec(py, indices).to_owned();
@@ -127,20 +142,17 @@ pub fn ohe_transform_csr(
     Ok((Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows as i64, n_cols as i64))
 }
 
-#[pyfunction]
-#[pyo3(signature = (data, indices, indptr, n_rows, n_cols))]
-pub fn csr_to_dense(py: Python<'_>, data: PyReadonlyArray1<f32>, indices: PyReadonlyArray1<i32>,
-    indptr: PyReadonlyArray1<i64>, n_rows: usize, n_cols: usize) -> PyResult<Py<PyArray2<f32>>>
-{
-    let data = data.as_slice().unwrap();
-    let indices = indices.as_slice().unwrap();
-    let indptr = indptr.as_slice().unwrap();
-    if indptr.len() != n_rows + 1 {
-        return Err(pyo3::exceptions::PyValueError::new_err("indptr length mismatch"));
-    }
+// Pure Rust CSR to dense conversion without GIL
+fn compute_csr_to_dense(
+    data: &[f32],
+    indices: &[i32],
+    indptr: &[i64],
+    n_rows: usize,
+    n_cols: usize
+) -> ndarray::Array2<f32> {
+    let pool = get_thread_pool();
 
     // Create dense output and fill rows in parallel
-    let pool = get_thread_pool();
     let t0 = start_timing();
     let mut out = Array2::<f32>::zeros((n_rows, n_cols));
     let mut densify = || {
@@ -162,6 +174,25 @@ pub fn csr_to_dense(py: Python<'_>, data: PyReadonlyArray1<f32>, indices: PyRead
         None => densify() //use global threadpool
     };
     print_timing("CSR to dense copy", t0);
+    out
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, indices, indptr, n_rows, n_cols))]
+pub fn csr_to_dense(py: Python<'_>, data: PyReadonlyArray1<f32>, indices: PyReadonlyArray1<i32>,
+    indptr: PyReadonlyArray1<i64>, n_rows: usize, n_cols: usize) -> PyResult<Py<PyArray2<f32>>>
+{
+    let data = data.as_slice().unwrap();
+    let indices = indices.as_slice().unwrap();
+    let indptr = indptr.as_slice().unwrap();
+    if indptr.len() != n_rows + 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err("indptr length mismatch"));
+    }
+
+    // Heavy compute without GIL
+    let out = py.allow_threads(|| {
+        compute_csr_to_dense(data, indices, indptr, n_rows, n_cols)
+    });
 
     // Return NumPy (zero-copy).
     let py_out = out.into_pyarray(py).to_owned();

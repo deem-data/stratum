@@ -60,7 +60,8 @@ class RustyOneHotEncoder(_SKOneHot):
                  sparse_output=False,
                  **kwargs):
         super().__init__(drop=drop, dtype=dtype, handle_unknown=handle_unknown, sparse_output=sparse_output, **kwargs)
-        self._supported_params = (drop == "if_binary" and dtype == np.float32
+        self._supported_params = (drop == "if_binary"
+                                  and np.dtype(self.dtype) == np.dtype(np.float32) #'float32'/np.float32/np.dtype('float32)
                                   and handle_unknown == "ignore" and len(kwargs) == 0)
 
     def fit(self, X, y=None):
@@ -92,6 +93,7 @@ class RustyOneHotEncoder(_SKOneHot):
         data, indices, indptr, n_rows, n_cols = rb.ohe_transform_csr(codes, n_cats, drop_idx)
         rb.print_timing("ohe_transform_csr", t0)
 
+        out_dt = np.dtype(self.dtype)
         if self.sparse_output:
             # Make a SciPy CSR
             sparse_mat = sp.csr_matrix(
@@ -99,7 +101,7 @@ class RustyOneHotEncoder(_SKOneHot):
                  np.asarray(indices, dtype=np.int32),
                  np.asarray(indptr, dtype=np.int64)),
                 shape=(int(n_rows), int(n_cols)),
-                dtype=np.float32,
+                dtype=out_dt,
             )
             return sparse_mat
 
@@ -107,6 +109,8 @@ class RustyOneHotEncoder(_SKOneHot):
         #print("INFO: Using Rust densifier")
         t0 = rb.start_timing()
         dense_mat = rb.csr_to_dense(data, indices, indptr, n_rows, n_cols) #2.5x faster than scipy toarray
+        if out_dt != np.dtype(np.float32):
+            dense_mat = dense_mat.astype(out_dt, copy=False)
         rb.print_timing("csr_to_dense", t0)
         return dense_mat
 

@@ -28,23 +28,16 @@ fn to_pyerr(err: tfidf::Error) -> PyErr {
     PyErr::new::<PyValueError, _>(msg)
 }
 
-#[pyfunction]
-#[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, oversample=16, seed=None))]
-fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<PyArray1<i32>>,
-    indptr: Bound<PyArray1<i64>>, n_rows: usize, n_cols: usize, k: usize,
-    oversample: usize, seed: Option<u64>) -> PyResult<Py<PyArray2<f32>>>
+fn compute_fd_embed(data: &[f32], indices: &[i32], indptr: &[i64],
+    n_rows: usize, n_cols: usize, k: usize, oversample: usize, seed: Option<u64>) -> Result<Array2<f32>, PyErr>
 {
-    // Step 1: Zero-copy view of NumPy arrays
-    let data = unsafe { data.as_slice()? };
-    let indices = unsafe { indices.as_slice()? };
-    let indptr = unsafe { indptr.as_slice()? };
-
     // Step 2: Gather the parameters
     let out_w = k + oversample; //k+p
     let s = seed.unwrap_or(0xC0FFEE); //I love coffee :)
 
     // Step 3: Build Ω (d x out_w), but don't store full Ω. Generate on the fly per-column.
     // We pre-allocate Ω^T as Vec<Vec<f32>>; width is small (<= 128).
+    // Do all heavy work without the GIL (allow_threads closure)
     // TODO: Avoid materializing omega. Stream random f32 numbers in during building Y
     let mut rng = StdRng::seed_from_u64(s);
     let mut omega_t: Vec<Vec<f32>> = Vec::with_capacity(out_w);
@@ -93,6 +86,23 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
     let t0 = start_timing();
     let z = fd::fd_reduce(y.view(), k, pool)?;
     print_timing("fd_reduce", t0);
+    Ok(z)
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, oversample=16, seed=None))]
+fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<PyArray1<i32>>,
+    indptr: Bound<PyArray1<i64>>, n_rows: usize, n_cols: usize, k: usize,
+    oversample: usize, seed: Option<u64>) -> PyResult<Py<PyArray2<f32>>>
+{
+    // Step 1: Zero-copy view of NumPy arrays
+    let data = unsafe { data.as_slice()? };
+    let indices = unsafe { indices.as_slice()? };
+    let indptr = unsafe { indptr.as_slice()? };
+
+    let z = py.allow_threads(||
+        compute_fd_embed(data, indices, indptr, n_rows, n_cols, k, oversample, seed))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("fd_embed failed: {e}")))?;
 
     // Step 6: Return NumPy (zero-copy)
     let py_z = z.into_pyarray(py).to_owned();
