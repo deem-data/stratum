@@ -15,6 +15,10 @@ def _first_version(*names):
 # Our own version
 __version__ = _first_version("stratum-ai", "stratum")
 
+# Apply Stratum patching to upstream skrub automatically
+from .patching import patch_skrub
+patch_skrub()
+
 # Import original skrub
 _skrub = import_module("skrub")
 __skrub_version__ = _dist_version("skrub")
