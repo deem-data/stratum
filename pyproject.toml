@@ -35,6 +35,9 @@ benchmark = [
     "lightgbm>=4.6.0",
     "xgboost>=3.1.1",
 ]
+dev = [
+    "jupyter",
+]
 
 [project.urls]
 Homepage = "https://github.com/deem-data/stratum"
