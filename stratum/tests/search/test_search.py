@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO) # switch to DEBUG for showing the DataOps plan during optimization
 
 class SearchTest(unittest.TestCase):
     def setUp(self):
@@ -43,7 +43,6 @@ class SearchTest(unittest.TestCase):
         y2 = X2B.skb.apply(RandomForestRegressor(random_state=123), y=y)
         y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
         y = optimize(y)
-        y.skb.draw_graph().open()
         grid_search(y)
 
 
