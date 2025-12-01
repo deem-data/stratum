@@ -10,19 +10,16 @@ from stratum.search import grid_search
 from time import time
 
 def pipeline_definition(show_graph=False):
+    # csv file contains the data from sklearn.datasets.fetch_california_housing
     df_path = "input/train.csv"
     target = "MedHouseVal"
 
-    # 2. Skrub DataOps plan (feature engineering in pipeline)
     df_path = skrub.as_data_op(df_path)
     df = df_path.skb.apply_func(pd.read_csv).skb.subsample(n=100)
 
-    # Mark y and X
     y = df[target].skb.mark_as_y()
     X = df.drop(columns=[target]).skb.mark_as_X()
-    # X = X.skb.apply_func(lambda x: (x, print("hello"))[0])
 
-    # Feature engineering steps (each as a separate operation)
     def feat_eng(X):
         return X.assign(BedroomsPerRoom=X["AveBedrms"] / X["AveRooms"],
         IncomeSquared=X["MedInc"] ** 2,
