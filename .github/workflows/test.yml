@@ -78,7 +78,7 @@ jobs:
       - name: Install project with test dependencies
         run: uv sync --extra test
 
-      - name: Run Python tests
+      - name: Run Python tests with coverage
         shell: bash
         working-directory: stratum
         run: |
@@ -87,4 +87,12 @@ jobs:
           else
             source ../.venv/bin/activate
           fi
-          pytest -v tests
+          pytest -v --cov=stratum --cov-report=term-missing --cov-report=xml tests
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./stratum/coverage.xml
+          flags: unittests
+          name: codecov-${{ matrix.os }}-py${{ matrix.python-version }}
+          fail_ci_if_error: false
