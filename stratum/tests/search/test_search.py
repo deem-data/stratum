@@ -12,12 +12,19 @@ logging.basicConfig(level=logging.INFO) # switch to DEBUG for showing the DataOp
 class SearchTest(unittest.TestCase):
     def setUp(self):
         self.df = pd.DataFrame({
-            "x": [1, 2, 3],
-            "y": [4, 5, 6],
+            "x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "y": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
             "datetime": [
                 "2025-11-01 10:00:00",
                 "2025-11-02 15:30:00",
-                "2025-11-03 09:45:00"
+                "2025-11-03 09:45:00",
+                "2025-11-04 12:00:00",
+                "2025-11-05 14:30:00",
+                "2025-11-06 16:45:00",
+                "2025-11-07 18:00:00",
+                "2025-11-08 20:30:00",
+                "2025-11-09 22:45:00",
+                "2025-11-10 01:00:00",
             ]
         })
 
@@ -43,8 +50,10 @@ class SearchTest(unittest.TestCase):
         y2 = X2B.skb.apply(RandomForestRegressor(random_state=123), y=y)
         y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
         y = optimize(y)
-        grid_search(y)
-
+        results = grid_search(y)
+        # results = y.skb.make_grid_search(fitted=True).results_
+        print(type(results))
+        print(results)
 
 if __name__ == "__main__":
     unittest.main()
