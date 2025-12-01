@@ -30,6 +30,8 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pytest-cov",
+    "coverage[toml]",
 ]
 benchmark = [
     "lightgbm>=4.6.0",
@@ -52,3 +54,28 @@ python-source = "."
 dev = [
     "maturin>=1.10.1",
 ]
+
+[tool.coverage.run]
+source = ["stratum"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/_rust_backend_native.*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+precision = 2
+show_missing = true
+skip_covered = false
+
+[tool.coverage.html]
+directory = "htmlcov"
