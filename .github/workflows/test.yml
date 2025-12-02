@@ -29,7 +29,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-14]  # macOS 14 = Apple Silicon
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.14"]
 
     steps:
       - name: Checkout repository
@@ -79,6 +79,15 @@ jobs:
         run: uv sync --extra test
 
       - name: Run Python tests with coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        shell: bash
+        working-directory: stratum
+        run: |
+          source ../.venv/bin/activate
+          pytest -v --cov=stratum --cov-config=../pyproject.toml --cov-branch --cov-report=term-missing --cov-report=xml tests
+
+      - name: Run Python tests
+        if: matrix.os != 'ubuntu-latest' || matrix.python-version != '3.12'
         shell: bash
         working-directory: stratum
         run: |
@@ -87,12 +96,71 @@ jobs:
           else
             source ../.venv/bin/activate
           fi
-          pytest -v --cov=stratum --cov-report=term-missing --cov-report=xml tests
+          pytest -v tests
 
       - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
           file: ./stratum/coverage.xml
           flags: unittests
-          name: codecov-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: codecov-ubuntu-py3.12
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+      - name: Upload coverage artifact
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ./stratum/coverage.xml
+          retention-days: 1
+
+  coverage-check:
+    name: Coverage Threshold Check
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: needs.build-test.result == 'success'
+    
+    steps:
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+
+      - name: Check coverage threshold
+        run: |
+          python3 -c "
+          import xml.etree.ElementTree as ET
+          import sys
+          
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          
+          # Get coverage percentage from XML
+          line_rate = float(root.get('line-rate', 0))
+          branch_rate_str = root.get('branch-rate')
+          
+          if branch_rate_str is not None:
+              branch_rate = float(branch_rate_str)
+              coverage_percent = (line_rate + branch_rate) / 2 * 100
+              print(f'Line coverage: {line_rate * 100:.2f}%')
+              print(f'Branch coverage: {branch_rate * 100:.2f}%')
+              print(f'Overall coverage: {coverage_percent:.2f}%')
+          else:
+              # Fallback to line coverage only if branch coverage not available
+              coverage_percent = line_rate * 100
+              print(f'Line coverage: {line_rate * 100:.2f}%')
+              print(f'Branch coverage: Not available (use --cov-branch flag)')
+              print(f'Overall coverage: {coverage_percent:.2f}% (line coverage only)')
+          
+          # Coverage threshold (adjust as needed)
+          threshold = 80.0
+          print(f'Threshold: {threshold}%')
+          
+          if coverage_percent < threshold:
+              print(f'ERROR: Coverage {coverage_percent:.2f}% is below threshold {threshold}%')
+              sys.exit(1)
+          else:
+              print(f'SUCCESS: Coverage {coverage_percent:.2f}% meets threshold {threshold}%')
+          "

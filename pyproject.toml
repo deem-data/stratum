@@ -58,7 +58,8 @@ dev = [
 [tool.coverage.run]
 source = ["stratum"]
 omit = [
-    "*/tests/*",
+    "stratum/tests/*",
+    "**/tests/**",
     "*/__pycache__/*",
     "*/_rust_backend_native.*",
 ]
