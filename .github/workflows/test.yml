@@ -84,7 +84,7 @@ jobs:
         working-directory: stratum
         run: |
           source ../.venv/bin/activate
-          pytest -v --cov=stratum --cov-branch --cov-report=term-missing --cov-report=xml tests
+          pytest -v --cov=stratum --cov-config=../pyproject.tom --cov-branch --cov-report=term-missing --cov-report=xml tests
 
       - name: Run Python tests
         if: matrix.os != 'ubuntu-latest' || matrix.python-version != '3.12'
