@@ -1,6 +1,7 @@
 import unittest
 
 from sklearn.preprocessing import StandardScaler
+from skrub import TableVectorizer
 
 import stratum as skrub
 from stratum.logical_optimizer.utils import equals_data_op, hash_data_op, update_data_op
@@ -111,11 +112,42 @@ class LogicalOptimizerUtilsTest(unittest.TestCase):
 
     def test_check_for_equivalence15(self):
         data = skrub.var("data", self.df)
+        enc = StandardScaler()
+        enc2 = StandardScaler()
+        y1 = data.skb.apply(enc, cols=[])
+        y2 = data.skb.apply(enc2, cols=[])
+        self.assertTrue(equals_data_op(y1, y2))
+
+    def test_check_for_equivalence16(self):
+        data = skrub.var("data", self.df)
         enc = StandardScaler(with_mean=False)
         enc2 = StandardScaler(with_mean=True)
         y1 = data.skb.apply(enc)
         y2 = data.skb.apply(enc2)
         self.assertFalse(equals_data_op(y1, y2))
+
+    def test_check_for_inequality_apply1(self):
+        data = skrub.var("data", self.df)
+        y1 = data.skb.apply_func(pre_process)
+        self.assertFalse(equals_data_op(y1, data))
+
+    def test_check_for_inequality_apply2(self):
+        data = skrub.var("data", self.df)
+        y1 = data.skb.apply(StandardScaler())
+        y2 = data.skb.apply(TableVectorizer())
+        self.assertFalse(equals_data_op(y1, data))
+
+    def test_check_for_inequality_apply3(self):
+        data = skrub.var("data", self.df)
+        y1 = data.skb.apply(StandardScaler())
+        y2 = y1.skb.apply(StandardScaler())
+        self.assertFalse(equals_data_op(y1, y2))
+
+    def test_check_for_inequality_apply4(self):
+        data = skrub.var("data", self.df)
+        y1 = data.skb.apply(StandardScaler())
+        y2 = data.skb.apply(StandardScaler(), cols=[])
+        self.assertFalse(equals_data_op(y1, data))
 
 
     def assert_hash_consistency(self, op1, op2):
