@@ -50,8 +50,8 @@ class SearchTest(unittest.TestCase):
         y2 = X2B.skb.apply(RandomForestRegressor(random_state=123), y=y)
         y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
         y = optimize(y)
-        results = grid_search(y)
-        # results = y.skb.make_grid_search(fitted=True).results_
+        results, preds = grid_search(y, return_predictions=True)
+        # results_skrub = y.skb.make_grid_search(fitted=True).results_
         print(type(results))
         print(results)
 

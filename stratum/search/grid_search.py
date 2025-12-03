@@ -41,18 +41,75 @@ class GridSearch:
     
         return [(field, replace_dataop(getattr(impl, field))) for field in impl._fields]
 
-    def grid_search(self):
+    def grid_search(self, return_predictions=False):
+        # prototype for sequential top-down iteration of the DAG
         if logger.isEnabledFor(logging.DEBUG):
             self.dag.skb.draw_graph().open()
 
-        # prototype sequential top down iteration of the DAG
+        # start with computing till X and y node
+        node_id_x, node_id_y = self.compute_Xy()
+        position_after = max(node_id_x, node_id_y)
+        original_x = self.outputs[node_id_x]
+        original_y = self.outputs[node_id_y]
 
+        results = []
+        predictions = []
+
+        if self.cv is None:
+            self.cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
+        for i, (train_index, test_index) in enumerate(self.cv.split(self.outputs[node_id_x])):
+            logger.debug(f"CV Fold Nr. {i+1}")
+            x_train = original_x.iloc[train_index]
+            x_test = original_x.iloc[test_index]
+            y_train = original_y.iloc[train_index]
+            y_test = original_y.iloc[test_index]
+
+            # fit the pipeline
+            self.fit(node_id_x, node_id_y, position_after, x_train, y_train)
+
+            # predict the pipeline
+            df = self.predict(node_id_x, node_id_y, position_after, x_test)
+
+            if return_predictions:
+                predictions.append(df.copy())
+
+            # scoring
+            df["scores"] = df["vals"].apply(
+                lambda a: mean_squared_error(y_test, a))*(-1 if self.scoring == "neg_mean_squared_error" else 1)
+            df = df.drop("vals", axis=1)
+            results.append(df)
+
+        results = pd.concat(results, axis=0)
+        results = results.groupby("id").aggregate("mean").sort_values(by="scores", ascending=False)
+
+        return results, predictions if return_predictions else results
+
+
+    def predict(self, node_id_x: int, node_id_y: int, position_after: int, x_test):
+        self.mode = "predict"
+        self.outputs[node_id_x] = x_test
+        self.outputs[node_id_y] = None  # we don't need the y for prediction
+
+        for node in self.order[(position_after + 1):]:
+            self.outputs[node] = self.process_op(self.nodes[node], node)
+
+        return pd.DataFrame(self.outputs[self.order[-1]])
+
+    def fit(self, node_id_x: int, node_id_y: int, position_after: int, x_train, y_train):
+        self.mode = "fit_transform"
+        self.outputs[node_id_x] = x_train
+        self.outputs[node_id_y] = y_train
+        for node in self.order[(position_after + 1):]:
+            self.outputs[node] = self.process_op(self.nodes[node], node)
+
+    def compute_Xy(self) -> tuple[int, int]:
         # iterate till we find the X and y nodes
         position_of_X = None
         position_of_y = None
         node_id_X = None
         node_id_y = None
-        for i,node in enumerate(self.order):
+        for i, node in enumerate(self.order):
             current_op = self.nodes[node]
             current_output = self.process_op(current_op, node)
             self.outputs[node] = current_output
@@ -64,53 +121,8 @@ class GridSearch:
                 position_of_y = i
             if position_of_X is not None and position_of_y is not None:
                 break
-        
-        if self.cv is None:
-            self.cv = KFold(n_splits=5, shuffle=True, random_state=42)
-            
-        position_after = max(position_of_X, position_of_y)
 
-        original_X = self.outputs[node_id_X]
-        original_y = self.outputs[node_id_y]
-
-        df_out = []
-        
-        for i, (train_index, test_index) in enumerate(self.cv.split(self.outputs[node_id_X])):
-            logger.debug(f"CV Fold Nr. {i+1}")
-            X_train = self.outputs[node_id_X].iloc[train_index]
-            X_test = self.outputs[node_id_X].iloc[test_index]
-            y_train = self.outputs[node_id_y].iloc[train_index]
-            y_test = self.outputs[node_id_y].iloc[test_index]
-
-            # fit the pipeline
-            self.mode = "fit_transform"
-            self.outputs[node_id_X] = X_train
-            self.outputs[node_id_y] = y_train
-            for node in self.order[(position_after+1):]:
-                self.outputs[node] = self.process_op(self.nodes[node], node)
-            
-            
-            # predict the pipeline
-            self.mode = "predict"
-            self.outputs[node_id_X] = X_test
-            self.outputs[node_id_y] = None # we don't need the y for prediction
-            for node in self.order[(position_after+1):]:
-                self.outputs[node] = self.process_op(self.nodes[node], node)
-
-            df = pd.DataFrame(self.outputs[node])
-            weight = 1
-            if self.scoring == "neg_mean_squared_error":
-                weight = -1
-            df["scores"] = df["vals"].apply(lambda a: mean_squared_error(y_test, a))*weight
-            df = df.drop("vals", axis=1)
-            df_out.append(df)
-
-            # reset the outputs for the next fold
-            self.outputs[node_id_X] = original_X
-            self.outputs[node_id_y] = original_y
-        df_out = pd.concat(df_out, axis=0)
-        df_out = df_out.groupby("id").aggregate("mean").sort_values(by="scores", ascending=False)
-        return df_out
+        return node_id_X, node_id_y
 
     def process_op(self, dataop: DataOp, node: int):
         impl = dataop._skrub_impl
@@ -148,7 +160,7 @@ class GridSearch:
         return current_output
 
 
-def grid_search(dag: DataOp, cv=None, scoring=None):
+def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
     # dag.skb.draw_graph().open()
-    search = GridSearch(dag, cv, scoring).grid_search()
+    search = GridSearch(dag, cv, scoring).grid_search(return_predictions)
     return search
