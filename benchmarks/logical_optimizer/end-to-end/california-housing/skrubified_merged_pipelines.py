@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 
 from stratum.logical_optimizer import optimize
-from stratum.search import grid_search
+from stratum.runtime import grid_search
 from time import time
 
 def pipeline_definition(show_graph=False):

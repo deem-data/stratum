@@ -6,7 +6,7 @@ from sklearn.linear_model import Ridge, LinearRegression, LogisticRegression
 from sklearn.svm import LinearSVC
 
 from stratum.logical_optimizer import optimize
-from stratum.search import grid_search
+from stratum.runtime import grid_search
 
 import stratum as skrub
 import logging
@@ -125,7 +125,7 @@ def run_tfidf_pipeline_benchmark(stratum: bool = False):
 
     stats = np.vstack(list_of_stats)
 
-    columns_results = ["n_rows","optimize", "search"]
+    columns_results = ["n_rows","optimize", "runtime"]
     df = pd.DataFrame(stats, columns=columns_results)
 
     columns_results.remove("n_rows")

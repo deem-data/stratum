@@ -1,6 +1,6 @@
 import pandas as pd
 from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 from skrub._data_ops import DataOp
 from skrub._data_ops._evaluation import _Graph
 import logging
@@ -10,36 +10,33 @@ from skrub._data_ops._data_ops import Value
 from skrub._data_ops._choosing import Choice
 logger = logging.getLogger(__name__)
 
-class GridSearch:
+
+def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
+    # dag.skb.draw_graph().open()
+    return Runtime(dag, cv, scoring).grid_search(return_predictions)
+
+def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
+    return Runtime(dag, None, None).evaluate(seed, test_size)
+
+class Runtime:
     def __init__(self, dag: DataOp, cv, scoring):
         self.dag = dag
-        self.graph = _Graph().run(dag)
-        self.nodes = self.graph["nodes"]
-        self.parents = self.graph["parents"]
-        self.children = self.graph["children"]
-        self.order = topological_traverse(self.nodes, self.parents, self.children)
-        self.outputs = {}
         self.mode = "fit_transform"
-        self.env = {}
-        self.cv = cv
-        self.scoring = scoring
-    
-    def replace_fields_with_values(self, impl, children):
-        child_iter = iter(children)
-        
-        def replace_dataop(value):
-            """Recursively replace DataOp instances with their outputs."""
-            if isinstance(value, DataOp):
-                return self.outputs[next(child_iter)]
-            elif isinstance(value, (list, tuple)):
-                new_seq = [replace_dataop(item) for item in value]
-                return type(value)(new_seq)
-            elif isinstance(value, dict):
-                return {key: replace_dataop(val) for key, val in value.items()}
-            else:
-                return value
-    
-        return [(field, replace_dataop(getattr(impl, field))) for field in impl._fields]
+        g = _Graph().run(dag)
+        self.nodes, self.parents, self.children = g["nodes"], g["parents"], g["children"]
+        self.order = topological_traverse(self.nodes, self.parents, self.children)
+        self.cv, self.scoring = cv,scoring
+        self.outputs, self.env = {}, {}
+        self.full_x, self.full_y = None, None
+        self.node_x, self.node_y, self.pos_xy = None, None, None
+
+    def evaluate(self, seed: int = 42, test_size = 0.2):
+        self.compute_xy()
+        x_train, x_test, y_train, y_test = train_test_split(self.full_x, self.full_y, test_size=test_size, random_state=seed)
+        self.compute(self.pos_xy, x_train, y_train)
+        pred = self.compute(self.pos_xy, x_test, mode="predict")
+        return pred
+
 
     def grid_search(self, return_predictions=False):
         # prototype for sequential top-down iteration of the DAG
@@ -47,30 +44,20 @@ class GridSearch:
             self.dag.skb.draw_graph().open()
 
         # start with computing till X and y node
-        node_id_x, node_id_y = self.compute_Xy()
-        position_after = max(node_id_x, node_id_y)
-        original_x = self.outputs[node_id_x]
-        original_y = self.outputs[node_id_y]
-
-        results = []
-        predictions = []
+        self.compute_xy()
+        results, predictions = [], []
 
         if self.cv is None:
             self.cv = KFold(n_splits=5, shuffle=True, random_state=42)
 
-        for i, (train_index, test_index) in enumerate(self.cv.split(self.outputs[node_id_x])):
+        for i, (train_index, test_index) in enumerate(self.cv.split(self.outputs[self.node_x])):
             logger.debug(f"CV Fold Nr. {i+1}")
-            x_train = original_x.iloc[train_index]
-            x_test = original_x.iloc[test_index]
-            y_train = original_y.iloc[train_index]
-            y_test = original_y.iloc[test_index]
+            x_train, x_test = self.full_x.iloc[train_index], self.full_x.iloc[test_index]
+            y_train, y_test = self.full_y .iloc[train_index], self.full_y .iloc[test_index]
 
-            # fit the pipeline
-            self.fit(node_id_x, node_id_y, position_after, x_train, y_train)
-
-            # predict the pipeline
-            df = self.predict(node_id_x, node_id_y, position_after, x_test)
-
+            # fit and predict the pipeline
+            self.compute(self.pos_xy, x_train, y_train)
+            df = self.compute(self.pos_xy, x_test, mode="predict")
             if return_predictions:
                 predictions.append(df.copy())
 
@@ -85,44 +72,29 @@ class GridSearch:
 
         return results, predictions if return_predictions else results
 
-
-    def predict(self, node_id_x: int, node_id_y: int, position_after: int, x_test):
-        self.mode = "predict"
-        self.outputs[node_id_x] = x_test
-        self.outputs[node_id_y] = None  # we don't need the y for prediction
-
-        for node in self.order[(position_after + 1):]:
+    def compute(self, start_pos: int, x, y = None, mode="fit_transform"):
+        self.mode = mode
+        self.outputs[self.node_x] = x
+        self.outputs[self.node_y] = y
+        for node in self.order[(start_pos + 1):]:
             self.outputs[node] = self.process_op(self.nodes[node], node)
 
-        return pd.DataFrame(self.outputs[self.order[-1]])
+        return pd.DataFrame(self.outputs[self.order[-1]]) if mode == "predict" else None
 
-    def fit(self, node_id_x: int, node_id_y: int, position_after: int, x_train, y_train):
-        self.mode = "fit_transform"
-        self.outputs[node_id_x] = x_train
-        self.outputs[node_id_y] = y_train
-        for node in self.order[(position_after + 1):]:
-            self.outputs[node] = self.process_op(self.nodes[node], node)
-
-    def compute_Xy(self) -> tuple[int, int]:
+    def compute_xy(self):
         # iterate till we find the X and y nodes
-        position_of_X = None
-        position_of_y = None
-        node_id_X = None
-        node_id_y = None
+        pos_x, pos_y = None, None
         for i, node in enumerate(self.order):
             current_op = self.nodes[node]
-            current_output = self.process_op(current_op, node)
-            self.outputs[node] = current_output
+            self.outputs[node]  = self.process_op(current_op, node)
             if current_op.skb.is_X:
-                position_of_X = i
-                node_id_X = node
+                pos_x, self.node_x = i, node
             elif current_op.skb.is_y:
-                node_id_y = node
-                position_of_y = i
-            if position_of_X is not None and position_of_y is not None:
+                pos_y, self.node_y,  = i, node
+            if pos_x is not None and pos_y is not None:
                 break
-
-        return node_id_X, node_id_y
+        self.full_x, self.full_y = self.outputs[self.node_x], self.outputs[self.node_y]
+        self.pos_xy = max(pos_x, pos_y)
 
     def process_op(self, dataop: DataOp, node: int):
         impl = dataop._skrub_impl
@@ -148,8 +120,6 @@ class GridSearch:
                     break
                 if isinstance(last_yield, DataOp):
                     last_yield = self.outputs[next(child_iter)]
-
-                    
         else:
             try:
                 fields = self.replace_fields_with_values(impl, children=self.children.get(node,[]))
@@ -159,8 +129,19 @@ class GridSearch:
                 raise Exception(f"Error processing implementation '{impl}' [Node {node}]: {e}")
         return current_output
 
+    def replace_fields_with_values(self, impl, children):
+        child_iter = iter(children)
 
-def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
-    # dag.skb.draw_graph().open()
-    search = GridSearch(dag, cv, scoring).grid_search(return_predictions)
-    return search
+        def replace_dataop(value):
+            """Recursively replace DataOp instances with their outputs."""
+            if isinstance(value, DataOp):
+                return self.outputs[next(child_iter)]
+            elif isinstance(value, (list, tuple)):
+                new_seq = [replace_dataop(item) for item in value]
+                return type(value)(new_seq)
+            elif isinstance(value, dict):
+                return {key: replace_dataop(val) for key, val in value.items()}
+            else:
+                return value
+
+        return [(field, replace_dataop(getattr(impl, field))) for field in impl._fields]
