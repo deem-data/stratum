@@ -2,14 +2,10 @@ import unittest
 import skrub
 from stratum.runtime import grid_search
 from stratum.logical_optimizer import optimize
-from sklearn.ensemble import RandomForestRegressor
-import pandas as pd
-import numpy as np
-import logging
-from sklearn.model_selection import cross_val_predict, KFold
+from sklearn.model_selection import KFold
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1, datetime_pipeline2
-
-logging.basicConfig(level=logging.INFO) # switch to DEBUG for showing the DataOps plan during optimization
+import logging
+logging.basicConfig(level=logging.INFO)
 
 class SearchTest(RuntimeTest):
     def test_search(self):

@@ -2,19 +2,13 @@ import unittest
 from sklearn.datasets import make_regression
 from sklearn.preprocessing import StandardScaler
 import skrub
-from skrub._data_ops._data_ops import DataOp
-
 from stratum.logical_optimizer import optimize
 from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
-import logging
-
-from stratum.runtime.runtime import evaluate
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1
-import numpy as np
 
-
-logging.basicConfig(level=logging.INFO) # switch to DEBUG for showing the DataOps plan during optimization
+import logging
+logging.basicConfig(level=logging.INFO)
 
 
 class EvaluateTest(RuntimeTest):
@@ -48,7 +42,6 @@ class EvaluateTest(RuntimeTest):
         pred = x_scaled.skb.apply(RandomForestRegressor(random_state=42), y=y)
         pred.skb.draw_graph().open()
         pred_opt = optimize(pred)
-        pred_opt.skb.draw_graph().open()
         self.compare_evaluate(pred_opt)
 
 if __name__ == "__main__":
