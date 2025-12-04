@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from skrub._data_ops._data_ops import DataOp
-from stratum.runtime.runtime import evaluate
+from stratum.runtime.scheduler import evaluate
 
 
 def datetime_pipeline1(x: DataOp, y: DataOp) -> DataOp:

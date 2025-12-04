@@ -12,25 +12,29 @@ logger = logging.getLogger(__name__)
 
 
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
-    # dag.skb.draw_graph().open()
-    return Runtime(dag, cv, scoring).grid_search(return_predictions)
+    """Perform grid search with cross-validation on a DataOp DAG."""
+    return Scheduler(dag).grid_search(cv, scoring, return_predictions)
 
 def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
-    return Runtime(dag, None, None).evaluate(seed, test_size)
+    """Evaluate a DataOp DAG with train/test split."""
+    return Scheduler(dag).evaluate(seed, test_size)
 
-class Runtime:
-    def __init__(self, dag: DataOp, cv, scoring):
+class Scheduler:
+    """Scheduler for executing DataOpDAGs in topological order."""
+    
+    def __init__(self, dag: DataOp):
+        """Initialize scheduler with a data operations DAG."""
         self.dag = dag
         self.mode = "fit_transform"
         g = _Graph().run(dag)
         self.nodes, self.parents, self.children = g["nodes"], g["parents"], g["children"]
         self.order = topological_traverse(self.nodes, self.parents, self.children)
-        self.cv, self.scoring = cv,scoring
-        self.outputs, self.env = {}, {}
+        self.intermediates, self.env = {}, {}
         self.full_x, self.full_y = None, None
         self.node_x, self.node_y, self.pos_xy = None, None, None
 
     def evaluate(self, seed: int = 42, test_size = 0.2):
+        """Evaluate the pipeline with a train/test split and return predictions."""
         self.compute_xy()
         x_train, x_test, y_train, y_test = train_test_split(self.full_x, self.full_y, test_size=test_size, random_state=seed)
         self.compute(self.pos_xy, x_train, y_train)
@@ -38,19 +42,18 @@ class Runtime:
         return pred
 
 
-    def grid_search(self, return_predictions=False):
-        # prototype for sequential top-down iteration of the DAG
-        if logger.isEnabledFor(logging.DEBUG):
-            self.dag.skb.draw_graph().open()
+    def grid_search(self, cv=None, scoring=None, return_predictions=False):
+        """Perform grid search with cross-validation on the DataOp DAG in a sequential top-down manner."""
 
         # start with computing till X and y node
         self.compute_xy()
         results, predictions = [], []
 
-        if self.cv is None:
-            self.cv = KFold(n_splits=5, shuffle=True, random_state=42)
+        if cv is None:
+            cv = KFold(n_splits=5, shuffle=True, random_state=42)
 
-        for i, (train_index, test_index) in enumerate(self.cv.split(self.outputs[self.node_x])):
+        #TODO we can parallelize over the folds
+        for i, (train_index, test_index) in enumerate(cv.split(self.intermediates[self.node_x])):
             logger.debug(f"CV Fold Nr. {i+1}")
             x_train, x_test = self.full_x.iloc[train_index], self.full_x.iloc[test_index]
             y_train, y_test = self.full_y .iloc[train_index], self.full_y .iloc[test_index]
@@ -63,7 +66,7 @@ class Runtime:
 
             # scoring
             df["scores"] = df["vals"].apply(
-                lambda a: mean_squared_error(y_test, a))*(-1 if self.scoring == "neg_mean_squared_error" else 1)
+                lambda a: mean_squared_error(y_test, a))*(-1 if scoring == "neg_mean_squared_error" else 1)
             df = df.drop("vals", axis=1)
             results.append(df)
 
@@ -73,30 +76,32 @@ class Runtime:
         return results, predictions if return_predictions else results
 
     def compute(self, start_pos: int, x, y = None, mode="fit_transform"):
+        """Compute the pipeline from start_pos onwards with given inputs."""
         self.mode = mode
-        self.outputs[self.node_x] = x
-        self.outputs[self.node_y] = y
+        self.intermediates[self.node_x] = x
+        self.intermediates[self.node_y] = y
         for node in self.order[(start_pos + 1):]:
-            self.outputs[node] = self.process_op(self.nodes[node], node)
+            self.intermediates[node] = self.process_op(self.nodes[node], node)
 
-        return pd.DataFrame(self.outputs[self.order[-1]]) if mode == "predict" else None
+        return pd.DataFrame(self.intermediates[self.order[-1]]) if mode == "predict" else None
 
     def compute_xy(self):
-        # iterate till we find the X and y nodes
+        """Compute nodes until X and y nodes are found and store them."""
         pos_x, pos_y = None, None
         for i, node in enumerate(self.order):
             current_op = self.nodes[node]
-            self.outputs[node]  = self.process_op(current_op, node)
+            self.intermediates[node]  = self.process_op(current_op, node)
             if current_op.skb.is_X:
                 pos_x, self.node_x = i, node
             elif current_op.skb.is_y:
                 pos_y, self.node_y,  = i, node
             if pos_x is not None and pos_y is not None:
                 break
-        self.full_x, self.full_y = self.outputs[self.node_x], self.outputs[self.node_y]
+        self.full_x, self.full_y = self.intermediates[self.node_x], self.intermediates[self.node_y]
         self.pos_xy = max(pos_x, pos_y)
 
     def process_op(self, dataop: DataOp, node: int):
+        """Process a single DataOp node and return its output."""
         impl = dataop._skrub_impl
         if isinstance(impl, Value) and isinstance(impl.value, Choice):
             choice = impl.value
@@ -104,11 +109,13 @@ class Runtime:
             child_iter = iter(self.children.get(node,[]))
             for name, outcome in zip(choice.outcome_names , choice.outcomes):
                 if isinstance(outcome, DataOp):
-                    results.append({ "id" : name, "vals" : self.outputs[next(child_iter)]})
+                    results.append({ "id" : name, "vals" : self.intermediates[next(child_iter)]})
                 else:
                     results.append({"id" : name, "vals" : outcome})
             current_output = results[0] if len(results) == 1 else results
         elif hasattr(impl, "eval"):
+            # DataOp with eval method have a fused implementation of the generator and the compute method
+            # we need to iterate over the generator and replace the requested fields with correct inputs
             last_yield = None
             gen = impl.eval(mode=self.mode, environment=self.env)
             child_iter = iter(self.children.get(node,[]))
@@ -119,7 +126,7 @@ class Runtime:
                     current_output = e.value
                     break
                 if isinstance(last_yield, DataOp):
-                    last_yield = self.outputs[next(child_iter)]
+                    last_yield = self.intermediates[next(child_iter)]
         else:
             try:
                 fields = self.replace_fields_with_values(impl, children=self.children.get(node,[]))
@@ -130,12 +137,13 @@ class Runtime:
         return current_output
 
     def replace_fields_with_values(self, impl, children):
+        """Replace DataOp fields in implementation with their computed values."""
         child_iter = iter(children)
 
         def replace_dataop(value):
-            """Recursively replace DataOp instances with their outputs."""
+            """Recursively replace DataOp instances with their actual values."""
             if isinstance(value, DataOp):
-                return self.outputs[next(child_iter)]
+                return self.intermediates[next(child_iter)]
             elif isinstance(value, (list, tuple)):
                 new_seq = [replace_dataop(item) for item in value]
                 return type(value)(new_seq)
