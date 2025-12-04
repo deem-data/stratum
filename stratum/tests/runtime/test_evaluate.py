@@ -40,7 +40,6 @@ class EvaluateTest(RuntimeTest):
         x = x.drop(["x0", "x1"], axis=1)
         x_scaled = x.skb.apply(StandardScaler())
         pred = x_scaled.skb.apply(RandomForestRegressor(random_state=42), y=y)
-        pred.skb.draw_graph().open()
         pred_opt = optimize(pred)
         self.compare_evaluate(pred_opt)
 
