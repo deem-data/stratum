@@ -19,7 +19,7 @@ class SearchTest(RuntimeTest):
         y = optimize(y)
 
         cv = KFold(n_splits=3, shuffle=True, random_state=42)
-        results, preds = grid_search(y, cv=cv, return_predictions=True)
+        results, preds = grid_search(y, cv=cv, return_predictions=True, print_heavy_hitters=True)
 
         search = y.skb.make_grid_search(fitted=True)
         results = search.cv_results_

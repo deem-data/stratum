@@ -1,3 +1,4 @@
+from time import time
 import pandas as pd
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import KFold, train_test_split
@@ -11,9 +12,18 @@ from skrub._data_ops._choosing import Choice
 logger = logging.getLogger(__name__)
 
 
-def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
+def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, print_heavy_hitters=False):
     """Perform grid search with cross-validation on a DataOp DAG."""
-    return Scheduler(dag).grid_search(cv, scoring, return_predictions)
+    sched = Scheduler(dag)
+    results, predictions = sched.grid_search(cv, scoring, return_predictions)
+    
+    # Heaby hitters
+    node_timings = sorted(sched.timings, key=lambda x: x[1], reverse=True)
+    dataop_timings = [(sched.nodes[node].__skrub_short_repr__(), t) for node, t in node_timings]
+    table = pd.DataFrame(dataop_timings, columns=["node", "time"])
+    if print_heavy_hitters:
+        print(table.head(20))
+    return results, predictions
 
 def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
     """Evaluate a DataOp DAG with train/test split."""
@@ -32,6 +42,7 @@ class Scheduler:
         self.intermediates, self.env = {}, {}
         self.full_x, self.full_y = None, None
         self.node_x, self.node_y, self.pos_xy = None, None, None
+        self.timings = []
 
     def evaluate(self, seed: int = 42, test_size = 0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
@@ -103,6 +114,7 @@ class Scheduler:
     def process_op(self, dataop: DataOp, node: int):
         """Process a single DataOp node and return its output."""
         impl = dataop._skrub_impl
+        t0 = time()
         if isinstance(impl, Value) and isinstance(impl.value, Choice):
             choice = impl.value
             results = []
@@ -134,6 +146,8 @@ class Scheduler:
                 current_output = impl.compute(ns, self.mode, self.env)
             except Exception as e:
                 raise Exception(f"Error processing implementation '{impl}' [Node {node}]: {e}")
+        t1 = time()
+        self.timings.append((node, t1 - t0))
         return current_output
 
     def replace_fields_with_values(self, impl, children):
