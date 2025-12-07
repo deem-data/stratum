@@ -1,6 +1,6 @@
 from sklearn.datasets import fetch_20newsgroups
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, ShuffleSplit
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.linear_model import Ridge, LinearRegression, LogisticRegression
 from sklearn.svm import LinearSVC
@@ -44,7 +44,7 @@ class PandasTfidfVectorizer(BaseEstimator, TransformerMixin):
     def get_feature_names_out(self, *args, **kwargs):
         return self.vectorizer.get_feature_names_out(*args, **kwargs)
 
-def tfidf_pipeline(df_path: str, show_graph: bool = False, stratum: bool = False):
+def tfidf_pipeline(df_path: str, show_graph: bool = False, stratum: bool = False, kfold: bool = False):
     path = skrub.as_data_op(df_path)
     data = path.skb.apply_func(pd.read_csv).skb.subsample(n=100)
     data = data.fillna("")
@@ -68,20 +68,24 @@ def tfidf_pipeline(df_path: str, show_graph: bool = False, stratum: bool = False
     if show_graph:
         pred.skb.draw_graph().open()
     print("----------------------------------------")
-    stats = make_gridsearch(pred, stratum=stratum)
-    print("\nOriginal Pipeline took: ",sum(stats))
+    stats1 = make_gridsearch(pred, kfold=kfold)
+    print("\nOriginal Pipeline (njobs=1) took: ",sum(stats1))
+    print("----------------------------------------")
+
+    stats2 = make_gridsearch(pred, multi=True, kfold=kfold)
+    print("\nOriginal Pipeline (njobs=-1) took: ",sum(stats2))
     print("----------------------------------------")
 
 
-    stats_opt = make_gridsearch(pred, optimize_enabled=True, stratum=stratum)
+    stats_opt = make_gridsearch(pred, optimize_enabled=True, stratum=stratum, kfold=kfold)
     print("\nTotal optimized Pipeline took: ",sum(stats_opt))
     print("----------------------------------------")
     if show_graph:
         pred.skb.draw_graph().open()
-    return np.array([stats, stats_opt])
+    return np.array([stats1, stats2, stats_opt])
 
 
-def make_gridsearch(pred, random_state=42, optimize_enabled=False, stratum=False) -> tuple[list, list]:
+def make_gridsearch(pred, random_state=42, optimize_enabled=False, stratum=False, multi=False, kfold=False) -> tuple[list, list]:
     if optimize_enabled:
         t00 = time()
         pred = optimize(pred)
@@ -91,13 +95,12 @@ def make_gridsearch(pred, random_state=42, optimize_enabled=False, stratum=False
         t0 = time()
         stats = [0.0]
 
-    cv = KFold(n_splits=5, shuffle=True, random_state=random_state)
-
+    cv = KFold(n_splits=3, shuffle=True, random_state=random_state) if kfold else ShuffleSplit(n_splits=1, test_size=0.2, random_state=42) 
+    
     if stratum:
-        search = grid_search(pred, cv=cv)
-        print("Search results: \n", search)
+        search = grid_search(pred, cv=cv, print_heavy_hitters=True)
     else:
-        search = pred.skb.make_grid_search(fitted=True, cv=cv, n_jobs=1)
+        search = pred.skb.make_grid_search(fitted=True, cv=cv, n_jobs=-1 if multi else 1)
         print("Search results: \n", search.results_)
 
     t1 = time()
@@ -105,13 +108,13 @@ def make_gridsearch(pred, random_state=42, optimize_enabled=False, stratum=False
     return stats
 
 
-def run_tfidf_pipeline_benchmark(stratum: bool = False):
+def run_tfidf_pipeline_benchmark(stratum: bool = False, kfold: bool = False):
     data = fetch_20newsgroups(subset="train", remove=("headers", "footers", "quotes"))
     df = pd.DataFrame({"text": data.data, "y": data.target})
     df["text"].fillna("", inplace=True)
-
+    print("df shape: ", df.shape)
     list_of_stats = []
-    parameters = [100, 500, 1000,]
+    parameters = [100, 500, 1000,10000]
     for n_rows in parameters:
         df_n_rows = df.head(n_rows)
         with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", suffix=".csv", delete=False) as f:
@@ -119,8 +122,8 @@ def run_tfidf_pipeline_benchmark(stratum: bool = False):
             f.flush()
             temp_path = f.name
 
-        stats = tfidf_pipeline(temp_path, show_graph = False, stratum=stratum)
-        stats = np.hstack((np.array([n_rows, n_rows]).reshape((2, 1)), stats))
+        stats = tfidf_pipeline(temp_path, show_graph = False, stratum=stratum, kfold=kfold)
+        stats = np.hstack((np.array([n_rows, n_rows, n_rows]).reshape((3, 1)), stats))
         list_of_stats.append(stats)
 
     stats = np.vstack(list_of_stats)
@@ -138,7 +141,7 @@ def run_tfidf_pipeline_benchmark(stratum: bool = False):
     df.to_csv(f"bench_cse_tfidf_gridsearch.csv", index=False)
 
 def main():
-    run_tfidf_pipeline_benchmark(stratum=True)
+    run_tfidf_pipeline_benchmark(stratum=True, kfold=False)
 
 if __name__ == '__main__':
     main()

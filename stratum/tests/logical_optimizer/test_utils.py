@@ -1,6 +1,7 @@
 import unittest
 
 from sklearn.preprocessing import StandardScaler
+from skrub import TableVectorizer
 
 import stratum as skrub
 from stratum.logical_optimizer.utils import equals_data_op, hash_data_op, update_data_op
@@ -116,6 +117,14 @@ class LogicalOptimizerUtilsTest(unittest.TestCase):
         y1 = data.skb.apply(enc)
         y2 = data.skb.apply(enc2)
         self.assertFalse(equals_data_op(y1, y2))
+    
+    def test_check_for_equivalence16(self):
+        data = skrub.var("data", self.df)
+        enc = TableVectorizer()
+        enc2 = TableVectorizer()
+        y1 = data.skb.apply(enc)
+        y2 = data.skb.apply(enc2)
+        self.assertTrue(equals_data_op(y1, y2))
 
 
     def assert_hash_consistency(self, op1, op2):
@@ -246,6 +255,14 @@ class LogicalOptimizerUtilsTest(unittest.TestCase):
         enc2 = StandardScaler()
         y1 = data.skb.apply(enc, cols=["x"])
         y2 = data.skb.apply(enc2, cols=["x"])
+        self.assert_hash_consistency(y1, y2)
+
+    def test_hash_equivalence15(self):
+        data = skrub.var("data", self.df)
+        enc = TableVectorizer()
+        enc2 = TableVectorizer()
+        y1 = data.skb.apply(enc)
+        y2 = data.skb.apply(enc2)
         self.assert_hash_consistency(y1, y2)
 
     def test_update_data_op1(self):

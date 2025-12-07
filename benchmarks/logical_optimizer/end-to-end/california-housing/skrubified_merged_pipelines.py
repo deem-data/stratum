@@ -150,15 +150,15 @@ def run_experiment(pred, show_graph=False):
         lambda: grid_search(pred_optimized, cv=cv, scoring="neg_mean_squared_error")
     ))
 
-    df_vals.append({"impl": "baseline", "time": 2.91})
+    df_vals.append({"impl": "baseline", "time": 3.81})
 
     df = pd.DataFrame(df_vals)
-
+    df.to_csv("california_housing_pipelines_benchmark.csv", index=False, header=True, sep=";")
     print("\nSummary:")
     print(df)
 
 
-show_graph = True
+show_graph = False
 t0 = time()
 pred = pipeline_definition(show_graph=show_graph)
 t1 = time()
