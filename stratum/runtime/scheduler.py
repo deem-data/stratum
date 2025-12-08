@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, show_stats=False):
     """Perform grid search with cross-validation on a DataOp DAG."""
+    # TODO maybe remove the option to show stats here and make args similar to scikit-learn's grid_search
     show_stats = FLAGS.stratum_stats or show_stats
     sched = Scheduler(dag, show_stats)
     out = sched.grid_search(cv, scoring, return_predictions)
