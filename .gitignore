@@ -93,3 +93,4 @@ benchmarks/**/input/
 # Ignore any data files
 *.zip
 *.csv
+*.pdf
