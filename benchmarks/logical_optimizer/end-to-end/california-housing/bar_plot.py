@@ -2,86 +2,38 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-data = pd.read_csv("benchmarks/logical_optimizer/end-to-end/california-housing/california_housing_pipelines_benchmark.csv")
+base_path = "benchmarks/logical_optimizer/end-to-end/california-housing/"
+data = pd.read_csv(base_path + "california_housing_pipelines_benchmark.csv", sep=";")
+data["time"] = data["time"].apply(np.round, decimals=2)
 
-# make an bar plot example
-plt.figure(figsize=(10, 4))
+# Prepare data in desired order: non-optimized, optimized
+non_optimized = data.iloc[:3]["time"].values
+optimized = data.iloc[3:6]["time"].values
 
-# Prepare data in desired order: baseline, non-optimized, optimized
-baseline = data.tail(1)
-non_optimized = data.iloc[:3]
-optimized = data.iloc[3:6]
-
-# Combine in order for plotting
-plot_data = pd.concat([baseline, non_optimized, optimized], ignore_index=True)
+labels = ["skrub-njobs=1", "skrub-njobs=-1", "stratum-njobs=1"]
+data = pd.DataFrame({"non_optimized": non_optimized, "optimized": optimized, "labels": labels})
 
 # Publication-quality colorblind-friendly colors
 # Using a 4-color palette: blue, orange, green, red (ColorBrewer inspired)
-pub_colors = ['#2E86AB', '#F18F01', '#C73E1D', '#6A994E']  # Blue, Orange, Red, Green
+pub_colors = ['#F18F01', '#C73E1D', '#6A994E']  # Blue, Orange, Red, Green
+exp_names = ("w/o Logical Rewrites", "w/ Logical Rewrites")
+x = np.arange(len(exp_names)) # the label locations
+width = 0.25  # the width of the bars
 
-# Assign colors: baseline gets first color, then cycle through for the rest
-colors_list = [pub_colors[0]]  # baseline
-colors_list.extend([pub_colors[1], pub_colors[2], pub_colors[3]])  # non-optimized (3 bars)
-colors_list.extend([pub_colors[1], pub_colors[2], pub_colors[3]])  # optimized (3 bars)
+multiplier = 0
 
-# Plot all bars
-bars = []
-for i, row in plot_data.iterrows():
-    bar = plt.bar(row['impl'], row['time'], color=colors_list[i])
-    bars.append(bar)
-    # Add time label on top of bar
-    plt.text(row['impl'], row['time'], 
-             f"{row['time']:.3f}", 
-             ha='center', va='bottom', fontsize=9)
+fig, ax = plt.subplots(figsize=(5, 5), dpi=100, layout='constrained')
+for i, row in data.iterrows():
+    offset = width * multiplier
+    rects = ax.bar(x + offset, row[:2], width=width, label=labels[i], color=pub_colors[i])
+    ax.bar_label(rects, padding=3)
+    multiplier += 1
 
-# Get x-axis positions for separators
-ax = plt.gca()
-patches = ax.patches
-
-# Indices: baseline (0), non-optimized (1-3), optimized (4-6)
-baseline_rect = patches[0]
-non_opt_end_rect = patches[3]  # Last non-optimized bar
-opt_start_rect = patches[4]    # First optimized bar
-
-# Draw separator after baseline (between baseline and non-optimized)
-baseline_right = baseline_rect.get_x() + baseline_rect.get_width()
-non_opt_start_left = patches[1].get_x()
-separator_x1 = (baseline_right + non_opt_start_left) / 2
-ax.axvline(x=separator_x1, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-
-# Draw separator after non-optimized (between non-optimized and optimized)
-non_opt_end_right = non_opt_end_rect.get_x() + non_opt_end_rect.get_width()
-opt_start_left = opt_start_rect.get_x()
-separator_x2 = (non_opt_end_right + opt_start_left) / 2
-ax.axvline(x=separator_x2, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-
-# Add group labels below each section
-# For log scale, position text at a small value below the visible range
-y_bottom = 0.01  # Position text below the bars (small value for log scale)
-
-# Baseline label (centered under baseline bar)
-baseline_center_x = baseline_rect.get_x() + baseline_rect.get_width() / 2
-plt.text(baseline_center_x, y_bottom, 'baseline', 
-         ha='center', va='top', fontsize=10, fontweight='bold')
-
-# Non-optimized label (centered under non-optimized bars)
-non_opt_start_rect = patches[1]
-non_opt_center_x = (non_opt_start_rect.get_x() + non_opt_end_rect.get_x() + non_opt_end_rect.get_width()) / 2
-plt.text(non_opt_center_x, y_bottom, 'w/out logical rewrites', 
-         ha='center', va='top', fontsize=10, fontweight='bold')
-
-# Optimized label (centered under optimized bars)
-opt_end_rect = patches[6]
-opt_center_x = (opt_start_rect.get_x() + opt_end_rect.get_x() + opt_end_rect.get_width()) / 2
-plt.text(opt_center_x, y_bottom, 'w/ logical rewrites', 
-         ha='center', va='top', fontsize=10, fontweight='bold')
-
-# Ensure x-axis labels are visible
-plt.xticks(rotation=15, ha='right')
-plt.xlabel('Scheduler', labelpad=50)
-plt.ylabel('Time in seconds')
-plt.yscale('log')
-plt.ylim(0.000, 6)
+ax.set_xticks(x + width, exp_names)
+ax.set_yscale("log")
+ax.set_ylabel("Time (s)")
+ax.legend(loc="upper right", ncols=2)
+plt.ylim(0.01, 30)
+ax.grid(axis='y', alpha=0.3, linestyle='--')
 plt.tight_layout()
-
-plt.savefig('california_housing_pipelines_benchmark_bar_plot.pdf')
+plt.savefig(base_path + "california_housing_pipelines_benchmark_bar_plot.pdf")
