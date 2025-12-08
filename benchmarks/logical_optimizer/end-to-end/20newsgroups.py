@@ -98,7 +98,7 @@ def make_gridsearch(pred, random_state=42, optimize_enabled=False, stratum=False
     cv = KFold(n_splits=3, shuffle=True, random_state=random_state) if kfold else ShuffleSplit(n_splits=1, test_size=0.2, random_state=42) 
     
     if stratum:
-        search = grid_search(pred, cv=cv, print_heavy_hitters=True)
+        search = grid_search(pred, cv=cv, show_stats=True)
     else:
         search = pred.skb.make_grid_search(fitted=True, cv=cv, n_jobs=-1 if multi else 1)
         print("Search results: \n", search.results_)

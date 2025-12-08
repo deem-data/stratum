@@ -1,29 +1,36 @@
-from time import time
-import pandas as pd
+from time import perf_counter
 from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import KFold, train_test_split
+from sklearn.model_selection import train_test_split, check_cv
 from skrub._data_ops import DataOp
 from skrub._data_ops._evaluation import _Graph
-import logging
 from types import SimpleNamespace
-from stratum.logical_optimizer.optimize import topological_traverse
+from ..logical_optimizer.optimize import topological_traverse
+from ..config import FLAGS
 from skrub._data_ops._data_ops import Value
 from skrub._data_ops._choosing import Choice
+
+import pandas as pd
+import logging
 logger = logging.getLogger(__name__)
 
 
-def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, print_heavy_hitters=False):
+def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, show_stats=False):
     """Perform grid search with cross-validation on a DataOp DAG."""
-    sched = Scheduler(dag)
-    results, predictions = sched.grid_search(cv, scoring, return_predictions)
+    show_stats = FLAGS.stratum_stats or show_stats
+    sched = Scheduler(dag, show_stats)
+    out = sched.grid_search(cv, scoring, return_predictions)
     
-    # Heaby hitters
-    node_timings = sorted(sched.timings, key=lambda x: x[1], reverse=True)
-    dataop_timings = [(sched.nodes[node].__skrub_short_repr__(), t) for node, t in node_timings]
-    table = pd.DataFrame(dataop_timings, columns=["node", "time"])
-    if print_heavy_hitters:
-        print(table.head(20))
-    return results, predictions
+    # Heavy hitters
+    if show_stats:
+        table = pd.DataFrame(sched.timings, columns=["Op", "time"])
+        table = table.groupby("Op").aggregate(["sum", "count"])
+        table.columns = ["Time", "Count"]
+        table = table.reset_index().sort_values(by="Time", ascending=False)
+        print("\n" + "=" * 80)
+        print(f"Heavy hitters (sorted by time spent in DataOp evaluation):")
+        print(table.head(20).to_string(index=False))
+        print("=" * 80 + "\n")
+    return out
 
 def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
     """Evaluate a DataOp DAG with train/test split."""
@@ -32,7 +39,7 @@ def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
 class Scheduler:
     """Scheduler for executing DataOpDAGs in topological order."""
     
-    def __init__(self, dag: DataOp):
+    def __init__(self, dag: DataOp, print_heavy_hitters=False):
         """Initialize scheduler with a data operations DAG."""
         self.dag = dag
         self.mode = "fit_transform"
@@ -42,7 +49,7 @@ class Scheduler:
         self.intermediates, self.env = {}, {}
         self.full_x, self.full_y = None, None
         self.node_x, self.node_y, self.pos_xy = None, None, None
-        self.timings = []
+        self.timings = [] if print_heavy_hitters else None
 
     def evaluate(self, seed: int = 42, test_size = 0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
@@ -60,8 +67,8 @@ class Scheduler:
         self.compute_xy()
         results, predictions = [], []
 
-        if cv is None:
-            cv = KFold(n_splits=5, shuffle=True, random_state=42)
+        # default to scikit-learn's CV
+        cv = check_cv(cv)
 
         #TODO we can parallelize over the folds
         for i, (train_index, test_index) in enumerate(cv.split(self.intermediates[self.node_x])):
@@ -114,7 +121,7 @@ class Scheduler:
     def process_op(self, dataop: DataOp, node: int):
         """Process a single DataOp node and return its output."""
         impl = dataop._skrub_impl
-        t0 = time()
+        t0 = perf_counter() if self.timings is not None else 0
         if isinstance(impl, Value) and isinstance(impl.value, Choice):
             choice = impl.value
             results = []
@@ -146,8 +153,9 @@ class Scheduler:
                 current_output = impl.compute(ns, self.mode, self.env)
             except Exception as e:
                 raise Exception(f"Error processing implementation '{impl}' [Node {node}]: {e}")
-        t1 = time()
-        self.timings.append((node, t1 - t0))
+        if self.timings is not None:
+            duration = perf_counter() - t0
+            self.timings.append((self.nodes[node].__skrub_short_repr__(), duration))
         return current_output
 
     def replace_fields_with_values(self, impl, children):

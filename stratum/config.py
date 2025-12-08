@@ -23,13 +23,15 @@ class _Flags:
     num_threads: int = _env_int("SKRUB_RUST_THREADS", 0)      # 0 => backend decides
     debug_timing: bool = _env_bool("SKRUB_RUST_DEBUG_TIMING", False)
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
+    stratum_stats: bool = _env_bool("STRATUM_STATS", False)
 
 FLAGS = _Flags()
 
 def set_config(rust_backend: bool | None = None,
            num_threads: int | None = None,
            debug_timing: bool | None = None,
-           allow_patch: bool | None = None) -> None:
+           allow_patch: bool | None = None,
+           stratum_stats: bool | None = None) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -47,6 +49,9 @@ def set_config(rust_backend: bool | None = None,
         allow_patch: bool, default true
             Allows disabling runtime backend swapping in sensitive contexts. This is a soft
             kill-switch for disabling all non-sklearn backends, even if their flags are set.
+
+        stratum_stats: bool, default false
+            Enable/disable stratum statistics. This will print the heavy hitters of a DataOp DAG execution.
     """
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
@@ -62,7 +67,9 @@ def set_config(rust_backend: bool | None = None,
     if allow_patch is not None:
         FLAGS.allow_patch = bool(allow_patch)
         os.environ["SKRUB_RUST_ALLOW_MONKEYPATCH"] = "1" if FLAGS.allow_patch else "0"
-
+    if stratum_stats is not None:
+        FLAGS.stratum_stats = bool(stratum_stats)
+        os.environ["STRATUM_STATS"] = "1" if FLAGS.stratum_stats else "0"
 
 def get_config() -> dict:
     # Shallow copy for safety
