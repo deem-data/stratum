@@ -29,9 +29,6 @@ def topological_traverse(nodes, parents, children):
 
 
 def optimize(dag: DataOp):
-    if logger.isEnabledFor(logging.DEBUG):
-        dag.skb.draw_graph().open()
-
     graph = _Graph().run(dag)
     nodes = graph["nodes"]
     parents = graph["parents"]

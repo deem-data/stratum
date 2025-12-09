@@ -22,9 +22,6 @@ def apply_cse(data_op: DataOp, nodes: dict[int, DataOp], order: list[int],
             for parent_id in current_parent_ids:
                 update_data_op(nodes[parent_id], current_op, cs_node)
 
-            if logger.isEnabledFor(logging.DEBUG):
-                data_op.skb.draw_graph().open()
-
 
 class CSETable:
     """

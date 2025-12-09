@@ -1,8 +1,10 @@
+from typing import Iterable
 from sklearn.base import BaseEstimator
 from skrub._data_ops import DataOp
 from skrub._data_ops._choosing import BaseChoice, Choice
 from skrub._data_ops._data_ops import Call, GetItem, CallMethod, GetAttr, Apply, Value, BinOp
 from skrub.selectors._base import All
+
 
 def equals_data_op(op1: DataOp, op2: DataOp):
     """
@@ -31,12 +33,12 @@ def equals_data_op(op1: DataOp, op2: DataOp):
     if type(impl1) == type(impl2):
         if isinstance(impl1, GetItem):
             # op1 = data["col1"], op2 = data["col1"]
-            return (id(impl1.container) == id(impl2.container) and
+            return (impl1.container is impl2.container and
                     (isinstance(impl1.key, str) and impl1.key == impl2.key or
                      _stable_id(impl1.key) == _stable_id(impl2.key)))
         if isinstance(impl1, GetAttr):
             # op1 = data.attribute1, op2 = data.attribute1
-            return id(impl1.source_object) == id(impl2.source_object) and impl1.attr_name == impl2.attr_name
+            return impl1.source_object is impl2.source_object and impl1.attr_name == impl2.attr_name
         elif isinstance(impl1, Call):
             # op1 = col.skb.apply_func(my_func, arg1, arg2) , op2 = col.skb.apply_func(my_func, arg1, arg2)
             if impl1.func == impl2.func and len(impl1.args) == len(impl2.args):
@@ -45,7 +47,7 @@ def equals_data_op(op1: DataOp, op2: DataOp):
                 return inputs_ids1 == inputs_ids2
         elif isinstance(impl1, CallMethod):
             # op1 = col.apply(my_func, arg1, arg2) , op2 = col.apply(my_func, arg1, arg2)
-            if id(impl1.obj) == id(impl2.obj) and impl1.method_name == impl2.method_name:
+            if impl1.obj is impl2.obj and impl1.method_name == impl2.method_name:
                 inputs_ids1 = _stable_id(impl1.args)
                 inputs_ids2 = _stable_id(impl2.args)
                 named_inputs_ids1 = _stable_id(impl1.kwargs)
@@ -57,15 +59,19 @@ def equals_data_op(op1: DataOp, op2: DataOp):
             # op1 = data.skb.apply(enc1), op2 = data.skb.apply(enc2)
             est1 = impl1.estimator
             est2 = impl2.estimator
-            if id(impl1.X) == id(impl2.X) and type(est1) == type(est2) :
+            if impl1.X is impl2.X and type(est1) == type(est2):
                 # Check if columns are the same:
-                if isinstance(impl1.cols, All) and isinstance(impl2.cols, All) or set(impl1.cols) == set(impl2.cols):
+                cols1 = {"all"} if isinstance(impl1.cols, All) else set(impl1.cols)
+                cols2 = {"all"} if isinstance(impl2.cols, All) else set(impl2.cols)
+                # TODO also match All with set(cols) if cols contains all columns of the input frame
+                if set(cols1) == set(cols2):
                     return estimator_equality_check(est1, est2)
         elif isinstance(impl1, BinOp):
             # op1 = col1 / col2
             # op2 = col1 / col2
             if impl1.op == impl2.op:
-                return _stable_id(impl1.left) == _stable_id(impl2.left) and _stable_id(impl1.right) == _stable_id(impl2.right)
+                return _stable_id(impl1.left) == _stable_id(impl2.left) and _stable_id(impl1.right) == _stable_id(
+                    impl2.right)
 
     return False
 
@@ -79,9 +85,9 @@ def estimator_equality_check(est1: DataOp, est2: DataOp) -> bool:
     for key, value in params1.items():
         value2 = params2.get(key)
         if value2 != value and (
-            type(value) != type(value2) 
-            or not isinstance(value, BaseEstimator) 
-            or not estimator_equality_check(value, value2)):
+                type(value) != type(value2)
+                or not isinstance(value, BaseEstimator)
+                or not estimator_equality_check(value, value2)):
             return False
     return True
 
@@ -146,15 +152,18 @@ def hash_data_op(op: DataOp) -> int:
         # Fallback for unknown DataOp types
         return hash((t, id(impl)))
 
+
 def hash_estimator(est: BaseEstimator) -> int:
     """
     Hash an estimator.
     """
+    param_hashes = []
     for key, value in est.get_params().items():
         if isinstance(value, BaseEstimator):
-            return hash_estimator(value)
+            param_hashes.append((key, hash_estimator(value))) 
         else:
-            return hash((key, _stable_id(value)))
+            param_hashes.append(((key, _stable_id(value))))
+    return hash(tuple(param_hashes))
 
 
 def _stable_id(obj):
@@ -175,6 +184,7 @@ def _stable_id(obj):
         # fallback to identity for unhashable/unrecognized
         return id(obj)
 
+
 def update_data_op(op: DataOp, old_input: DataOp, new_input: DataOp):
     """
     Update a DataOp node by replacing references to an old subexpression
@@ -184,98 +194,100 @@ def update_data_op(op: DataOp, old_input: DataOp, new_input: DataOp):
     Raises if `old_input` is not found among the op's dependencies.
     """
     impl = op._skrub_impl
-    found = False
 
     if isinstance(impl, GetItem):
-        if id(impl.container) == id(old_input):
+        if impl.container is old_input:
             impl.container = new_input
-            found = True
+            return
 
     elif isinstance(impl, GetAttr):
-        if id(impl.source_object) == id(old_input):
+        if impl.source_object is old_input:
             impl.source_object = new_input
-            found = True
+            return
 
     elif isinstance(impl, Call):
         args = impl.args
-        if isinstance(args, list):
-            for i, arg in enumerate(args):
-                if id(arg) == id(old_input):
-                    args[i] = new_input
-                    found = True
-        elif isinstance(args, tuple):
-            impl.args = tuple(new_input if id(a) == id(old_input) else a for a in args)
-            if any(id(a) == id(old_input) for a in args):
-                found = True
+        found, args = replace_data_op_in_iterable(args, new_input, old_input)
+        if found:
+            impl.args = args
+            return
 
     elif isinstance(impl, CallMethod):
-        # Object
-        if id(impl.obj) == id(old_input):
+        if impl.obj is old_input:
             impl.obj = new_input
-            found = True
+            return
 
-        # Args (list or tuple)
         args = impl.args
-        if isinstance(args, list):
-            for i, arg in enumerate(args):
-                if id(arg) == id(old_input):
-                    args[i] = new_input
-                    found = True
-        elif isinstance(args, tuple):
-            impl.args = tuple(new_input if id(a) == id(old_input) else a for a in args)
-            if any(id(a) == id(old_input) for a in args):
-                found = True
+        found, args = replace_data_op_in_iterable(args, new_input, old_input)
+        if found:
+            impl.args = args
+            return
 
-        # Kwargs (dict)
         kwargs = impl.kwargs
-        if isinstance(kwargs, dict):
-            for k, v in kwargs.items():
-                if id(v) == id(old_input):
-                    kwargs[k] = new_input
-                    found = True
-        else:
-            # Immutable or proxy object — rebuild
-            new_kwargs = {
-                k: (new_input if id(v) == id(old_input) else v)
-                for k, v in kwargs.items()
-            }
-            if any(id(v) == id(old_input) for v in kwargs.values()):
-                found = True
-            impl.kwargs = new_kwargs
+        found, kwargs = replace_data_op_in_iterable(kwargs, new_input, old_input)
+        if found:
+            impl.kwargs = kwargs
+            return
 
     elif isinstance(impl, Apply):
-        if id(impl.X) == id(old_input):
+        if impl.X is old_input:
             impl.X = new_input
-            found = True
+            return
 
-        if id(impl.y) == id(old_input):
+        if impl.y is old_input:
             impl.y = new_input
-            found = True
+            return
 
         # Columns (can be list or symbolic)
         if isinstance(impl.cols, list):
             for i, c in enumerate(impl.cols):
-                if id(c) == id(old_input):
+                if c is old_input:
                     impl.cols[i] = new_input
-                    found = True
+                    return
         elif isinstance(impl.cols, tuple):
-            impl.cols = tuple(new_input if id(c) == id(old_input) else c for c in impl.cols)
-            if any(id(c) == id(old_input) for c in impl.cols):
-                found = True
+            impl.cols = tuple(new_input if c is old_input else c for c in impl.cols)
+            if any(c is old_input for c in impl.cols):
+                return
     elif isinstance(impl, Value):
         if isinstance(impl.value, BaseChoice):
             if isinstance(impl.value, Choice):
                 outcomes = impl.value.outcomes
                 for i, outcome in enumerate(outcomes):
-                    if id(outcome) == id(old_input):
+                    if outcome is old_input:
                         outcomes[i] = new_input
-                        found = True
+                        return
     elif isinstance(impl, BinOp):
-        if id(impl.left) == id(old_input):
+        if impl.left is old_input:
             impl.left = new_input
-            found = True
-        elif id(impl.right) == id(old_input):
+            return
+        elif impl.right is old_input:
             impl.right = new_input
-            found = True
-    if not found:
-        raise Exception(f"Could not find old DataOp {old_input} during input update for {op}")
+            return
+    raise Exception(f"Could not find old DataOp {old_input} during input update for {op}")
+
+
+
+def replace_data_op_in_iterable(iterable: Iterable, new_input: DataOp,
+                                old_input: DataOp) -> tuple[bool, Iterable]:
+    """
+    Helper Method to replace a DataOp node in an iterable with a new one.
+    """
+    found = False
+    if isinstance(iterable, tuple):
+        new_args = []
+
+        for a in iterable:
+            if a is old_input:
+                new_args.append(new_input)
+                found = True
+            else:
+                new_args.append(a)
+        return found, tuple(new_args)
+    elif isinstance(iterable, dict):
+        for k, v in iterable.items():
+            if v is old_input:
+                iterable[k] = new_input
+                found = True
+        return found, iterable
+    else:
+        raise NotImplementedError("Non-tuple arguments of method call are not supported yet.")

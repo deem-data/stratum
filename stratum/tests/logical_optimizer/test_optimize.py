@@ -114,6 +114,22 @@ class MyTestCase(unittest.TestCase):
         y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
         y = optimize(y)
 
+    
+    def test_cse(self):
+        data = skrub.var("data", self.df)
+        X = data[["x"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+
+        # pipeline 1
+        t1 = X.skb.apply_func(pre_process)
+        y1 = t1.skb.apply(RandomForestRegressor(random_state=42), y=y)
+
+        # pipeline 2
+        t2 = X.skb.apply_func(pre_process)
+        y2 = t2.skb.apply(RandomForestRegressor(random_state=123), y=y)
+
+        y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
+        y = optimize(y)
 
 
 if __name__ == '__main__':
