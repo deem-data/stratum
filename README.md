@@ -1,7 +1,7 @@
 # Stratum
 
 [![CI](https://github.com/deem-data/stratum/actions/workflows/test.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/deem-data/stratum/branch/main/graph/badge.svg)](https://codecov.io/gh/deem-data/stratum)
+[![codecov](https://codecov.io/gh/deem-data/stratum/graph/badge.svg?token=QQDTC0RXUN)](https://codecov.io/gh/deem-data/stratum)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE.txt)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
