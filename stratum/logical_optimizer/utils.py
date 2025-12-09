@@ -1,3 +1,4 @@
+from sklearn.base import BaseEstimator
 from skrub._data_ops import DataOp
 from skrub._data_ops._choosing import BaseChoice, Choice
 from skrub._data_ops._data_ops import Call, GetItem, CallMethod, GetAttr, Apply, Value, BinOp
@@ -59,7 +60,7 @@ def equals_data_op(op1: DataOp, op2: DataOp):
             if id(impl1.X) == id(impl2.X) and type(est1) == type(est2) :
                 # Check if columns are the same:
                 if isinstance(impl1.cols, All) and isinstance(impl2.cols, All) or set(impl1.cols) == set(impl2.cols):
-                    return set(est1.get_params().items()) == set(est2.get_params().items())
+                    return estimator_equality_check(est1, est2)
         elif isinstance(impl1, BinOp):
             # op1 = col1 / col2
             # op2 = col1 / col2
@@ -67,6 +68,22 @@ def equals_data_op(op1: DataOp, op2: DataOp):
                 return _stable_id(impl1.left) == _stable_id(impl2.left) and _stable_id(impl1.right) == _stable_id(impl2.right)
 
     return False
+
+
+def estimator_equality_check(est1: DataOp, est2: DataOp) -> bool:
+    """"
+    Check if two estimators are semantically equal.
+    """
+    params1 = est1.get_params()
+    params2 = est2.get_params()
+    for key, value in params1.items():
+        value2 = params2.get(key)
+        if value2 != value and (
+            type(value) != type(value2) 
+            or not isinstance(value, BaseEstimator) 
+            or not estimator_equality_check(value, value2)):
+            return False
+    return True
 
 
 def hash_data_op(op: DataOp) -> int:
@@ -114,13 +131,13 @@ def hash_data_op(op: DataOp) -> int:
         if isinstance(impl.cols, All):
             # All columns -> only estimator type + param structure
             est_type = type(est)
-            est_params = frozenset(est.get_params().keys())
+            est_params = hash_estimator(est)
             return hash((t, id(impl.X), est_type, est_params))
         else:
             # Specific columns
             col_ids = frozenset(id(c) for c in impl.cols)
             est_type = type(est)
-            est_params = frozenset(est.get_params().keys())
+            est_params = frozenset(est.get_params().items())
             return hash((t, id(impl.X), col_ids, est_type, est_params))
     elif isinstance(impl, BinOp):
         return hash((t, impl.op, _stable_id(impl.left), _stable_id(impl.right)))
@@ -128,6 +145,17 @@ def hash_data_op(op: DataOp) -> int:
     else:
         # Fallback for unknown DataOp types
         return hash((t, id(impl)))
+
+def hash_estimator(est: BaseEstimator) -> int:
+    """
+    Hash an estimator.
+    """
+    for key, value in est.get_params().items():
+        if isinstance(value, BaseEstimator):
+            return hash_estimator(value)
+        else:
+            return hash((key, _stable_id(value)))
+
 
 def _stable_id(obj):
     """
