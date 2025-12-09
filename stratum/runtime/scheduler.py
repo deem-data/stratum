@@ -4,8 +4,8 @@ from sklearn.model_selection import train_test_split, check_cv
 from skrub._data_ops import DataOp
 from skrub._data_ops._evaluation import _Graph
 from types import SimpleNamespace
-from ..logical_optimizer.optimize import topological_traverse
-from ..config import FLAGS
+from stratum.logical_optimizer.optimize import topological_traverse
+from stratum.config import FLAGS
 from skrub._data_ops._data_ops import Value, EvalMode
 from skrub._data_ops._choosing import Choice
 

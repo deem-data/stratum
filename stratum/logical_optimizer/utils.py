@@ -1,7 +1,7 @@
 from typing import Iterable
 from sklearn.base import BaseEstimator
 from skrub._data_ops import DataOp
-from skrub._data_ops._choosing import BaseChoice, Choice
+from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import Call, GetItem, CallMethod, GetAttr, Apply, Value, BinOp
 from skrub.selectors._base import All
 
@@ -238,24 +238,13 @@ def update_data_op(op: DataOp, old_input: DataOp, new_input: DataOp):
             impl.y = new_input
             return
 
-        # Columns (can be list or symbolic)
-        if isinstance(impl.cols, list):
-            for i, c in enumerate(impl.cols):
-                if c is old_input:
-                    impl.cols[i] = new_input
-                    return
-        elif isinstance(impl.cols, tuple):
-            impl.cols = tuple(new_input if c is old_input else c for c in impl.cols)
-            if any(c is old_input for c in impl.cols):
-                return
     elif isinstance(impl, Value):
-        if isinstance(impl.value, BaseChoice):
-            if isinstance(impl.value, Choice):
-                outcomes = impl.value.outcomes
-                for i, outcome in enumerate(outcomes):
-                    if outcome is old_input:
-                        outcomes[i] = new_input
-                        return
+        if isinstance(impl.value, Choice):
+            outcomes = impl.value.outcomes
+            for i, outcome in enumerate(outcomes):
+                if outcome is old_input:
+                    outcomes[i] = new_input
+                    return
     elif isinstance(impl, BinOp):
         if impl.left is old_input:
             impl.left = new_input
