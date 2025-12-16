@@ -9,7 +9,7 @@ class TestGetAttr:
     
     def setup_method(self):
         """Save original environment and reset config."""
-        from stratum.config import get_config, set_config
+        from stratum._config import get_config, set_config
         
         self.original_env = {}
         for key in ["SKRUB_RUST", "SKRUB_RUST_THREADS", "SKRUB_RUST_DEBUG_TIMING", 
@@ -32,7 +32,7 @@ class TestGetAttr:
     
     def teardown_method(self):
         """Restore original environment and config."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         
         # Restore original config
         set_config(
@@ -65,7 +65,7 @@ class TestGetAttr:
     
     def test_getattr_use_rust_from_config(self):
         """Test USE_RUST from config."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(rust_backend=True)
@@ -81,7 +81,7 @@ class TestGetAttr:
     
     def test_getattr_use_rust_env_overrides_config(self):
         """Test that environment variable overrides config."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(rust_backend=False)
@@ -92,7 +92,7 @@ class TestGetAttr:
     
     def test_getattr_use_rust_syncs_env_vars(self):
         """Test that USE_RUST syncs environment variables when enabled."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(rust_backend=True, debug_timing=True, num_threads=4)
@@ -113,7 +113,7 @@ class TestGetAttr:
     
     def test_getattr_num_threads_from_config(self):
         """Test NUM_THREADS from config."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(num_threads=4)
@@ -123,7 +123,7 @@ class TestGetAttr:
     
     def test_getattr_num_threads_env_overrides_config(self):
         """Test that environment variable overrides config for NUM_THREADS."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(num_threads=2)
@@ -147,7 +147,7 @@ class TestGetAttr:
     
     def test_getattr_debug_timing_from_config(self):
         """Test DEBUG_TIMING from config."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(debug_timing=True)
@@ -175,7 +175,7 @@ class TestGetAttr:
     
     def test_getattr_allow_patch_from_config(self):
         """Test ALLOW_PATCH from config."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(allow_patch=True)
@@ -201,7 +201,7 @@ class TestTimingFunctions:
     
     def setup_method(self):
         """Save original environment and reset config."""
-        from stratum.config import get_config, set_config
+        from stratum._config import get_config, set_config
         
         self.original_env = {}
         for key in ["SKRUB_RUST_DEBUG_TIMING"]:
@@ -220,7 +220,7 @@ class TestTimingFunctions:
     
     def teardown_method(self):
         """Restore original environment and config."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         
         # Restore original config
         set_config(debug_timing=self.original_config['debug_timing'])
@@ -245,7 +245,7 @@ class TestTimingFunctions:
     
     def test_start_timing_when_debug_enabled(self):
         """Test start_timing when DEBUG_TIMING is True."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(debug_timing=True)
@@ -270,7 +270,7 @@ class TestTimingFunctions:
     
     def test_print_timing_when_debug_enabled(self, capfd):
         """Test print_timing when DEBUG_TIMING is True."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(debug_timing=True)
@@ -287,7 +287,7 @@ class TestTimingFunctions:
     
     def test_print_timing_with_none_start_time(self, capfd):
         """Test print_timing with None start_time."""
-        from stratum.config import set_config
+        from stratum._config import set_config
         from stratum import _rust_backend
         
         set_config(debug_timing=True)

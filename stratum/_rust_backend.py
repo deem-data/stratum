@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 import time
-from . config import get_config
+from . _config import get_config
 
 # Set the rust backend related config knobs
 def __getattr__(name):

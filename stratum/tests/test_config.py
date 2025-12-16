@@ -1,6 +1,6 @@
 import os
 import pytest
-from stratum.config import (
+from stratum._config import (
     _env_bool,
     _env_int,
     set_config,

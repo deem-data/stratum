@@ -3,7 +3,7 @@ import numpy as np
 
 from skrub import StringEncoder as _SE  # base class from vanilla skrub
 from .. import _rust_backend as rb
-from .. config import get_config
+from .. _config import get_config
 from skrub._string_encoder import scaling_factor
 from skrub import _dataframe as sbd
 

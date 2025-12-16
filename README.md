@@ -70,7 +70,7 @@ stratum/
 ├─ pyproject.toml             # Python + Rust build config (maturin)
 ├─ stratum/
 │ ├─ __init__.py              # Façade over skrub
-│ ├─ config.py                # set_config/get_config + env sync
+│ ├─ _config.py                # set_config/get_config + env sync
 │ ├─ _rust_backend.py         # Python <-> Rust shim (re-exports native fns)
 │ ├─ adapters/                # Public API (dispatch to Rust or fallback to skrub)
 │ │ └─ string_encoder.py      # RustyStringEncoder (subclass)

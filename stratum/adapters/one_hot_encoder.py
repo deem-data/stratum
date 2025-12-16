@@ -5,7 +5,7 @@ import scipy.sparse as sp
 from sklearn.preprocessing import OneHotEncoder as _SKOneHot
 from sklearn.utils._encode import _encode, _check_unknown  # private, mirrors sklearn’s own path
 
-from ..config import get_config
+from .._config import get_config
 from .. import _rust_backend as rb
 from .._rust_backend import _to_list
 
