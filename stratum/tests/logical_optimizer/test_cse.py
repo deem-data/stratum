@@ -1,6 +1,6 @@
 from skrub._data_ops._evaluation import _Graph
-from stratum.logical_optimizer.cse import CSETable
-from stratum.logical_optimizer.optimize import topological_traverse
+from stratum.logical_optimizer._cse import CSETable
+from stratum.logical_optimizer._optimize import topological_traverse
 import unittest
 import stratum as skrub
 

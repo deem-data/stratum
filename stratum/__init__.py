@@ -2,7 +2,7 @@ from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from typing import Any, List
 
-from ._config import set_config, get_config
+from ._config import set_config, get_config, config
 
 def _first_version(*names):
     for n in names:
@@ -23,9 +23,6 @@ patch_skrub()
 _skrub = import_module("skrub")
 __skrub_version__ = _dist_version("skrub")
 
-# stratum specific config knobs
-from . import _config as config
-
 # Expose our subclasses under the same names
 from .adapters.string_encoder import RustyStringEncoder as StringEncoder
 from .adapters.one_hot_encoder import RustyOneHotEncoder as OneHotEncoder
@@ -34,7 +31,7 @@ from .adapters.one_hot_encoder import RustyOneHotEncoder as OneHotEncoder
 __all__ = [
     "StringEncoder",
     "OneHotEncoder",
-    "_config.py",
+    "config",
     "__version__",
     "__skrub_version__",
     "versions",

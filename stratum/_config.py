@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 def _env_bool(name, default=False):
@@ -11,7 +12,7 @@ def _env_bool(name, default=False):
         return True
     if s in ("0", "false", "no", "off"):
         return False
-    return s == "true"
+    return bool(default)
 
 def _env_int(name, default=0):
     v = os.getenv(name)
@@ -23,7 +24,9 @@ class _Flags:
     num_threads: int = _env_int("SKRUB_RUST_THREADS", 0)      # 0 => backend decides
     debug_timing: bool = _env_bool("SKRUB_RUST_DEBUG_TIMING", False)
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
-    stratum_stats: bool = _env_bool("STRATUM_STATS", False)
+    scheduler: bool =  False
+    stats: bool = False
+    open_graph: bool = True
 
 FLAGS = _Flags()
 
@@ -31,7 +34,9 @@ def set_config(rust_backend: bool | None = None,
            num_threads: int | None = None,
            debug_timing: bool | None = None,
            allow_patch: bool | None = None,
-           stratum_stats: bool | None = None) -> None:
+           stats: bool | None = None,
+           scheduler: bool | None = None,
+           open_graph: bool | None = None) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -67,9 +72,13 @@ def set_config(rust_backend: bool | None = None,
     if allow_patch is not None:
         FLAGS.allow_patch = bool(allow_patch)
         os.environ["SKRUB_RUST_ALLOW_MONKEYPATCH"] = "1" if FLAGS.allow_patch else "0"
-    if stratum_stats is not None:
-        FLAGS.stratum_stats = bool(stratum_stats)
-        os.environ["STRATUM_STATS"] = "1" if FLAGS.stratum_stats else "0"
+    if scheduler is not None:
+        FLAGS.scheduler = bool(scheduler)
+        if stats is not None:
+            FLAGS.stats = bool(stats)
+    if open_graph is not None:
+        FLAGS.open_graph = bool(open_graph)
+
 
 def get_config() -> dict:
     # Shallow copy for safety
@@ -78,4 +87,17 @@ def get_config() -> dict:
         "num_threads": FLAGS.num_threads,
         "debug_timing": FLAGS.debug_timing,
         "allow_patch": FLAGS.allow_patch,
+        "scheduler": FLAGS.scheduler,
+        "stats": FLAGS.stats,
+        "open_graph": FLAGS.open_graph,
     }
+
+@contextmanager
+def config(**kwargs):
+    """Temporarily override runtime config inside a context."""
+    original = get_config()
+    set_config(**kwargs)
+    try:
+        yield
+    finally:
+        set_config(**original)

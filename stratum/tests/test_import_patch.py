@@ -18,13 +18,13 @@ def test_tablevectorizer_stringencoder(capfd):
         'B': ['02/02/2024', '23/02/2024', '12/03/2024', '13/03/2024'],
         'C': ['1.5', 'N/A', '12.2', 'N/A'],
     })
-    skrub.set_config(rust_backend=True, debug_timing=True)
-    vectorizer = TableVectorizer(low_cardinality=StringEncoder())
-    _ = vectorizer.fit_transform(df)
-    # Assert if the fitted transformers is RustyStringEncoder
-    assert repr(vectorizer.transformers_['A']).startswith('RustyStringEncoder')
-    # Assert if the Rust code is executed
-    assert "[rust]" in capture_std_out(capfd)
+    with skrub.config(rust_backend=True, debug_timing=True):
+        vectorizer = TableVectorizer(low_cardinality=StringEncoder())
+        _ = vectorizer.fit_transform(df)
+        # Assert if the fitted transformers is RustyStringEncoder
+        assert repr(vectorizer.transformers_['A']).startswith('RustyStringEncoder')
+        # Assert if the Rust code is executed
+        assert "[rust]" in capture_std_out(capfd)
 
 def test_tablevectorizer_onehotencoder(capfd):
     df = pd.DataFrame({
@@ -32,10 +32,10 @@ def test_tablevectorizer_onehotencoder(capfd):
         'B': ['02/02/2024', '23/02/2024', '12/03/2024', '13/03/2024'],
         'C': ['1.5', 'N/A', '12.2', 'N/A'],
     })
-    skrub.set_config(rust_backend=True, debug_timing=True)
-    vectorizer = TableVectorizer(low_cardinality=OneHotEncoder())
-    _ = vectorizer.fit_transform(df)
-    # Assert if the fitted transformers is RustyStringEncoder
-    assert repr(vectorizer.transformers_['A']).startswith('RustyOneHotEncoder')
-    # Assert if the Rust code is executed
-    assert "[rust]" in capture_std_out(capfd)
+    with skrub.config(rust_backend=True, debug_timing=True):
+        vectorizer = TableVectorizer(low_cardinality=OneHotEncoder())
+        _ = vectorizer.fit_transform(df)
+        # Assert if the fitted transformers is RustyStringEncoder
+        assert repr(vectorizer.transformers_['A']).startswith('RustyOneHotEncoder')
+        # Assert if the Rust code is executed
+        assert "[rust]" in capture_std_out(capfd)

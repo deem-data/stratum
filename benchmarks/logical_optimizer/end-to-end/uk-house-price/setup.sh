@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # download dataset from kaggle
-curl -L -o ~/Downloads/uk-housing-prices-paid.zip\
+curl -L -o uk-housing-prices-paid.zip\
   https://www.kaggle.com/api/v1/datasets/download/hm-land-registry/uk-housing-prices-paid
 
 unzip uk-housing-prices-paid.zip -d tmp

@@ -2,9 +2,9 @@ import unittest
 from sklearn.datasets import make_regression
 from sklearn.preprocessing import StandardScaler
 import skrub
-from stratum.logical_optimizer import optimize
 from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
+from stratum.runtime._scheduler import Scheduler, evaluate
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1
 
 import logging
@@ -19,9 +19,44 @@ class EvaluateTest(RuntimeTest):
 
         # pipeline 1
         pred = datetime_pipeline1(x, y)
-        pred_opt = optimize(pred)
 
-        self.compare_evaluate(pred_opt)
+        self.compare_evaluate(pred)
+    
+
+    def test_evaluate_with_choice(self):
+        t1 = skrub.as_data_op(1)
+        t2 = skrub.as_data_op(2)
+        t3 = skrub.choose_from([t1, t2]).as_data_op()
+        t4 = t3 + 5
+        t5 = t4 - 3
+        out = evaluate(t5, seed=self.seed, test_size=self.test_size)
+
+
+    def test_evaluate_with_choice2(self):
+        t1 = skrub.as_data_op(1)
+        t2 = skrub.as_data_op(2.5)
+        t3 = skrub.as_data_op(3)
+        t4 = skrub.as_data_op(4.5)
+        t5 = skrub.choose_from([t1, t2]).as_data_op()
+        t6 = skrub.choose_from([t3, t4]).as_data_op()
+        t7 = (t5 + 4) * 2
+        t8 = (t6 + 5) * 3
+        t9 = skrub.choose_from([t7, t8]).as_data_op()
+        t10 = t9 + 1
+        # FIXME
+        # out = evaluate(t10, seed=self.seed, test_size=self.test_size)
+
+    def test_evaluate_with_choice3(self):
+        t1 = skrub.as_data_op(1)
+        t2 = skrub.as_data_op(2.5)
+        t5 = skrub.choose_from([t1, t2]).as_data_op()
+        t6 = t5 + 5
+        t7 = t6 * 2
+        t8 = t6 / 3
+        t9 = skrub.choose_from([t7, t8]).as_data_op()
+        t10 = t9 + 1
+        out = evaluate(t10, seed=self.seed, test_size=self.test_size)
+
 
     def test_evaluate(self):
         # generate data using sklearn
@@ -40,8 +75,7 @@ class EvaluateTest(RuntimeTest):
         x = x.drop(["x0", "x1"], axis=1)
         x_scaled = x.skb.apply(StandardScaler())
         pred = x_scaled.skb.apply(RandomForestRegressor(random_state=42), y=y)
-        pred_opt = optimize(pred)
-        self.compare_evaluate(pred_opt)
+        self.compare_evaluate(pred)
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ from typing import Dict, Tuple, List
 # --- Import adapters (raises at import time if not available) ---
 from .adapters.string_encoder import RustyStringEncoder
 from .adapters.one_hot_encoder import RustyOneHotEncoder
+from .adapters.gridsearch import make_grid_search as StratumMakeGridSearch
 
 # ------------------------
 # Manual registry
@@ -36,6 +37,12 @@ _DEFINITION_REPLACEMENTS: Dict[Tuple[str, str], object] = {
     ("skrub._string_encoder", "StringEncoder"): RustyStringEncoder,
     ("sklearn.preprocessing", "OneHotEncoder"): RustyOneHotEncoder,
     # Note: There is no skrub-defined OneHotEncoder to replace at definition site.
+}
+
+# Method-level replacements (for methods on classes)
+# Format: (module, class_name, method_name) -> adapter
+_METHOD_REPLACEMENTS: Dict[Tuple[str, str, str], object] = {
+    ("skrub._data_ops._skrub_namespace", "SkrubNamespace", "make_grid_search"): StratumMakeGridSearch,
 }
 
 # Replace/override names in these upstream usage modules if present.
@@ -89,6 +96,19 @@ def _patch_definitions() -> None:
         _set_symbol(mod, symbol, adapter)
 
 
+def _patch_methods() -> None:
+    """Patch methods on classes."""
+    for (modname, class_name, method_name), adapter in _METHOD_REPLACEMENTS.items():
+        try:
+            mod = _import_module(modname)
+            cls = getattr(mod, class_name, None)
+            if cls is not None:
+                _set_symbol(cls, method_name, adapter)
+        except Exception:
+            # If the module, class, or method doesn't exist, skip it.
+            continue
+
+
 def _patch_usage_modules() -> None:
     for modname in _USAGE_MODULES:
         try:
@@ -123,10 +143,13 @@ def patch_skrub() -> None:
         # 1) Patch definitions (so future internal imports resolve to adapters)
         _patch_definitions()
 
-        # 2) Patch usage modules (so already-imported names are overwritten)
+        # 2) Patch methods on classes
+        _patch_methods()
+
+        # 3) Patch usage modules (so already-imported names are overwritten)
         _patch_usage_modules()
 
-        # 3) Patch top-level `skrub` for user-facing imports
+        # 4) Patch top-level `skrub` for user-facing imports
         for symbol, adapter in _symbol_OVERRIDES_ITEMS():
             _set_symbol(upstream, symbol, adapter)
 

@@ -1,6 +1,7 @@
+from sklearn.base import BaseEstimator
 from sklearn.dummy import DummyRegressor
+from stratum import config
 from stratum.runtime import grid_search
-from stratum.logical_optimizer import optimize
 from sklearn.model_selection import KFold
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1, datetime_pipeline2
 from contextlib import redirect_stdout
@@ -8,10 +9,20 @@ from io import StringIO
 import time
 import unittest
 import numpy as np
-import skrub
+import stratum as skrub
 import logging
 
 logging.basicConfig(level=logging.INFO)
+
+class InputCheckEstimator(BaseEstimator):
+    def fit(self, X, y):
+        self.cols = X.columns
+        self.my_id = f"train {time.time()}"
+        return self
+    def predict(self, X):
+        if not set(X.columns) == set(self.cols):
+            raise ValueError(f"Columns mismatch: {set(X.columns)} != {set(self.cols)}")
+        return X[self.cols[0]]
 
 class SearchTest(RuntimeTest):
     def test_search(self):
@@ -22,7 +33,6 @@ class SearchTest(RuntimeTest):
         y1 = datetime_pipeline1(X, y)
         y2 = datetime_pipeline2(X, y)
         y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
-        y = optimize(y)
 
         cv = KFold(n_splits=3, shuffle=True, random_state=42)
         results, preds = grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
@@ -53,17 +63,34 @@ class SearchTest(RuntimeTest):
             self.assertEqual("X and y nodes not found in the DAG",str(e))
 
 
-    def test_search_choice_not_at_the_end(self):
+    def test_search_choice_not_at_the_end1(self):
         data = skrub.as_data_op(self.df)
-        X = data[["x", "datetime"]].skb.mark_as_X()
+        X = data[["x"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
-        y = y + skrub.choose_from([0,1]).as_data_op()
+        X = X + skrub.choose_from([0,1]).as_data_op()
         pred = X.skb.apply(DummyRegressor(), y=y)
-        try:
-            grid_search(pred)
-            self.fail("Expected NotImplementedError")
-        except NotImplementedError as e:
-            self.assertEqual("Choices with non-DataOp outcomes are not supported yet.", str(e))
+        grid_search(pred)
+
+    def test_search_choice_not_at_the_end2(self):
+        data = skrub.as_data_op(self.df)
+        X = data[["x"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        X1 = X.assign(x_a= X["x"] + 1)
+        X2 = X.assign(x_b = X["x"] - 1)
+        X = 4 + skrub.choose_from([X1,X2]).as_data_op()
+        pred = X.skb.apply(DummyRegressor(), y=y)
+        with config(scheduler=True):
+            pred.skb.make_grid_search()
+
+    def test_search_choice_not_at_the_end3(self):
+        data = skrub.as_data_op(self.df)
+        X = data[["x"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        X1 = X.assign(x_a= X["x"] + 1)
+        X2 = X.assign(x_b = X["x"] - 1)
+        X = 4 + skrub.choose_from([X1,X2]).as_data_op()
+        pred = X.skb.apply(InputCheckEstimator(), y=y)
+        grid_search(pred)
 
     def test_search_error_during_dataop_processing(self):
         data = skrub.as_data_op(self.df)
@@ -75,7 +102,7 @@ class SearchTest(RuntimeTest):
             grid_search(pred)
             self.fail("Expected RunTimeError")
         except RuntimeError as e:
-            self.assertTrue(e.args[0].startswith("Error processing implementation '<Call '<lambda>'>' "))
+            self.assertTrue(e.args[0].startswith("Error processing Op '<Call '<lambda>'>'"))
 
 
 
@@ -96,7 +123,6 @@ class SearchTest(RuntimeTest):
         assert(out[4].split(" ")[-1] == "10")
         self.assertIn("<Apply DummyRegressor>", out[5])
         assert(out[5].split(" ")[-1] == "10")
-
 
 if __name__ == "__main__":
     unittest.main()
