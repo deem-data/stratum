@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
-from stratum.logical_optimizer import optimize
+from stratum.logical_optimizer import apply_cse_on_skrub_ir
 
 cols = ["Price", "Size", "Bedrooms", "Bathrooms", "Floors", "Waterfront", "View", "Condition", "Grade", "Age"]
 df = pd.DataFrame({col: np.random.random(10) for col in cols})
@@ -31,5 +31,5 @@ pred2 = x2.skb.apply(model, y=y)
 preds = skrub.choose_from({"pipeline 1": pred1, "pipeline 2": pred2}).as_data_op()
 preds.skb.draw_graph().open()
 
-preds = optimize(preds)
+preds = apply_cse_on_skrub_ir(preds)
 preds.skb.draw_graph().open()

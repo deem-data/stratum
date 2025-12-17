@@ -5,7 +5,7 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.linear_model import Ridge, LinearRegression, LogisticRegression
 from sklearn.svm import LinearSVC
 
-from stratum.logical_optimizer import optimize
+from stratum.logical_optimizer import apply_cse_on_skrub_ir
 from stratum.runtime import grid_search
 
 import stratum as skrub
@@ -88,7 +88,7 @@ def tfidf_pipeline(df_path: str, show_graph: bool = False, stratum: bool = False
 def make_gridsearch(pred, random_state=42, optimize_enabled=False, stratum=False, multi=False, kfold=False) -> tuple[list, list]:
     if optimize_enabled:
         t00 = time()
-        pred = optimize(pred)
+        pred = apply_cse_on_skrub_ir(pred)
         t0 = time()
         stats = [t0 - t00]
     else:

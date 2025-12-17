@@ -26,6 +26,7 @@ requires-python = ">=3.10"
 dependencies = [
     "skrub>=0.3",
     "polars",
+    "graphviz",
 ]
 
 [project.optional-dependencies]

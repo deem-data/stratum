@@ -1,4 +1,5 @@
-from .optimize import optimize
+from ._optimize import apply_cse_on_skrub_ir
+
 __all__ = [
-    "optimize",
+    "apply_cse_on_skrub_ir",
 ]

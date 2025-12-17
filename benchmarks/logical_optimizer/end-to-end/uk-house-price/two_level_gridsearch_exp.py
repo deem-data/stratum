@@ -1,5 +1,5 @@
-from sklearn.model_selection import KFold
-import skrub
+from sklearn.metrics import make_scorer, mean_squared_error
+from sklearn.model_selection import KFold, ShuffleSplit
 import pandas as pd
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
@@ -8,6 +8,9 @@ from sklearn.linear_model import ElasticNet,  Ridge
 from time import perf_counter
 import numpy as np
 from sklearn.preprocessing import StandardScaler
+import stratum as skrub
+import io
+from contextlib import redirect_stdout, redirect_stderr
 test=True
 
 file_path = "input/price_paid_records_small.csv" if test else "input/price_paid_records.csv"
@@ -90,11 +93,9 @@ def pre_process_2(X):
 X_1 = pre_process_1(X,y)
 X_2 = pre_process_2(X)
 X_enc = skrub.choose_from({
-    "data engineering 1": X_1, 
-    "data engineering 2": X_2
-    }, name="X_enc").as_data_op()
-
-X_enc = X_enc.skb.apply_func(lambda x, m: (x, print(m))[0], skrub.eval_mode())
+    "1": X_1, 
+    "2": X_2
+    }, name="feat_eng").as_data_op()
 
 models = {
     "Ridge": Ridge(random_state=42),
@@ -103,11 +104,28 @@ models = {
     "ElasticNet": ElasticNet(random_state=42),
 }
 preds = {k: X_enc.skb.apply(model, y=y) for k,model in models.items()}
-preds = skrub.choose_from(preds, name="preds").as_data_op()
+preds = skrub.choose_from(preds, name="models").as_data_op()
+preds = preds.skb.apply_func(lambda a: a)
+preds.skb.draw_graph().open()
 
-cv = KFold(n_splits=3, shuffle=True, random_state=42)
+# play with cvs
+# cv = KFold(n_splits=3, shuffle=True, random_state=42)
+cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42)
+scorer = make_scorer(mean_squared_error)
 t0 = perf_counter()
-search = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True)
+with skrub.config(scheduler=True, stats=True):
+    results = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True)
 t1 = perf_counter()
-print(f"Time taken: {t1 - t0} seconds")
+print("="*80)
+print(f"Stratum gridsearch scheduler time: {t1 - t0} seconds")
+print("="*80)
+with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+    search = preds.skb.make_grid_search(cv=cv, n_jobs=-1, fitted=True, scoring=scorer, refit=False)
+t2 = perf_counter()
+print("="*80)
+print(f"Skrub default gridsearch time: {t2 - t1} seconds")
+print("="*80)
+print("Results:")
 print(search.results_)
+print(results)
+print("="*80)

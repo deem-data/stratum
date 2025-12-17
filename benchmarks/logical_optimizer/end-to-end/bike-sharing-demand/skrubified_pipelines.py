@@ -9,7 +9,7 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_log_error, make_scorer
 import time
 
-from stratum.logical_optimizer import optimize
+from stratum.logical_optimizer import apply_cse_on_skrub_ir
 
 t0 = time.time()
 
@@ -107,7 +107,7 @@ merged_pipelines = skrub.choose_from({
 }, name="merged pipelines").as_data_op().skb.set_name("GridSearchCV")
 
 # merged_pipelines.skb.draw_graph().open()
-merged_pipelines = optimize(merged_pipelines)
+merged_pipelines = apply_cse_on_skrub_ir(merged_pipelines)
 # merged_pipelines.skb.draw_graph().open()
 
 # RMSLE scorer

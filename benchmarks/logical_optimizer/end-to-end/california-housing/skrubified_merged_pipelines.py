@@ -5,7 +5,7 @@ import skrub
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 
-from stratum.logical_optimizer import optimize
+from stratum.logical_optimizer import apply_cse_on_skrub_ir
 from stratum.runtime import grid_search
 from time import time
 
@@ -122,7 +122,7 @@ def run_experiment(pred, show_graph=False):
 
     # Optimization step (only run once)
     t00 = time()
-    pred_optimized = optimize(pred)
+    pred_optimized = apply_cse_on_skrub_ir(pred)
     t01 = time()
     print("Optimization time: ", t01 - t00) 
 

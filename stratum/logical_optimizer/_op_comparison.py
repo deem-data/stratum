@@ -5,31 +5,19 @@ from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import Call, GetItem, CallMethod, GetAttr, Apply, Value, BinOp
 from skrub.selectors._base import All
 
-
 def equals_data_op(op1: DataOp, op2: DataOp):
     """
     Check whether two Skrub DataOp nodes are functionally equivalent.
-
-    This function compares two DataOp instances (`op1` and `op2`) by inspecting
-    their underlying `_skrub_impl` operators. It determines whether they represent
-    semantically identical computation steps in the DataOps graph — i.e., whether
-    they produce the same result given the same inputs.
-
-    Parameters
-    ----------
-    op1 : DataOp
-        First Skrub DataOp node to compare.
-    op2 : DataOp
-        Second Skrub DataOp node to compare.
-
-    Returns
-    -------
-    bool
-        True if both DataOps are equivalent in structure and semantics,
-        False otherwise.
     """
     impl1 = op1._skrub_impl
     impl2 = op2._skrub_impl
+    return equals_skrub_impl(impl1, impl2)
+
+
+def equals_skrub_impl(impl1, impl2):
+    """
+    Check whether two Skrub dataop implementations are functionally equivalent.
+    """
     if type(impl1) == type(impl2):
         if isinstance(impl1, GetItem):
             # op1 = data["col1"], op2 = data["col1"]
@@ -76,7 +64,7 @@ def equals_data_op(op1: DataOp, op2: DataOp):
     return False
 
 
-def estimator_equality_check(est1: DataOp, est2: DataOp) -> bool:
+def estimator_equality_check(est1: BaseEstimator, est2: BaseEstimator) -> bool:
     """"
     Check if two estimators are semantically equal.
     """
@@ -91,26 +79,20 @@ def estimator_equality_check(est1: DataOp, est2: DataOp) -> bool:
             return False
     return True
 
-
 def hash_data_op(op: DataOp) -> int:
     """
     Compute a hash value for a Skrub DataOp node, consistent with equals_data_op().
+    """
+    return hash_skrub_impl(op._skrub_impl)
+
+def hash_skrub_impl(impl) -> int:
+    """
+    Compute a hash value for a Skrub dataop implementation, consistent with equals_skrub_impl().
 
     This function produces a stable, structure-aware hash used for caching and
-    deduplication of computation graph nodes. Two DataOps that are equal
-    according to `equals_data_op` will always produce the same hash value.
-
-    Parameters
-    ----------
-    op : DataOp
-        The Skrub DataOp instance to hash.
-
-    Returns
-    -------
-    int
-        A hash value uniquely identifying this DataOp's structure and semantics.
+    deduplication of computation graph nodes. Two skrub dataop implementations that are equal
+    according to `equals_skrub_impl` will always produce the same hash value.
     """
-    impl = op._skrub_impl
     t = type(impl)
 
     if isinstance(impl, GetItem):

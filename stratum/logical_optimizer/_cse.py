@@ -1,8 +1,7 @@
+from skrub import DataOp
+from ._op_comparison import update_data_op, hash_data_op, equals_data_op
 import logging
 
-from skrub import DataOp
-
-from stratum.logical_optimizer.utils import update_data_op, hash_data_op, equals_data_op
 
 logger = logging.getLogger(__name__)
 
