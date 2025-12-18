@@ -26,7 +26,8 @@ class _Flags:
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
     scheduler: bool =  False
     stats: bool = False # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
-    open_graph: bool = True
+    open_graph: bool = True,
+    DEBUG: bool = False
 
 FLAGS = _Flags()
 
@@ -36,7 +37,8 @@ def set_config(rust_backend: bool | None = None,
            allow_patch: bool | None = None,
            stats: bool | None = None,
            scheduler: bool | None = None,
-           open_graph: bool | None = None) -> None:
+           open_graph: bool | None = None,
+           DEBUG: bool | None = None) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -57,6 +59,12 @@ def set_config(rust_backend: bool | None = None,
 
         stratum_stats: bool, default false
             Enable/disable stratum statistics. This will print the heavy hitters of a DataOp DAG execution.
+
+        open_graph: bool, default true
+            Open the graph after optimization.
+
+        DEBUG: bool, default false
+            Enable/disable debug mode.
     """
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
@@ -78,6 +86,9 @@ def set_config(rust_backend: bool | None = None,
             FLAGS.stats = bool(stats)
     if open_graph is not None:
         FLAGS.open_graph = bool(open_graph)
+    if DEBUG is not None:
+        FLAGS.DEBUG = bool(DEBUG)
+        os.environ["STRATUM_DEBUG"] = "1" if FLAGS.DEBUG else "0"
 
 
 def get_config() -> dict:
@@ -90,6 +101,7 @@ def get_config() -> dict:
         "scheduler": FLAGS.scheduler,
         "stats": FLAGS.stats,
         "open_graph": FLAGS.open_graph,
+        "DEBUG" : FLAGS.DEBUG,
     }
 
 @contextmanager

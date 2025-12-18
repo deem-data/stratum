@@ -17,16 +17,14 @@ class TestOpUtils(unittest.TestCase):
         leaf = ops[-1]
         if graph:
             show_graph(ops, filename='original')
-        new_ops, leafs = clone_sub_dag(clone_target, new_root_op=new_root_op, stop_at_op=stop_at_op)
-        ops.extend(new_ops)
+        leafs = clone_sub_dag(clone_target, new_root_op=new_root_op, stop_at_op=stop_at_op)
         if graph:
             show_graph(ops, filename='cloned')
         if run_assertions:
             # TODO Add more sophisticated expected graph comparison checks
             self.assertEqual(num_clone_target_children_original * 2, len(clone_target.outputs))
             self.assertTrue(leaf.eq_shallow(leafs[-1]))
-            for op in new_ops:
-                self.assertTrue(op.was_cloned)
+
 
     def test_clone_sub_dag1(self):
         t1 = skrub.as_data_op(1)
@@ -87,8 +85,11 @@ class TestOpUtils(unittest.TestCase):
         t6 = skrub.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
+        sink = out[-1]
+        if graph:
+            show_graph(sink, filename='original')
         out[1].outputs = []
-        new_ops, _ = clone_sub_dag(out[2], new_root_op=out[1], stop_at_op=out[5])
+        clone_sub_dag(out[2], new_root_op=out[1], stop_at_op=out[5])
         out[0].outputs = []
         for c in out[2].outputs:
             c.inputs = [out[0] if p is out[2] else p for p in c.inputs]
@@ -101,10 +102,9 @@ class TestOpUtils(unittest.TestCase):
             l2_names.append(l2_names[i] + l1_names[1])
         for i in range(n_roots):
             l2_names[i] += l1_names[0]
-        out.remove(out[2])
-        out.extend(new_ops)
+
         if graph:
-            show_graph(out, filename='cloned')
+            show_graph(sink, filename='cloned')
 
 
     def test_choice_unrolling(self):
@@ -115,8 +115,9 @@ class TestOpUtils(unittest.TestCase):
         t5 = t3 - 3
         t6 = skrub.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
-        out = optimize(t7)
-        out =choice_unrolling(out)
+        out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
+        sink = out[-1]
+        out = choice_unrolling(sink)
         with config(open_graph=False):
             show_graph(out, filename='choice_unrolling')
 

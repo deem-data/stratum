@@ -1,4 +1,5 @@
 from collections import deque
+from typing import Iterator
 from graphviz import Digraph
 from stratum.logical_optimizer._ops import Op, ChoiceOp
 from stratum._config import get_config
@@ -57,14 +58,13 @@ def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
     queue = []
 
     # clone_look_up: Look-up table for setting parents correctly
-    ops_of_sub_dag, sub_dag_leaves, clone_look_up = [], [], {root_op: new_root_op}
+    sub_dag_leaves, clone_look_up = [], {root_op: new_root_op}
     for c in root_op.outputs:
         queue.append(c)
 
     while queue:
         op = queue.pop(0)
         op_clone = op.clone()
-        ops_of_sub_dag.append(op_clone)
         clone_look_up[op] = op_clone
 
         # update op_clones's parents and the parents's chidlren
@@ -87,64 +87,49 @@ def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
                     queue.append(child)
         else:
             sub_dag_leaves.append(op_clone)
-    return ops_of_sub_dag, sub_dag_leaves
+    return sub_dag_leaves
 
 
-def topological_sort_ir(ops: list[Op]) -> list[Op]:
+def topological_iterator(sink: Op) -> Iterator[Op]:
     """
-    Perform topological sort on Op IR DAG.
+    Iterate over the Op DAG in topological order.
     """
-    
-    indegree = {node: len(node.inputs) if node.inputs is not None else 0 for node in ops}
-    
-    # Initialize queue with nodes having no dependencies (no children)
-    queue = deque([node for node, deg in indegree.items() if deg == 0])
-    topo_order = []
-    
-    while queue:
-        node = queue.popleft()
-        topo_order.append(node)
-        
-        # Process dependents (parents) - reduce their indegree
-        if node.outputs is not None:
-            for dependent in node.outputs:
-                indegree[dependent] -= 1
-                if indegree[dependent] == 0:
-                    queue.append(dependent)
-    
-    # Check for cycles (if not all nodes were processed)
-    if len(topo_order) != len(ops):
-        for op in ops:
-            if op not in topo_order:
-                print(op.name)
-        raise ValueError("Cycle detected in DAG - topological sort not possible")
-    
-    return topo_order
+
+    # first we need to bfs for finding all sources in the dag
+    queue1 = deque([sink])
+    indegree = {sink: 0 if not sink.inputs else len(sink.inputs)}
+    queue2 = deque()
+    while queue1:
+        op = queue1.popleft()
+        if not op.inputs or len(op.inputs) == 0:
+            queue2.append(op)
+        else:
+            for in_op in op.inputs:
+                if in_op not in indegree:
+                    indegree[in_op] = 0 if not in_op.inputs else len(in_op.inputs)
+                    queue1.append(in_op)
+
+    # now we can do topological traversal
+    while queue2:
+        op = queue2.popleft()
+        yield op
+        for out_op in op.outputs:
+            indegree[out_op] -= 1
+            if indegree[out_op] == 0:
+                queue2.append(out_op)
 
 
-def show_graph(op: Op | list[Op], filename: str = 'plan'):  
+def show_graph(sink: Op, filename: str = 'plan'):  
     """Show the runtime plan of the DataOp DAG."""
 
     dot = Digraph(comment=filename)
-    queue = []
-    visited = set()
-    if isinstance(op, list):
-        for o in op:
-            queue.append(o)
-    else:
-        queue = [op]
-    while queue:
-        current_op = queue.pop(0)
-        if current_op in visited:
-            continue
-        visited.add(current_op)
+    for current_op in topological_iterator(sink):
         current_op.update_name()
         name = current_op.name
         name = name.replace("<","'").replace(">","'") if name is not None else "None"
         dot.node(str(id(current_op)), name)
         for child in current_op.outputs:
             dot.edge(str(id(current_op)), str(id(child)))
-            queue.append(child)
     filename = "graphs/" + filename
     # make sure folder exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)

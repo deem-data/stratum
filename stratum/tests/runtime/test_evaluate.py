@@ -4,9 +4,9 @@ from sklearn.preprocessing import StandardScaler
 import skrub
 from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
-from stratum.runtime._scheduler import Scheduler, evaluate
+from stratum.runtime._scheduler import evaluate
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1
-
+import stratum
 import logging
 logging.basicConfig(level=logging.INFO)
 
