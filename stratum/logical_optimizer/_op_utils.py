@@ -1,87 +1,8 @@
 from collections import deque
 from graphviz import Digraph
 from stratum.logical_optimizer._ops import Op, ChoiceOp
-from ._ops import SearchEvalOp
 from stratum._config import get_config
-
-EVAL_OP_ENABLED = False
-
-
-def choice_unrolling(ops_ordered: list[Op]):
-    """Explode the dag after choice op into separate dags for each outcome."""
-    i = 0
-    while len(ops_ordered) > i:
-        op = ops_ordered[i]
-        if op.is_choice():
-            outcomes = op.parents
-
-            # check if we find any choice in the sub-dag of the current choice
-            last_op, is_choice = find_choice_naive(op)
-            no_children = last_op is op
-            if no_children:
-                if EVAL_OP_ENABLED:
-                    # TODO add handle for no_children --> replace choice with eval op
-                    raise NotImplementedError("Fix me")
-                else:
-                    # nothing to do
-                    i += 1
-                    continue
-            if is_choice:
-                new_ops = unroll_nested_choice(last_op, op, outcomes)
-            else:
-                new_ops = unroll_simple_choice(last_op, op, outcomes)
-
-            ops_ordered.remove(op)
-            ops_ordered.extend(new_ops)
-            ops_ordered = topological_sort_ir(ops_ordered)
-            del op
-        else:
-            i += 1
-    return ops_ordered
-
-
-def unroll_simple_choice(last_op: Op, op: ChoiceOp, outcomes: list) -> list[SearchEvalOp | ChoiceOp]:
-    dag_sink = (SearchEvalOp(outcome_names=op.outcome_names, parent=last_op) if EVAL_OP_ENABLED
-                          else ChoiceOp(outcome_names=op.outcome_names, append_choice_name=False))
-    if not EVAL_OP_ENABLED:
-        dag_sink.parents = [last_op]
-        dag_sink.children = []
-    new_ops = [dag_sink]
-
-    # clones sub-dag after choice op for all outcomes[1:]
-    for outcome in outcomes[1:]:
-        outcome.children = []
-        tmp_new_ops, leafs = clone_sub_dag(op, new_root_op=outcome)
-        assert len(leafs) == 1
-        dag_sink.add_parent(leafs[0])
-        leafs[0].add_child(dag_sink)
-        new_ops.extend(tmp_new_ops)
-
-    # reuse sub-dag for the first outcome
-    outcomes[0].children = []
-    replace_op_in_children(op, replacement=outcomes[0])
-    last_op.add_child(dag_sink)
-    return new_ops
-
-
-def unroll_nested_choice(last_op: ChoiceOp, op: ChoiceOp, outcomes) -> list[Op]:
-    new_ops, n_outcomes = [], len(last_op.outcome_names)
-
-    # clone the sub-dag for each outcome of the current choice
-    for outcome, outcome_name in zip(outcomes[1:], op.outcome_names[1:]):
-        outcome.children = []
-        tmp_new_ops, _ = clone_sub_dag(op, new_root_op=outcome, stop_at_op=last_op)
-        for i in range(n_outcomes):
-            last_op.outcome_names.append(last_op.outcome_names[i] + outcome_name)
-        new_ops.extend(tmp_new_ops)
-
-    # reuse sub-dag for the first outcome
-    outcomes[0].children = [op.children[0]]
-    for i in range(n_outcomes):
-        last_op.outcome_names[i] += op.outcome_names[0]
-    outcomes[0].children = []
-    replace_op_in_children(op, replacement=outcomes[0])
-    return new_ops
+import os
 
 
 def replace_op_in_children(op: Op, replacement: Op):
@@ -224,5 +145,7 @@ def show_graph(op: Op | list[Op], filename: str = 'plan'):
         for child in current_op.children:
             dot.edge(str(id(current_op)), str(id(child)))
             queue.append(child)
-    
+    filename = "graphs/" + filename
+    # make sure folder exists
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     dot.render(filename, view=get_config()["open_graph"],cleanup=True)
