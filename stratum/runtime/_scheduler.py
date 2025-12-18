@@ -8,7 +8,7 @@ import io
 from contextlib import redirect_stdout, redirect_stderr
 from stratum._config import FLAGS
 from stratum.logical_optimizer._optimize import optimize,OptConfig
-from stratum.logical_optimizer._ops import ChoiceOp, Op, ValueOp
+from stratum.logical_optimizer._ops import CallOp, ChoiceOp, GetItemOp, ImplOp, MethodCallOp, Op, ValueOp
 
 import pandas as pd
 import logging
@@ -130,7 +130,7 @@ class Scheduler:
         """Compute nodes until X and y nodes are found and store them."""
         for i, op in enumerate(self.ops_ordered):
             self.process_op(op)
-            if isinstance(op.skrub_impl, EvalMode):
+            if isinstance(op, ImplOp) and isinstance(op.skrub_impl, EvalMode):
                 self.flagged_for_recomputation.append(op)
             # TODO Nodes between X and y, might be recomputed as well
             if op.is_X:
@@ -145,61 +145,13 @@ class Scheduler:
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
-        impl = op.skrub_impl
         t0 = perf_counter() if self.timings is not None else 0
+        try:
+            op.process(mode=self.mode, environment=self.env)
+        except Exception as e:
+            raise RuntimeError(f"Error processing '{op}': {e}")
 
-        if isinstance(op, ValueOp):
-            op.intermediate = op.value
-        elif isinstance(op, ChoiceOp):
-            results = []
-            outcome_iter = iter(op.parents)
-            for name in op.make_outcome_names():
-                results.append({ "id" : name, "vals" : next(outcome_iter).intermediate})
-            op.intermediate = results[0] if len(results) == 1 else results
-        elif hasattr(impl, "eval"):
-            # DataOp with eval method have a fused implementation of the generator and the compute method
-            # we need to iterate over the generator and replace the requested fields with correct inputs
-            last_yield = None
-            gen = impl.eval(mode=self.mode, environment=self.env)
-            parent_iter = iter(op.parents)
-            while True:
-                try:
-                    last_yield = gen.send(last_yield)
-                except StopIteration as e:
-                    op.intermediate = e.value
-                    # if self.mode == "predict" and isinstance(impl.estimator, TableVectorizer):
-                    #     op.intermediate = "test"
-
-                    break
-                if isinstance(last_yield, DataOp):
-                    last_yield = next(parent_iter).intermediate
-        else:
-            try:
-                fields = self.replace_fields_with_values(impl, parents=op.parents)
-                ns = SimpleNamespace(**{k:v for k,v in fields})
-                op.intermediate = impl.compute(ns, self.mode, self.env)
-            except Exception as e:
-                raise RuntimeError(f"Error processing Op '{op.name}': {e}")
-        
         if self.timings is not None:
             duration = perf_counter() - t0
-            self.timings.append((op.name, duration))
+            self.timings.append((str(op), duration))
         return op
-
-    def replace_fields_with_values(self, impl, parents):
-        """Replace DataOp fields in implementation with their computed values."""
-        parent_iter = iter(parents)
-
-        def replace_dataop(value):
-            """Recursively replace DataOp instances with their actual values."""
-            if isinstance(value, DataOp):
-                return next(parent_iter).intermediate
-            elif isinstance(value, (list, tuple)):
-                new_seq = [replace_dataop(item) for item in value]
-                return type(value)(new_seq)
-            elif isinstance(value, dict):
-                return {key: replace_dataop(val) for key, val in value.items()}
-            else:
-                return value
-
-        return [(field, replace_dataop(getattr(impl, field))) for field in impl._fields]

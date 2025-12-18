@@ -19,7 +19,6 @@ class EvaluateTest(RuntimeTest):
 
         # pipeline 1
         pred = datetime_pipeline1(x, y)
-
         self.compare_evaluate(pred)
     
 

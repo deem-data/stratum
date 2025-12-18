@@ -95,19 +95,24 @@ def convert_to_ops(dag: DataOp) -> list[Op]:
     op_order = []
     for node in order:
         op = ids_to_ops[node]
-        op.children = [ids_to_ops[child] for child in parents.get(node, [])]
+        op.outputs = [ids_to_ops[child] for child in parents.get(node, [])]
+
         if op.is_choice():
-            parent_ops_iter = iter([ids_to_ops[parent] for parent in children.get(node, [])])
-            for i, p in enumerate(op.parents):
-                if p == 0:
-                    op.parents[i] = next(parent_ops_iter)
-                else:
-                    p.children = [op]
-                    op_order.append(p)
+            convert_handle_choice(node, op, ids_to_ops, children, op_order)
         else:
-            op.parents = [ids_to_ops[parent] for parent in children.get(node, [])]
+            op.inputs = [ids_to_ops[parent] for parent in children.get(node, [])]
         op_order.append(op)
     return op_order
+
+
+def convert_handle_choice(node, op, ids_to_ops, children, op_order):
+    parent_ops_iter = iter(ids_to_ops[parent] for parent in children.get(node, []))
+    for j, p in enumerate(op.inputs):
+        if p == 0:
+            op.inputs[j] = next(parent_ops_iter)
+        else:
+            p.outputs = [op]
+            op_order.append(p)
 
 
 def choice_unrolling(ops_ordered: list[Op]):
@@ -116,7 +121,7 @@ def choice_unrolling(ops_ordered: list[Op]):
     while len(ops_ordered) > i:
         op = ops_ordered[i]
         if op.is_choice():
-            outcomes = op.parents
+            outcomes = op.inputs
 
             # check if we find any choice in the sub-dag of the current choice
             last_op, is_choice = find_choice_naive(op)
@@ -150,13 +155,13 @@ def unroll_simple_choice(last_op: Op, op: ChoiceOp, outcomes: list) -> list[Sear
     dag_sink = (SearchEvalOp(outcome_names=op.outcome_names, parent=last_op) if EVAL_OP_ENABLED
                           else ChoiceOp(outcome_names=op.outcome_names, append_choice_name=False))
     if not EVAL_OP_ENABLED:
-        dag_sink.parents = [last_op]
-        dag_sink.children = []
+        dag_sink.inputs = [last_op]
+        dag_sink.outputs = []
     new_ops = [dag_sink]
 
     # clones sub-dag after choice op for all outcomes[1:]
     for outcome in outcomes[1:]:
-        outcome.children = []
+        outcome.outputs = []
         tmp_new_ops, leafs = clone_sub_dag(op, new_root_op=outcome)
         assert len(leafs) == 1
         dag_sink.add_parent(leafs[0])
@@ -164,7 +169,7 @@ def unroll_simple_choice(last_op: Op, op: ChoiceOp, outcomes: list) -> list[Sear
         new_ops.extend(tmp_new_ops)
 
     # reuse sub-dag for the first outcome
-    outcomes[0].children = []
+    outcomes[0].outputs = []
     replace_op_in_children(op, replacement=outcomes[0])
     last_op.add_child(dag_sink)
     return new_ops
@@ -176,16 +181,16 @@ def unroll_nested_choice(last_op: ChoiceOp, op: ChoiceOp, outcomes) -> list[Op]:
 
     # clone the sub-dag for each outcome of the current choice
     for outcome, outcome_name in zip(outcomes[1:], op.outcome_names[1:]):
-        outcome.children = []
+        outcome.outputs = []
         tmp_new_ops, _ = clone_sub_dag(op, new_root_op=outcome, stop_at_op=last_op)
         for i in range(n_outcomes):
             last_op.outcome_names.append(last_op.outcome_names[i] + outcome_name)
         new_ops.extend(tmp_new_ops)
 
     # reuse sub-dag for the first outcome
-    outcomes[0].children = [op.children[0]]
+    outcomes[0].outputs = [op.outputs[0]]
     for i in range(n_outcomes):
         last_op.outcome_names[i] += op.outcome_names[0]
-    outcomes[0].children = []
+    outcomes[0].outputs = []
     replace_op_in_children(op, replacement=outcomes[0])
     return new_ops

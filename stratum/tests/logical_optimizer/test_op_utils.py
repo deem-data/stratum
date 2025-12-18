@@ -13,7 +13,7 @@ class TestOpUtils(unittest.TestCase):
 
     def run_clone_sub_dag(self, ops: list, clone_position: int, graph: bool = False, new_root_op = None, stop_at_op = None, run_assertions = True):
         clone_target = ops[clone_position]
-        num_clone_target_children_original = len(clone_target.children)
+        num_clone_target_children_original = len(clone_target.outputs)
         leaf = ops[-1]
         if graph:
             show_graph(ops, filename='original')
@@ -23,7 +23,7 @@ class TestOpUtils(unittest.TestCase):
             show_graph(ops, filename='cloned')
         if run_assertions:
             # TODO Add more sophisticated expected graph comparison checks
-            self.assertEqual(num_clone_target_children_original*2, len(clone_target.children))
+            self.assertEqual(num_clone_target_children_original * 2, len(clone_target.outputs))
             self.assertTrue(leaf.eq_shallow(leafs[-1]))
             for op in new_ops:
                 self.assertTrue(op.was_cloned)
@@ -87,13 +87,13 @@ class TestOpUtils(unittest.TestCase):
         t6 = skrub.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
-        out[1].children = []
+        out[1].outputs = []
         new_ops, _ = clone_sub_dag(out[2], new_root_op=out[1], stop_at_op=out[5])
-        out[0].children = []
-        for c in out[2].children:
-            c.parents = [out[0] if p is out[2] else p for p in c.parents]
-            out[0].children.append(c)
-        out[2].children = []
+        out[0].outputs = []
+        for c in out[2].outputs:
+            c.inputs = [out[0] if p is out[2] else p for p in c.inputs]
+            out[0].outputs.append(c)
+        out[2].outputs = []
         l1_names = out[2].outcome_names
         l2_names = out[5].outcome_names
         n_roots = len(l2_names)

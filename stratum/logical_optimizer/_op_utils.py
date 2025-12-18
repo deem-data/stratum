@@ -7,8 +7,8 @@ import os
 
 def replace_op_in_children(op: Op, replacement: Op):
     """Replace op in children of op with replacement op."""
-    for c in op.children:
-        c.parents = [replacement if p is op else p for p in c.parents]
+    for c in op.outputs:
+        c.inputs = [replacement if p is op else p for p in c.inputs]
         replacement.add_child(c)
 
 
@@ -19,8 +19,8 @@ def find_choice_naive(op: Op) -> ChoiceOp:
     # TODO check and improve find_choice(op: Op)
     last_op = op
     contains_choice = False
-    while len(last_op.children) > 0 and not contains_choice:
-        last_op = last_op.children[0]
+    while len(last_op.outputs) > 0 and not contains_choice:
+        last_op = last_op.outputs[0]
         contains_choice = last_op.is_choice()
     return last_op, contains_choice
 
@@ -33,7 +33,7 @@ def get_all_children(op: Op, stop_at_op: Op = None):
     while queue:
         node = queue.pop(0)
         if node.has_children():
-            for child in node.children:
+            for child in node.outputs:
                 if child in visited:
                     parents_internal[child].append(node)
                 elif child is not stop_at_op:
@@ -58,28 +58,28 @@ def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
 
     # clone_look_up: Look-up table for setting parents correctly
     ops_of_sub_dag, sub_dag_leaves, clone_look_up = [], [], {root_op: new_root_op}
-    for c in root_op.children:
+    for c in root_op.outputs:
         queue.append(c)
 
     while queue:
         op = queue.pop(0)
-        op_clone = op.clone(children=[], parents=[])
+        op_clone = op.clone()
         ops_of_sub_dag.append(op_clone)
         clone_look_up[op] = op_clone
 
         # update op_clones's parents and the parents's chidlren
-        for p in op.parents:
+        for p in op.inputs:
             p = clone_look_up.get(p, p)
             op_clone.add_parent(p)
             p.add_child(op_clone)
 
-        if op.children is not None and len(op.children) > 0:
-            for child in op.children:
+        if op.outputs is not None and len(op.outputs) > 0:
+            for child in op.outputs:
                 if child is stop_at_op:
                     op_clone.add_child(stop_at_op)
                     stop_at_op.add_parent(op_clone)
                     # we dont add the child to the sub-dag and dont add it to op_clone's children
-                    assert len(op.children) == 1, "Op before stop Op should have only one child"
+                    assert len(op.outputs) == 1, "Op before stop Op should have only one child"
                     sub_dag_leaves.append(op_clone)
                     continue
                 indegree[child] -= 1
@@ -95,7 +95,7 @@ def topological_sort_ir(ops: list[Op]) -> list[Op]:
     Perform topological sort on Op IR DAG.
     """
     
-    indegree = {node: len(node.parents) if node.parents is not None else 0 for node in ops}
+    indegree = {node: len(node.inputs) if node.inputs is not None else 0 for node in ops}
     
     # Initialize queue with nodes having no dependencies (no children)
     queue = deque([node for node, deg in indegree.items() if deg == 0])
@@ -106,8 +106,8 @@ def topological_sort_ir(ops: list[Op]) -> list[Op]:
         topo_order.append(node)
         
         # Process dependents (parents) - reduce their indegree
-        if node.children is not None:
-            for dependent in node.children:
+        if node.outputs is not None:
+            for dependent in node.outputs:
                 indegree[dependent] -= 1
                 if indegree[dependent] == 0:
                     queue.append(dependent)
@@ -142,7 +142,7 @@ def show_graph(op: Op | list[Op], filename: str = 'plan'):
         name = current_op.name
         name = name.replace("<","'").replace(">","'") if name is not None else "None"
         dot.node(str(id(current_op)), name)
-        for child in current_op.children:
+        for child in current_op.outputs:
             dot.edge(str(id(current_op)), str(id(child)))
             queue.append(child)
     filename = "graphs/" + filename

@@ -102,7 +102,7 @@ class SearchTest(RuntimeTest):
             grid_search(pred)
             self.fail("Expected RunTimeError")
         except RuntimeError as e:
-            self.assertTrue(e.args[0].startswith("Error processing Op '<Call '<lambda>'>'"))
+            self.assertTrue(e.args[0].startswith("Error processing 'CallOp(<lambda>)': invalid literal for int() with base 10: 'grr'"))
 
 
 
@@ -116,13 +116,14 @@ class SearchTest(RuntimeTest):
         # capture stdout
         with redirect_stdout(StringIO()) as stdout:
             grid_search(pred, return_predictions=False, show_stats=True)
-            out = stdout.getvalue()
+        out = stdout.getvalue()
         out = out.split("\n")
         self.assertIn("Heavy hitters", out[2])
-        self.assertIn("<Call '<lambda>'>", out[4])
+        self.assertIn("CallOp(<lambda>)", out[4])
         assert(out[4].split(" ")[-1] == "10")
-        self.assertIn("<Apply DummyRegressor>", out[5])
+        self.assertIn("ImplOp(<Apply DummyRegressor>)", out[5])
         assert(out[5].split(" ")[-1] == "10")
+
 
 if __name__ == "__main__":
     unittest.main()

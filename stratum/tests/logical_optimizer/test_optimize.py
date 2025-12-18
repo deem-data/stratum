@@ -29,9 +29,19 @@ class MyTestCase(unittest.TestCase):
             month=X1["datetime"].dt.month)
         out = optimize(X2, OptConfig(cse=True))
         self.assertEqual(out[0].skrub_impl, data._skrub_impl)
-        self.assertTrue(out[0].children[0] is out[1])
-        self.assertTrue(len(out[0].parents) == 0)
-        self.assertTrue(len(out[0].parents) == 0)
+        self.assertTrue(out[0].outputs[0] is out[1])
+        self.assertTrue(len(out[0].inputs) == 0)
+        
+    def test_more_ops(self):
+        data = skrub.as_data_op(self.df)
+        X = data[["x", "datetime"]].skb.mark_as_X()
+        X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
+        X2 = X1.assign(
+            year=X1["datetime"].dt.year,
+            month=X1["datetime"].dt.month)
+        out = optimize(X2, OptConfig(cse=True))
+
+
 
 
 if __name__ == '__main__':
