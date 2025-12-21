@@ -1,11 +1,11 @@
 from __future__ import annotations
 from types import SimpleNamespace
+from typing import Callable
 
 from sklearn import clone
 from skrub._data_ops._data_ops import DataOp
 from skrub._data_ops._choosing import Choice
-from skrub._data_ops._data_ops import Value, CallMethod, Call, GetAttr, GetItem
-from ._op_comparison import equals_skrub_impl
+from skrub._data_ops._data_ops import Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp
 from pandas import DataFrame
 
 # unique identifier for arguments, which need to be replaced with Op references later
@@ -19,41 +19,73 @@ class Op():
         self.intermediate = None
         self.is_X = is_X
         self.is_y = is_y
+        self.is_dataframe_op = False
         self.was_cloned = False
 
     def __str__(self):
-        return f"{self.__class__.__name__}({self.name})"
+        return f"{self.__class__.__name__}({self.name}){" [returns_df]" if self.is_dataframe_op else ""}"
     
     def __repr__(self):
         return f"{self.__class__.__name__}({self.name}, cloned={self.was_cloned}, id={id(self)})"
 
-    def eq_shallow(self, other):
-        """ 
-        Check if two Op objects are shallowly equal, i.e. if their skrub_impls are equal, we do not check the children and parents.
-        """
-        return equals_skrub_impl(self.skrub_impl, other.skrub_impl)
-
     def update_name(self):
         pass
 
-    def has_children(self) -> bool:
+    def has_outputs(self) -> bool:
         return self.outputs is not None and len(self.outputs) > 0
 
     def is_choice(self) -> bool:
         return isinstance(self, ChoiceOp)
 
-    def add_child(self, child: Op):
-        self.outputs.append(child)
+    def add_output(self, output: Op):
+        self.outputs.append(output)
 
-    def add_parent(self, parent: Op):
-        self.inputs.append(parent)
+    def add_input(self, input: Op):
+        self.inputs.append(input)
+
+    def replace_input(self, old_input: Op, new_input: Op):
+        for i, in_ in enumerate(self.inputs):
+            if in_ is old_input:
+                self.inputs[i] = new_input
+                return
+        raise ValueError(f"Input {old_input} not found in {self.__class__.__name__}.")
+
+    def replace_input_of_outputs(self, new_input):
+        for out in self.outputs:
+            out.replace_input(self, new_input)
+
+    def replace_output(self, old_output: Op, new_output: Op):
+        for i, out_ in enumerate(self.outputs):
+            if out_ is old_output:
+                self.outputs[i] = new_output
+                return
+        raise ValueError(f"Output {old_output} not found in {self.__class__.__name__}.")
+
+    def replace_output_of_inputs(self, new_output):
+        for in_ in self.inputs:
+            in_.replace_output(self, new_output)
 
     def clone(self):
-        raise NotImplementedError(f"Cloning of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
+        if getattr(self.__class__, "fields", None) is None:
+            raise NotImplementedError(f"Cloning of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
+        args, atts = self.__class__.fields, self.__dict__.items()
+        fields = {k: clone_value(v) for k,v in atts if k in args}
+        new_op = self.__class__(**fields)
+        new_op.outputs = []
+        new_op.inputs = []
+        new_op.was_cloned = True
+        return new_op
 
     def process(self, mode: str, environment: dict):
         raise NotImplementedError(f"Processing of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
 
+def clone_value(value):
+    if isinstance(value, dict):
+        return {k:clone_value(v) for k,v in value.items()}
+    elif isinstance(value, tuple):
+        return tuple(clone_value(el) for el in value)
+    else:
+        return value
 
 class ImplOp(Op):
     def __init__(self, name: str, skrub_impl, inputs=None, outputs=None):
@@ -114,6 +146,8 @@ class ImplOp(Op):
             self.intermediate = self.skrub_impl.compute(ns, mode, environment)
 
 class ChoiceOp(Op):
+    fields = ["outcome_names"]
+    
     def __init__(self, outcome_names: list[str] = None, n_outcomes: int = None, choice_name: str=None, append_choice_name = True, inputs = None):
         if outcome_names is None:
             outcome_names = [[(choice_name, f"Opt{i}")] for i in range(n_outcomes)]
@@ -147,6 +181,8 @@ class ChoiceOp(Op):
         self.intermediate = results[0] if len(results) == 1 else results
 
 class ValueOp(Op):
+    fields = ["value"]
+    
     def __init__(self, value):
         super().__init__(name="DataFrame" if isinstance(value, DataFrame) else str(value))
         self.value = value
@@ -158,14 +194,13 @@ class ValueOp(Op):
         self.intermediate = self.value
 
 class MethodCallOp(Op):
+    fields = ["method_name", "args", "kwargs"]
+    
     def __init__(self, method_name: str, args = None, kwargs = None):
         super().__init__(name=method_name)
         self.method_name = method_name
         self.args = args
         self.kwargs = kwargs
-
-    def clone(self):
-        return clone_op_helper(self)
 
     def process(self, mode: str, environment: dict):
         iter_ins = iter(self.inputs)
@@ -175,14 +210,13 @@ class MethodCallOp(Op):
         self.intermediate = _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
 
 class CallOp(Op):
+    fields = ["func", "args", "kwargs"]
+    
     def __init__(self, name: str = "CallOp", func=None, args=None, kwargs=None):
         super().__init__(name=name)
         self.func = func
         self.args = args
         self.kwargs = kwargs
-
-    def clone(self, children: list[Op] = None, parents: list[Op] = None):
-        return clone_op_helper(self)
 
     def process(self, mode: str, environment: dict):
         iter_ins = iter(self.inputs)
@@ -191,28 +225,58 @@ class CallOp(Op):
         self.intermediate = self.func(*_args, **_kwargs)
 
 class GetAttrOp(Op):
+    fields = ["attr_name"]
+    
     def __init__(self, attr_name: str=None):
         super().__init__(name=attr_name if attr_name else '?')
         self.attr_name = attr_name
 
-    def clone(self):
-        return clone_op_helper(self)
+    def __str__(self):
+        return f"ProjectionOp(GetAttr: {".".join(self.attr_name)}) [returns_df]" if self.is_dataframe_op else super().__str__()
 
     def process(self, mode: str, environment: dict):
-        self.intermediate = self.inputs[0].intermediate.__getattribute__(self.attr_name)
+        if self.is_dataframe_op:
+            self.intermediate = self.inputs[0].intermediate
+            for attr in self.attr_name:
+                self.intermediate = self.intermediate.__getattribute__(attr)
+        else:
+            self.intermediate = self.inputs[0].intermediate.__getattribute__(self.attr_name)
 
 class GetItemOp(Op):
+    fields = ["key"]
+    
     def __init__(self, key=None):
         super().__init__(name=str(key) if key is not None else '?')
         self.key = key
 
-    def clone(self):
-        return clone_op_helper(self)
-
     def process(self, mode: str, environment: dict):
         self.intermediate = self.inputs[0].intermediate[self.key]
 
-class SearchEvalOp(Op):
+class BinOp(Op):
+    fields = ["op", "left", "right"]
+    
+    def __init__(self, op: Callable, left, right):
+        super().__init__(name=op.__name__.lstrip('__').rstrip('__'))
+        self.op = op
+        self.left = left
+        self.right = right
+
+
+    def process(self, mode: str, environment: dict):
+        i = 0
+        if self.left is DATA_OP_PLACEHOLDER:
+            left = self.inputs[i].intermediate
+            i += 1
+        else:
+            left = self.left
+        if self.right is DATA_OP_PLACEHOLDER:
+            right = self.inputs[i].intermediate
+            i += 1
+        else:
+            right = self.right
+        self.intermediate = self.op(left, right)
+
+class SearchEvalOp(Op):    
     def __init__(self, outcome_names: list[str], parent: Op = None):
         super().__init__()
         self.name = "evaluate gridsearch" 
@@ -222,34 +286,6 @@ class SearchEvalOp(Op):
 
     def clone(self, children: list[Op] = None, parents: list[Op] = None):
         raise ValueError(f"We should not clone SearchEvalOp objects.")
-
-
-class_args = {
-    GetItemOp: ["key"], 
-    GetAttrOp: ["attr_name"], 
-    CallOp: ["func", "args", "kwargs"], 
-    MethodCallOp: ["method_name", "args", "kwargs"], 
-    ValueOp: ["value"], 
-    ChoiceOp: ["outcome_names", "n_outcomes", "choice_name", "append_choice_name", "parents"], 
-    SearchEvalOp: ["outcome_names", "parent"]
-}
-
-def clone_value(value):
-    if isinstance(value, dict):
-        return {k:clone_value(v) for k,v in value.items()}
-    elif isinstance(value, tuple):
-        return tuple(clone_value(el) for el in value)
-    else:
-        return value
-
-def clone_op_helper(op):
-    args, atts = class_args[op.__class__], op.__dict__.items()
-    fields = {k: clone_value(v) for k,v in atts if k in args}
-    new_op = op.__class__(**fields)
-    new_op.outputs = []
-    new_op.inputs = []
-    new_op.was_cloned = True
-    return new_op
 
 def remove_datops_from_args(args: tuple  | dict):
     if isinstance(args, tuple):
@@ -273,6 +309,7 @@ def as_op(data_op: DataOp):
             parents = [0]*len(choice.outcomes)
             for i, outcome in enumerate(choice.outcomes):
                 if not isinstance(outcome, DataOp):
+                    # TODO handle tuples of dataops
                     parents[i] = ValueOp(outcome)
             return_op = ChoiceOp(choice.outcome_names, len(choice.outcomes), choice.name, inputs=parents)
         else:
@@ -294,6 +331,10 @@ def as_op(data_op: DataOp):
         return_op = GetAttrOp(attr_name=impl.attr_name)
     elif isinstance(impl, GetItem):
         return_op = GetItemOp(key=impl.key)
+    elif isinstance(impl, SkrubBinOp):
+        left = DATA_OP_PLACEHOLDER if isinstance(impl.left, DataOp) else impl.left
+        right = DATA_OP_PLACEHOLDER if isinstance(impl.right, DataOp) else impl.right
+        return_op = BinOp(op=impl.op, left=left, right=right)
     else:
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
 

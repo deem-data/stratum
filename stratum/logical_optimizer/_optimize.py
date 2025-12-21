@@ -1,9 +1,11 @@
+from numpy import True_
 from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from collections import deque
 from ._cse import apply_cse
+from ._dataframe_ops import rewrite_dataframe_ops
 from ._ops import ChoiceOp, Op, SearchEvalOp, as_op
-from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_children, show_graph, topological_iterator
+from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
 from time import perf_counter
 import logging
 from stratum._config import FLAGS
@@ -44,10 +46,14 @@ def apply_cse_on_skrub_ir(dag: DataOp):
     return dag
 
 class OptConfig():
-    def __init__(self, cse: bool = False, unroll_choices: bool = True):
+    def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True):
         self.cse = cse
+        self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
 
+def _debug_show_graph(sink: Op, name: str):
+    if FLAGS.DEBUG:
+        show_graph(sink, name)
 
 def optimize(dag: DataOp, config: OptConfig = None):
     """ Entry point for the logical optimizer. Takes a Skrub DataOp DAG, applies logical optimizations 
@@ -67,21 +73,28 @@ def optimize(dag: DataOp, config: OptConfig = None):
         # TODO cse should direcly return the new list of ops ordered so we dont have to iterate again
 
     sink = convert_to_ops(dag)
+    _debug_show_graph(sink, "convertion")
 
-    # TODO add rewrite handling here
+    # Rewrites:
 
+    # Parsing of dataframe ops
+    if config.dataframe_ops:
+        sink = rewrite_dataframe_ops(sink)
+        _debug_show_graph(sink, "dataframe_rewrite")
+
+    # Unrolling of choices to a dag wit only a single choice op at the end
     if config.unroll_choices:
         sink = choice_unrolling(sink)
-    if FLAGS.DEBUG:
-        show_graph(sink, "optimized")
+    
+    # Final optimized DAG
+    _debug_show_graph(sink, "optimized")
     output = [op for op in topological_iterator(sink)]
-
     t1 = perf_counter()
     logger.info(f"Optimization took {t1 - t0:.2f} seconds")
     return output
 
 
-def convert_to_ops(dag: DataOp) -> list[Op]:
+def convert_to_ops(dag: DataOp) -> Op:
     """ Convert a Skrub DataOp DAG to a stratum's logical IR (Op DAG)"""
     graph = _Graph().run(dag)
     nodes = graph["nodes"]
@@ -163,13 +176,13 @@ def unroll_simple_choice(sink: Op, op: ChoiceOp, outcomes: list) -> Op:
         outcome.outputs = []
         leafs = clone_sub_dag(op, new_root_op=outcome)
         assert len(leafs) == 1
-        dag_sink.add_parent(leafs[0])
-        leafs[0].add_child(dag_sink)
+        dag_sink.add_input(leafs[0])
+        leafs[0].add_output(dag_sink)
 
     # reuse sub-dag for the first outcome
     outcomes[0].outputs = []
-    replace_op_in_children(op, replacement=outcomes[0])
-    sink.add_child(dag_sink)
+    replace_op_in_outputs(op, replacement=outcomes[0])
+    sink.add_output(dag_sink)
     return dag_sink
 
 
@@ -189,4 +202,4 @@ def unroll_nested_choice(last_op: ChoiceOp, op: ChoiceOp, outcomes):
     for i in range(n_outcomes):
         last_op.outcome_names[i] += op.outcome_names[0]
     outcomes[0].outputs = []
-    replace_op_in_children(op, replacement=outcomes[0])
+    replace_op_in_outputs(op, replacement=outcomes[0])
