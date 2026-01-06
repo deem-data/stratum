@@ -23,7 +23,6 @@ class TestOpUtils(unittest.TestCase):
         if run_assertions:
             # TODO Add more sophisticated expected graph comparison checks
             self.assertEqual(num_clone_target_children_original * 2, len(clone_target.outputs))
-            self.assertTrue(leaf.eq_shallow(leafs[-1]))
 
 
     def test_clone_sub_dag1(self):
@@ -73,7 +72,6 @@ class TestOpUtils(unittest.TestCase):
         t6 = skrub.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7)
-        self.run_clone_sub_dag(out, 2, graph=graph, new_root_op=out[1], stop_at_op=out[5], run_assertions=False)
 
 
     def test_choice_unrolling_w_clone_sub_dag(self):

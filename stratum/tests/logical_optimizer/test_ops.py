@@ -24,6 +24,20 @@ class TestOpCloning(unittest.TestCase):
         except NotImplementedError as e:
             self.assertEqual(str(e), f"Cloning of {op.__class__.__name__} objects is not implemented yet. Please implement it.")
 
+    def test_op_clone_value_op(self):
+        op = ValueOp(1)
+        try:
+            op.clone()
+        except ValueError as e:
+            self.assertEqual(str(e), "We should not clone ValueOp objects.")
+
+    def test_op_clone_search_eval_op(self):
+        try:
+            op = SearchEvalOp([])
+            op.clone()
+        except ValueError as e:
+            self.assertEqual(str(e), "We should not clone SearchEvalOp objects.")
+
     
     def test_clone_ops(self):
         """Test cloning an Op with skrub_impl."""
@@ -38,11 +52,12 @@ class TestOpCloning(unittest.TestCase):
         try:
             ops[0].clone()
         except ValueError as e:
-            self.assertEqual(str(e), "We should not clone ValueOp objects.")
+            self.assertEqual(str(e), "We should not clone DataSourceOp objects.")
         
         cloned = ops[1].clone()
         self.assertIsNot(cloned, ops[1])
-        self.assertTrue(ops[1].key == cloned.key)
+        self.assertTrue(ops[1].func == cloned.func)
+        self.assertTrue(ops[1].columns == cloned.columns)
 
         cloned = ops[2].clone()
         self.assertIsNot(cloned, ops[2])
@@ -50,25 +65,32 @@ class TestOpCloning(unittest.TestCase):
 
         cloned = ops[3].clone()
         self.assertIsNot(cloned, ops[3])
-        self.assertTrue(ops[3].method_name == cloned.method_name)
+        self.assertIsNot(ops[3].skrub_impl, cloned.skrub_impl)
+        self.assertIsNot(ops[3].skrub_impl.estimator, cloned.skrub_impl.estimator)
 
         cloned = ops[4].clone()
         self.assertIsNot(cloned, ops[4])
-        self.assertIsNot(ops[4].skrub_impl, cloned.skrub_impl)
-        self.assertIsNot(ops[4].skrub_impl.estimator, cloned.skrub_impl.estimator)
+        self.assertEqual(ops[4].func, cloned.func)
+        self.assertEqual(ops[4].args, cloned.args)
+        self.assertEqual(ops[4].kwargs, cloned.kwargs)
 
         cloned = ops[5].clone()
         self.assertIsNot(cloned, ops[5])
-        self.assertEqual(ops[5].func, cloned.func)
-        self.assertEqual(ops[5].args, cloned.args)
-        self.assertEqual(ops[5].kwargs, cloned.kwargs)
+        self.assertTrue(ops[5].attr_name == cloned.attr_name)
 
-        cloned = ops[6].clone()
-        self.assertIsNot(cloned, ops[6])
-        self.assertTrue(ops[6].attr_name == cloned.attr_name)
 
+    def test_replace_non_existing_input(self):
+        op = Op(outputs=[1], inputs=[2])
+        op.name = "test_op"
         try:
-            op = SearchEvalOp([])
-            op.clone()
+            op.replace_input(3, 4)
         except ValueError as e:
-            self.assertEqual(str(e), "We should not clone SearchEvalOp objects.")
+            self.assertEqual(str(e), "Input 3 not found in Op.")
+
+    def test_replace_non_existing_output(self):
+        op = Op(outputs=[1], inputs=[2])
+        op.name = "test_op"
+        try:
+            op.replace_output(3, 4)
+        except ValueError as e:
+            self.assertEqual(str(e), "Output 3 not found in Op.")

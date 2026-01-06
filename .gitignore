@@ -95,3 +95,4 @@ benchmarks/**/input/
 *.zip
 *.csv
 *.pdf
+*.ipynb

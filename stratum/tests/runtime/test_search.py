@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 import time
 import unittest
+import pandas as pd
 import numpy as np
 import stratum as skrub
 import logging
@@ -124,6 +125,16 @@ class SearchTest(RuntimeTest):
         self.assertIn("ImplOp(<Apply DummyRegressor>)", out[5])
         assert(out[5].split(" ")[-1] == "10")
 
+
+    def test_fused_attr(self):
+        data = skrub.as_data_op(self.df)
+        X = data[["x", "datetime"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        date = X["datetime"].skb.apply_func(pd.to_datetime, format="%Y-%m-%d %H:%M:%S")
+        X = X.assign(year=date.dt.year)
+        X = X.drop(columns=["datetime"], axis=1)
+        pred = X.skb.apply(DummyRegressor(), y=y)
+        grid_search(pred)
 
 if __name__ == "__main__":
     unittest.main()
