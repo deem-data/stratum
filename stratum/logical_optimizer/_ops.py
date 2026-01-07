@@ -23,10 +23,12 @@ class Op():
         self.was_cloned = False
 
     def __str__(self):
-        return f"{self.__class__.__name__}({self.name}){" [returns_df]" if self.is_dataframe_op else ""}"
+        is_df = " [returns_df]" if self.is_dataframe_op else ""
+        return f"{self.__class__.__name__}({self.name}){is_df}"
     
     def __repr__(self):
-        return f"{self.__class__.__name__}({self.name}, cloned={self.was_cloned}, id={id(self)})"
+        is_df = " [returns_df]" if self.is_dataframe_op else ""
+        return f"{self.__class__.__name__}({self.name}, cloned={self.was_cloned}, id={id(self)}){is_df}"
 
     def update_name(self):
         pass
@@ -232,7 +234,9 @@ class GetAttrOp(Op):
         self.attr_name = attr_name
 
     def __str__(self):
-        return f"ProjectionOp(GetAttr: {".".join(self.attr_name)}) [returns_df]" if self.is_dataframe_op else super().__str__()
+        is_df = " [returns_df]" if self.is_dataframe_op else super().__str__()
+        attr_name = ".".join(self.attr_name)
+        return f"ProjectionOp(GetAttr: {attr_name}){is_df}"
 
     def process(self, mode: str, environment: dict):
         if self.is_dataframe_op:
