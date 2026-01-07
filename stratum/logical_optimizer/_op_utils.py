@@ -125,16 +125,16 @@ def topological_iterator(sink: Op) -> Iterator[Op]:
 
 def show_graph(sink: Op, filename: str = 'plan'):  
     """Show the runtime plan of the DataOp DAG."""
-
-    dot = Digraph(comment=filename)
-    for current_op in topological_iterator(sink):
-        current_op.update_name()
-        name = str(current_op) if not isinstance(current_op, ChoiceOp) else current_op.name
-        name = name.replace("<","'").replace(">","'") if name is not None else "None"
-        dot.node(str(id(current_op)), name)
-        for outputs in current_op.outputs:
-            dot.edge(str(id(current_op)), str(id(outputs)))
-    filename = "graphs/" + filename
-    # make sure folder exists
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    dot.render(filename, view=get_config()["open_graph"],cleanup=True)
+    if get_config()["open_graph"]:
+        dot = Digraph(comment=filename)
+        for current_op in topological_iterator(sink):
+            current_op.update_name()
+            name = str(current_op) if not isinstance(current_op, ChoiceOp) else current_op.name
+            name = name.replace("<","'").replace(">","'") if name is not None else "None"
+            dot.node(str(id(current_op)), name)
+            for outputs in current_op.outputs:
+                dot.edge(str(id(current_op)), str(id(outputs)))
+        filename = "graphs/" + filename
+        # make sure folder exists
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        dot.render(filename, view=True,cleanup=True)
