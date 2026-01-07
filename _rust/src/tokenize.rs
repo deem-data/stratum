@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Analyzer {
     Char,
     Char_wb
@@ -42,7 +43,7 @@ pub fn char_wb_ngrams(str: &str, nmin: usize, nmax: usize, buf: &mut Vec<String>
         }
         for i in 0..=padded.len().saturating_sub(n) {
             let j = i + n;
-            buf.push(padded[i..j].to_string());
+            buf.push(padded[i..j].to_string()); //FIXME (perf): allocations
         }
     }
 }

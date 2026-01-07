@@ -33,8 +33,8 @@ def make_series (n_rows, seed, vocab_size, avg_words, words_len_range=(3, 10)) -
     return pd.Series(rows, name="text")
 
 def main():
-    n_rows = 100_000        #number of rows (=200K)
-    vocab_size = 20000      #number of unique words (=5K). Large -> more distinct tokens -> sparser matrix
+    n_rows = 100_000        #number of rows (=100K)
+    vocab_size = 20000      #number of unique words (=20K). Large -> more distinct tokens -> sparser matrix
     avg_words = 8           #average number of words per row (=8)
     words_len = (3, 10)     #length of each word (low to high)
 
@@ -45,8 +45,8 @@ def main():
 
     # Build encoder
     enc = StringEncoder(
-        vectorizer="hashing", #hashing->tfidf
-        analyzer="char",
+        vectorizer="tfidf",
+        analyzer="char_wb",
         ngram_range=(3, 4),
         n_components= 30,
         random_state=0
@@ -72,7 +72,7 @@ def main():
     exec_time = t1 - t0
     print(f"skrub - Execution time = {exec_time:8.3f}s\n")
 
-    skrub.set_config(rust_backend=True, debug_timing=True, num_threads=0) #rust
+    skrub.set_config(rust_backend=True, debug_timing=False, num_threads=0) #rust
     t0 = time.perf_counter()
     X_enc = enc.fit_transform(X)
     print(f"Shape = {X_enc.shape}")

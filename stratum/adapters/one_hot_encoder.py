@@ -9,6 +9,9 @@ from .._config import get_config
 from .. import _rust_backend as rb
 from .._rust_backend import _to_list
 
+# File-internal config flags
+_DEBUG_INFO = False
+
 def _iter_columns(X):
     if hasattr(X, "ndim") and getattr(X, "ndim", 1) == 2 and hasattr(X, "shape"):
         n_cols = X.shape[1]
@@ -75,7 +78,7 @@ class RustyOneHotEncoder(_SKOneHot):
         if not (rc["allow_patch"] and rc["rust_backend"] and rb.HAVE_RUST):
             return super().transform(X)
         # Check if the rust modules are available
-        if getattr(rb, "ohe_transform_csr", None) is None or getattr(rb, "csr_to_dense", None) is None:
+        if getattr(rb, "ohe_transform", None) is None or getattr(rb, "csr_to_dense", None) is None:
             return super().transform(X)
         # Check if called with supported parameters
         if not (self._supported_params and hasattr(self, "categories_")):
@@ -88,9 +91,9 @@ class RustyOneHotEncoder(_SKOneHot):
         rb.print_timing("Recoding", t0)
 
         # Dispatch the apply phase to Rust (returns CSR)
-        print("INFO: Dispatching OneHotEncoder transform to Rust backend") #TODO: proper logging
+        if _DEBUG_INFO: print("INFO: Dispatching OneHotEncoder transform to Rust backend") #TODO: proper logging
         t0 = rb.start_timing()
-        data, indices, indptr, n_rows, n_cols = rb.ohe_transform_csr(codes, n_cats, drop_idx)
+        data, indices, indptr, n_rows, n_cols = rb.ohe_transform(codes, n_cats, drop_idx)
         rb.print_timing("ohe_transform_csr", t0)
 
         out_dt = np.dtype(self.dtype)

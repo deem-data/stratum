@@ -1,5 +1,4 @@
-    
-from curses import flash
+#from curses import flash
 import unittest
 import stratum as skrub
 from stratum.logical_optimizer._optimize import optimize, OptConfig, choice_unrolling

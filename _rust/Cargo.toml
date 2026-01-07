@@ -18,8 +18,10 @@ pyo3 = { version = ">=0.21,<0.24", features = ["extension-module", "abi3-py310"]
 numpy = { version = ">=0.21,<0.25" }
 ahash = "0.8.12"
 anyhow = "1.0.99"
-ndarray = { version = "0.16.1", features = ["rayon"] }
+ndarray = { version = "0.16.1", features = ["rayon", "blas"] }
+# Using rayon and blas/mkl may lead to thread contention. Set mkl/blas thread count to 1 if called inside a rayon block.
 rand = "0.10.0-rc.0"
-ndarray-linalg = { version = "0.17.0", features = ["intel-mkl-static"] }
 rayon = "1.11.0"
 once_cell = "1.21.3"
+faer = { version = "0.23.2" }
+ndarray-linalg = { version = "0.17.0", features = ["intel-mkl-static"] }

@@ -8,6 +8,7 @@ from sklearn.feature_extraction.text import HashingVectorizer, TfidfTransformer
 # Skip these tests if the Rust extension isn't importable
 from stratum import _rust_backend as rb
 pytestmark = pytest.mark.skipif(not rb.HAVE_RUST, reason="Rust backend not built")
+#TODO: Add tests for transform
 
 def _mk_sklearn_tfidf(strings, analyzer, ngram_range, n_features):
     strings = [s if isinstance(s, str) else "" for s in strings]
@@ -26,7 +27,7 @@ def _mk_sklearn_tfidf(strings, analyzer, ngram_range, n_features):
 def _build_rust_csr(strings, analyzer, ngram_range, n_features):
     # Rust expects a list[str]; replace None with ""
     strings = [s if isinstance(s, str) else "" for s in strings]
-    data, indices, indptr, n_rows, n_cols, _idf = rb.hashing_tfidf_csr(
+    data, indices, indptr, n_rows, n_cols, _idf = rb.hashing_tfidf_fit(
         strings, analyzer, int(ngram_range[0]), int(ngram_range[1]), int(n_features)
     )
     X = sp.csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
