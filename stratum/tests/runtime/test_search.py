@@ -36,10 +36,10 @@ class SearchTest(RuntimeTest):
         y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
 
         cv = KFold(n_splits=3, shuffle=True, random_state=42)
-        results, preds = grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
+        search_stratum, preds = grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
 
         search = y.skb.make_grid_search(cv=cv, fitted=True,scoring="neg_mean_squared_error")
-        assert(np.allclose(search.results_["mean_test_score"], results["scores"]))
+        assert(np.allclose(search.results_["mean_test_score"], search_stratum.results_["scores"]))
 
 
 

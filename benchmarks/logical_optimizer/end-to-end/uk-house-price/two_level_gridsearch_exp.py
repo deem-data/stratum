@@ -1,4 +1,4 @@
-from sklearn.metrics import make_scorer, mean_squared_error
+from sklearn.metrics import make_scorer, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, ShuffleSplit
 import pandas as pd
 from xgboost import XGBRegressor
@@ -105,27 +105,25 @@ models = {
 }
 preds = {k: X_enc.skb.apply(model, y=y) for k,model in models.items()}
 preds = skrub.choose_from(preds, name="models").as_data_op()
-preds = preds.skb.apply_func(lambda a: a)
-preds.skb.draw_graph().open()
+preds = preds.skb.apply_func(lambda a, m: (a, print(m))[0], skrub.eval_mode())
 
 # play with cvs
 # cv = KFold(n_splits=3, shuffle=True, random_state=42)
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42)
-scorer = make_scorer(mean_squared_error)
+scorer = make_scorer(r2_score)
 t0 = perf_counter()
 with skrub.config(scheduler=True, stats=True):
-    results = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True)
+    search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
 t1 = perf_counter()
 print("="*80)
 print(f"Stratum gridsearch scheduler time: {t1 - t0} seconds")
 print("="*80)
-with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-    search = preds.skb.make_grid_search(cv=cv, n_jobs=-1, fitted=True, scoring=scorer, refit=False)
+search = preds.skb.make_grid_search(cv=cv, n_jobs=-1, fitted=True,scoring=scorer,refit=False)
 t2 = perf_counter()
 print("="*80)
 print(f"Skrub default gridsearch time: {t2 - t1} seconds")
 print("="*80)
 print("Results:")
 print(search.results_)
-print(results)
+print(search_stratum.results_)
 print("="*80)

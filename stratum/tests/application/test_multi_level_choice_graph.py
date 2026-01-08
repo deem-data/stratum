@@ -12,7 +12,7 @@ from sklearn.linear_model import Ridge, ElasticNet
 from lightgbm import LGBMRegressor
 from xgboost import XGBRegressor
 from sklearn.base import BaseEstimator, TransformerMixin
-
+from sklearn.metrics import make_scorer, mean_squared_error, r2_score
 from stratum.logical_optimizer._optimize import optimize
 
 
@@ -132,5 +132,6 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         print(df.dtypes)
         df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
+        scorer = make_scorer(r2_score)
         with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False):
-            preds.skb.make_grid_search(fitted=True, cv = 2)
+            preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)

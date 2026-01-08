@@ -1,6 +1,7 @@
 from time import perf_counter
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split, check_cv
+from sklearn.metrics._scorer import _Scorer
 from skrub._data_ops._data_ops import EvalMode
 from skrub._data_ops import DataOp
 from types import SimpleNamespace
@@ -22,8 +23,8 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, sh
     ops_ordered = optimize(dag, OptConfig(cse=True))
     sched = Scheduler(ops_ordered, show_stats)
 
-    out = sched.grid_search(cv, scoring, return_predictions)
-    
+    preds = sched.grid_search(cv, scoring, return_predictions)
+
     # Heavy hitters
     if show_stats:
         table = pd.DataFrame(sched.timings, columns=["Op", "time"])
@@ -34,7 +35,7 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, sh
         print(f"Heavy hitters (sorted by time spent in DataOp evaluation):")
         print(table.head(20).to_string(index=False))
         print("=" * 80 + "\n")
-    return out
+    return (sched,preds) if return_predictions else sched
 
 def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2, cse: bool = False):
     """Evaluate a DataOp DAG with train/test split."""
@@ -53,6 +54,7 @@ class Scheduler:
         self.full_x, self.full_y, self.op_x, self.op_y = None, None, None, None
         self.pos_x, self.pos_y, self.pos_xy = None, None, None
         self.timings = [] if print_heavy_hitters else None
+        self.results_ = None
 
     def evaluate(self, seed: int = 42, test_size = 0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
@@ -72,14 +74,23 @@ class Scheduler:
 
     def grid_search(self, cv=None, scoring=None, return_predictions=False):
         """Perform grid search with cross-validation on the DataOp DAG in a sequential top-down manner."""
+        # default to scikit-learn's CV
+        cv = check_cv(cv)
+
+        # get scoring function
+        if type(scoring) == str:
+            coeff = -1 if scoring.startswith("neg_") else 1
+            scoring_func = lambda test, pred: mean_squared_error(test, pred)*coeff
+        elif type(scoring) == _Scorer:
+            scoring_func = scoring._score_func
+        else:
+            scoring_func = mean_squared_error
 
         # start with computing till X and y node
         logger.debug("\n", "="*100, "\n", "Starting grid search", "\n","="*100, "\n")
         self.compute_xy()
         results, predictions = [], []
 
-        # default to scikit-learn's CV
-        cv = check_cv(cv)
         logger.debug("\n", "="*100, "\n", "XY computed", "\n","="*100, "\n")
         #TODO we can parallelize over the folds
         for i, (train_index, test_index) in enumerate(cv.split(self.full_x)):
@@ -97,14 +108,14 @@ class Scheduler:
 
             # scoring
             df["scores"] = df["vals"].apply(
-                lambda a: mean_squared_error(y_test, a))*(-1 if scoring == "neg_mean_squared_error" else 1)
+                lambda pred: scoring_func(y_test, pred))
             df = df.drop("vals", axis=1)
             results.append(df)
 
         results = pd.concat(results, axis=0)
         results = results.groupby("id").aggregate("mean").sort_values(by="scores", ascending=False)
-
-        return (results, predictions) if return_predictions else results
+        self.results_ = results
+        return predictions if return_predictions else None
 
     def compute(self, start_pos: int, x, y = None, mode="fit_transform"):
         """Compute the pipeline from start_pos onwards with given inputs."""

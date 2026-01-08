@@ -52,6 +52,15 @@ manifest-path = "_rust/Cargo.toml"
 module-name = "stratum._rust_backend_native"
 python-source = "."
 
+[tool.uv]
+# Tell uv to rebuild when Rust source files change
+cache-keys = [
+    {file = "pyproject.toml"},
+    {file = "_rust/Cargo.toml"},
+    {file = "_rust/Cargo.lock"},
+    {file = "_rust/**/*.rs"},
+]
+
 [dependency-groups]
 dev = [
     "maturin>=1.10.1",
