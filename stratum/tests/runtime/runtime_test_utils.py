@@ -4,6 +4,8 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from skrub._data_ops._data_ops import DataOp
 from stratum.runtime._scheduler import evaluate
+import stratum as skrub
+from sklearn.dummy import DummyRegressor
 
 
 def datetime_pipeline1(x: DataOp, y: DataOp) -> DataOp:
@@ -27,6 +29,17 @@ def datetime_pipeline2(x: DataOp, y: DataOp) -> DataOp:
     pred = x4.skb.apply(RandomForestRegressor(random_state=123), y=y)
     return pred
 
+def simple_pipeline() -> DataOp:
+    data = {"x": np.linspace(0, 10, 100), "y": np.linspace(0, 10, 100) % 10}
+    data = pd.DataFrame(data)
+    data = skrub.as_data_op(data)
+    x = data[["x"]].skb.mark_as_X()
+    y = data["y"].skb.mark_as_y()
+    x = x + 33
+    x = x.assign(z=x["x"] + 1)
+    model = DummyRegressor()
+    pred = x.skb.apply(model, y=y)
+    return pred
 
 class RuntimeTest(unittest.TestCase):
 

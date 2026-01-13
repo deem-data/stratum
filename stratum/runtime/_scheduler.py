@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import io
 from contextlib import redirect_stdout, redirect_stderr
 from stratum._config import FLAGS
+from stratum.logical_optimizer._dataframe_ops import SplitOp
 from stratum.logical_optimizer._optimize import optimize,OptConfig
 from stratum.logical_optimizer._ops import CallOp, ChoiceOp, GetItemOp, ImplOp, MethodCallOp, Op, ValueOp
 
@@ -49,26 +50,28 @@ class Scheduler:
         """Initialize scheduler with a data operations DAG."""
         self.ops_ordered = ops_ordered
         self.mode = "fit_transform"
-        self.intermediates, self.env = {}, {}
+        self.env = {}
         self.flagged_for_recomputation = []
-        self.full_x, self.full_y, self.op_x, self.op_y = None, None, None, None
-        self.pos_x, self.pos_y, self.pos_xy = None, None, None
+        self.pos_split_op = None
         self.timings = [] if print_heavy_hitters else None
         self.results_ = None
 
     def evaluate(self, seed: int = 42, test_size = 0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
         try:
-            self.compute_xy()
+            split_op = self.compute_xy()
         except RuntimeError as e:
             if "X and y nodes not found in the DAG" in str(e):
                 logger.warning("X and y nodes not found in the DAG, returning the last node")
                 return self.ops_ordered[-1].intermediate
             else:
                 raise e
-        x_train, x_test, y_train, y_test = train_test_split(self.full_x, self.full_y, test_size=test_size, random_state=seed)
-        self.compute(self.pos_xy, x_train, y_train)
-        pred = self.compute(self.pos_xy, x_test, mode="predict")
+        
+        train_index, test_index = train_test_split(range(len(split_op.inputs[0].intermediate)), test_size=test_size, random_state=seed)
+        split_op.indices = train_index
+        self.compute(self.pos_split_op)
+        split_op.indices = test_index
+        pred = self.compute(self.pos_split_op, mode="predict")
         return pred["vals"][0]
 
 
@@ -88,25 +91,28 @@ class Scheduler:
 
         # start with computing till X and y node
         logger.debug("\n", "="*100, "\n", "Starting grid search", "\n","="*100, "\n")
-        self.compute_xy()
+        split_op = self.compute_xy()
         results, predictions = [], []
 
         logger.debug("\n", "="*100, "\n", "XY computed", "\n","="*100, "\n")
         #TODO we can parallelize over the folds
-        for i, (train_index, test_index) in enumerate(cv.split(self.full_x)):
+        for i, (train_index, test_index) in enumerate(cv.split(split_op.inputs[0].intermediate)):
             logger.debug(f"CV Fold Nr. {i+1}")
-            x_train, x_test = self.full_x.iloc[train_index], self.full_x.iloc[test_index]
-            y_train, y_test = self.full_y .iloc[train_index], self.full_y .iloc[test_index]
+
+            split_op.indices = train_index
 
             # fit and predict the pipeline
-            self.compute(self.pos_xy, x_train, y_train)
+            split_op.indices = train_index
+            self.compute(self.pos_split_op)
             logger.debug("\n", "="*100, "\n", "Training done for fold", i+1, "\n","="*100, "\n")
-            df = self.compute(self.pos_xy, x_test, mode="predict")
+            split_op.indices = test_index
+            df = self.compute(self.pos_split_op, mode="predict")
             logger.debug("\n", "="*100, "\n", "Predicting done for fold", i+1, "\n","="*100, "\n")
             if return_predictions:
                 predictions.append(df.copy())
 
             # scoring
+            y_test = split_op.intermediate[1]
             df["scores"] = df["vals"].apply(
                 lambda pred: scoring_func(y_test, pred))
             df = df.drop("vals", axis=1)
@@ -117,14 +123,12 @@ class Scheduler:
         self.results_ = results
         return predictions if return_predictions else None
 
-    def compute(self, start_pos: int, x, y = None, mode="fit_transform"):
+    def compute(self, start_pos: int, mode="fit_transform"):
         """Compute the pipeline from start_pos onwards with given inputs."""
-        ops_to_compute = self.ops_ordered[(start_pos + 1):]
+        ops_to_compute = self.ops_ordered[start_pos:]
         if len(self.flagged_for_recomputation) != 0:
             ops_to_compute = self.flagged_for_recomputation + ops_to_compute
         self.mode = mode
-        self.op_x.intermediate = x
-        self.op_y.intermediate = y
 
         for node in ops_to_compute:
             self.process_op(node)
@@ -137,22 +141,16 @@ class Scheduler:
                 return pd.DataFrame({"vals": [pred], "id": ["default"]})
         return None
 
-    def compute_xy(self):
+    def compute_xy(self) -> SplitOp:
         """Compute nodes until X and y nodes are found and store them."""
         for i, op in enumerate(self.ops_ordered):
+            if op.is_split_op:
+                self.pos_split_op = i
+                return op
             self.process_op(op)
             if isinstance(op, ImplOp) and isinstance(op.skrub_impl, EvalMode):
                 self.flagged_for_recomputation.append(op)
-            # TODO Nodes between X and y, might be recomputed as well
-            if op.is_X:
-                self.pos_x, self.op_x, self.full_x = i, op, op.intermediate
-            elif op.is_y:
-                self.pos_y, self.op_y, self.full_y = i, op, op.intermediate
-            if self.pos_x is not None and self.pos_y is not None:
-                break
-        if self.pos_x is None or self.pos_y is None:
-            raise RuntimeError("X and y nodes not found in the DAG")
-        self.pos_xy = max(self.pos_x, self.pos_y)
+        raise RuntimeError("X and y nodes not found in the DAG")
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""

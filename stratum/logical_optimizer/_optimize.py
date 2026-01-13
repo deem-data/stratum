@@ -3,7 +3,7 @@ from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from collections import deque
 from ._cse import apply_cse
-from ._dataframe_ops import rewrite_dataframe_ops
+from ._dataframe_ops import rewrite_dataframe_ops, add_splitting_op
 from ._ops import ChoiceOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
 from time import perf_counter
@@ -73,6 +73,7 @@ def optimize(dag: DataOp, config: OptConfig = None):
         # TODO cse should direcly return the new list of ops ordered so we dont have to iterate again
 
     sink = convert_to_ops(dag)
+    sink = add_splitting_op(sink)
     _debug_show_graph(sink, "convertion")
 
     # Rewrites:
@@ -155,8 +156,8 @@ def choice_unrolling(sink: Op):
                     # we reached the end of the dag
                     sink = unroll_simple_choice(sink, op, outcomes)
 
-                if FLAGS.DEBUG:
-                    show_graph(sink, f"choice-unrolled={i}")
+                # if FLAGS.DEBUG:
+                #     show_graph(sink, f"choice-unrolled={i}")
                 del op
                 break
     return sink

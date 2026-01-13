@@ -134,4 +134,5 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
         scorer = make_scorer(r2_score)
         with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False):
-            preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
+            search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
+            print(search.results_)

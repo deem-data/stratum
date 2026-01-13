@@ -20,6 +20,7 @@ class Op():
         self.is_X = is_X
         self.is_y = is_y
         self.is_dataframe_op = False
+        self.is_split_op = False
         self.was_cloned = False
 
     def __str__(self):

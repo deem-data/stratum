@@ -7,7 +7,7 @@ from stratum.logical_optimizer._op_utils import topological_iterator
 class DataSourceOp(Op):
     def __init__(self, data: DataFrame = None, file_path: str = None, _format: str = None,
                  read_args: tuple | list = None, read_kwargs: dict = None, outputs: list[Op] = None,is_X=False, is_y=False):
-        super().__init__(name="FRAME" if data is not None else f"READ_{_format.upper()}", is_X=is_X, is_y=is_y)
+        super().__init__(name="Frame" if data is not None else f"read_{_format}", is_X=is_X, is_y=is_y)
         self.data = data
         self.format = _format
         self.file_path = file_path
@@ -68,6 +68,55 @@ class ProjectionOp(Op):
             _obj = _obj[self.columns]
         self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs) if self.is_method else self.func(_obj, *_args, **_kwargs)
 
+
+class SplitOp(Op):
+    def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
+        super().__init__(name="Train/Test", is_X=False, is_y=False)
+        self.inputs = inputs
+        self.outputs = outputs
+        self.is_split_op = True
+        self.is_dataframe_op = True
+        self.indices = None
+
+    def process(self, mode: str, environment: dict):
+        self.intermediate = (self.inputs[0].intermediate.iloc[self.indices], self.inputs[1].intermediate.iloc[self.indices])
+
+class SplitOutput(Op):
+    def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, ):
+        name = "X" if is_x else "y"
+        super().__init__(name=name, is_X=False, is_y=False)
+        self.is_x = is_x
+        self.inputs = inputs
+        self.outputs = outputs
+        self.is_dataframe_op = True
+
+    def process(self, mode: str, environment: dict):
+        if self.is_x:
+            self.intermediate = self.inputs[0].intermediate[0]
+        else:
+            self.intermediate = self.inputs[0].intermediate[1]
+
+def add_splitting_op(sink: Op) -> Op:
+    x_op = None
+    y_op = None
+    for op in topological_iterator(sink):
+        if op.is_X:
+            x_op = op
+        if op.is_y:
+            y_op = op
+        if x_op and y_op:
+
+            split_out_x = SplitOutput(outputs=x_op.outputs)
+            x_op.replace_input_of_outputs(split_out_x)
+            split_out_y = SplitOutput(outputs=y_op.outputs, is_x=False)
+            y_op.replace_input_of_outputs(split_out_y)
+            split_op = SplitOp(inputs=[x_op, y_op], outputs=[split_out_x, split_out_y])
+            split_out_x.inputs = [split_op]
+            split_out_y.inputs = [split_op]
+            x_op.outputs = [split_op]
+            y_op.outputs = [split_op]
+            break
+    return sink
 
 def rewrite_dataframe_ops(sink: Op) -> Op:
     """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
