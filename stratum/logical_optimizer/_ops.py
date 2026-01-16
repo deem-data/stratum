@@ -3,19 +3,19 @@ from types import SimpleNamespace
 from typing import Callable
 
 from sklearn import clone
-from skrub._data_ops._data_ops import DataOp
+from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
-from skrub._data_ops._data_ops import Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, _wrap_estimator
 from pandas import DataFrame
 
 # unique identifier for arguments, which need to be replaced with Op references later
 DATA_OP_PLACEHOLDER = object()
 
 class Op():
-    def __init__(self, outputs=None, inputs=None, name=None, is_X=False, is_y=False):
+    def __init__(self, inputs=None,outputs=None, name=None, is_X=False, is_y=False):
         self.name = name
-        self.outputs = outputs
-        self.inputs = inputs
+        self.outputs = outputs if outputs is not None else []
+        self.inputs = inputs if inputs is not None else []
         self.intermediate = None
         self.is_X = is_X
         self.is_y = is_y
@@ -74,13 +74,18 @@ class Op():
         args, atts = self.__class__.fields, self.__dict__.items()
         fields = {k: clone_value(v) for k,v in atts if k in args}
         new_op = self.__class__(**fields)
-        new_op.outputs = []
-        new_op.inputs = []
         new_op.was_cloned = True
         return new_op
 
     def process(self, mode: str, environment: dict):
         raise NotImplementedError(f"Processing of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
+
+    def check_kwargs(self, kwargs):
+        if not isinstance(kwargs, dict):
+            raise TypeError(
+                f"The `{self}'s kwargs` should be a dict of named arguments. Got an object of type"
+                f" {type(kwargs).__name__!r} instead: {kwargs!r}"
+            )
 
 def clone_value(value):
     if isinstance(value, dict):
@@ -91,23 +96,16 @@ def clone_value(value):
         return value
 
 class ImplOp(Op):
-    def __init__(self, name: str, skrub_impl, inputs=None, outputs=None):
-        super().__init__(name=name, inputs=inputs, outputs=outputs)
+    def __init__(self, name: str, skrub_impl):
+        super().__init__(name=name)
         self.skrub_impl = skrub_impl
 
     def clone(self):
         attributes = {}
         for att in self.skrub_impl._fields:
-            if att == "estimator":
-                estm = self.skrub_impl.estimator
-                params = estm.get_params()
-                estm_new = clone(estm)
-                estm_new.set_params(**params)
-                attributes[att] = clone(estm_new)
-            else:
-                attributes[att] = getattr(self.skrub_impl, att)
+            attributes[att] = getattr(self.skrub_impl, att)
         new_impl = self.skrub_impl.__class__(**attributes)
-        new_op = ImplOp(name=self.name, skrub_impl=new_impl, outputs=[], inputs=[])
+        new_op = ImplOp(name=self.name, skrub_impl=new_impl)
         new_op.was_cloned = True
         return new_op
 
@@ -148,10 +146,70 @@ class ImplOp(Op):
             ns = self.replace_fields_with_values()
             self.intermediate = self.skrub_impl.compute(ns, mode, environment)
 
+class EstimatorOp(Op):
+    fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs"]
+    
+    def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None):
+        super().__init__(name=estimator.__class__.__name__)
+        if kwargs is None:
+            kwargs = {}
+        self.check_kwargs(kwargs)
+        self.estimator = estimator
+        self.y = DATA_OP_PLACEHOLDER if isinstance(y, DataOp) else y
+        self.cols = DATA_OP_PLACEHOLDER if isinstance(cols, DataOp) else cols
+        self.how = how
+        self.allow_reject = allow_reject
+        self.unsupervised = unsupervised
+        self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
+
+    def clone(self):
+        params = self.estimator.get_params()
+        estimator_new = clone(self.estimator)
+        estimator_new.set_params(**params)
+        new_op = EstimatorOp(
+            estimator=estimator_new, 
+            y=self.y, 
+            cols=self.cols, 
+            how=self.how, 
+            allow_reject=self.allow_reject, 
+            unsupervised=self.unsupervised, 
+            kwargs=self.kwargs
+        )
+        new_op.was_cloned = True
+        return new_op
+    
+    def process(self, mode: str, environment: dict):
+        input_iter = iter(self.inputs)
+        x = next(input_iter).intermediate
+        y = next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
+        cols = next(input_iter).intermediate if self.cols == DATA_OP_PLACEHOLDER else self.cols
+        if mode == "fit_transform":
+            self.estimator = _wrap_estimator(self.estimator, cols, how=self.how, allow_reject=self.allow_reject, X=x)
+            y_arg = () if self.unsupervised else (y,)
+            if not hasattr(self.estimator, mode):
+                # Predictors
+                self.estimator.fit(x, *y_arg, **self.kwargs)
+                self.intermediate = self.estimator.predict(x, **self.kwargs)
+            else:
+                # Transformers
+                self.intermediate = self.estimator.fit_transform(x, *y_arg, **self.kwargs)
+        elif mode == "predict":
+            if not hasattr(self.estimator, mode):
+                # Transformers
+                self.intermediate = self.estimator.transform(x, **self.kwargs)
+            else:
+                # Predictors
+                self.intermediate = self.estimator.predict(x, **self.kwargs)
+        else:
+            raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
+
+
 class ChoiceOp(Op):
     fields = ["outcome_names"]
     
-    def __init__(self, outcome_names: list[str] = None, n_outcomes: int = None, choice_name: str=None, append_choice_name = True, inputs = None):
+    def __init__(self, outcome_names: list[str] = None, n_outcomes: int = None, choice_name: str=None, append_choice_name = True, inputs: list[Op] = None):
+        if inputs is None:
+            inputs = []
         if outcome_names is None:
             outcome_names = [[(choice_name, f"Opt{i}")] for i in range(n_outcomes)]
         elif append_choice_name:
@@ -173,9 +231,8 @@ class ChoiceOp(Op):
         self.name = "  |  ".join(self.make_outcome_names())
 
     def clone(self):
-        new_op = ChoiceOp(outcome_names=self.outcome_names, append_choice_name=False, inputs=[])
+        new_op = ChoiceOp(outcome_names=self.outcome_names, append_choice_name=False)
         new_op.name = self.name
-        new_op.outputs = []
         new_op.was_cloned = True
         return new_op
 
@@ -201,9 +258,11 @@ class MethodCallOp(Op):
     
     def __init__(self, method_name: str, args = None, kwargs = None):
         super().__init__(name=method_name)
+        if kwargs is not None:
+            self.check_kwargs(kwargs)
         self.method_name = method_name
-        self.args = args
-        self.kwargs = kwargs
+        self.args = remove_datops_from_args(args) if args is not None else args
+        self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
 
     def process(self, mode: str, environment: dict):
         iter_ins = iter(self.inputs)
@@ -217,9 +276,11 @@ class CallOp(Op):
     
     def __init__(self, name: str = "CallOp", func=None, args=None, kwargs=None):
         super().__init__(name=name)
+        if kwargs is not None:
+            self.check_kwargs(kwargs)
         self.func = func
-        self.args = args
-        self.kwargs = kwargs
+        self.args = remove_datops_from_args(args) if args is not None else args
+        self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
 
     def process(self, mode: str, environment: dict):
         iter_ins = iter(self.inputs)
@@ -263,8 +324,8 @@ class BinOp(Op):
     def __init__(self, op: Callable, left, right):
         super().__init__(name=op.__name__.lstrip('__').rstrip('__'))
         self.op = op
-        self.left = left
-        self.right = right
+        self.left = DATA_OP_PLACEHOLDER if isinstance(left, DataOp) else left
+        self.right = DATA_OP_PLACEHOLDER if isinstance(right, DataOp) else right
 
 
     def process(self, mode: str, environment: dict):
@@ -320,26 +381,29 @@ def as_op(data_op: DataOp):
         else:
             return_op = ValueOp(impl.value)
     elif isinstance(impl, CallMethod):
-        args = remove_datops_from_args(impl.args)
-        kwargs = remove_datops_from_args(impl.kwargs)
-        return_op = MethodCallOp(impl.method_name, args, kwargs)
+        return_op = MethodCallOp(impl.method_name, impl.args, impl.kwargs)
     elif isinstance(impl, Call):
-        args = remove_datops_from_args(impl.args)
-        kwargs = remove_datops_from_args(impl.kwargs)
         return_op = CallOp(
             name=impl.get_func_name(),
             func=impl.func,
-            args=args,
-            kwargs=kwargs
+            args=impl.args,
+            kwargs=impl.kwargs
         )
     elif isinstance(impl, GetAttr):
         return_op = GetAttrOp(attr_name=impl.attr_name)
     elif isinstance(impl, GetItem):
         return_op = GetItemOp(key=impl.key)
     elif isinstance(impl, SkrubBinOp):
-        left = DATA_OP_PLACEHOLDER if isinstance(impl.left, DataOp) else impl.left
-        right = DATA_OP_PLACEHOLDER if isinstance(impl.right, DataOp) else impl.right
-        return_op = BinOp(op=impl.op, left=left, right=right)
+        return_op = BinOp(op=impl.op, left=impl.left, right=impl.right)
+    elif isinstance(impl, Apply):
+        return_op = EstimatorOp(
+            y=impl.y, 
+            estimator=impl.estimator, 
+            cols=impl.cols, 
+            how=impl.how, 
+            allow_reject=impl.allow_reject, 
+            unsupervised=impl.unsupervised, 
+            kwargs=impl.kwargs if hasattr(impl, "kwargs") else {})
     else:
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
 

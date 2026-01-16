@@ -65,8 +65,7 @@ class TestOpCloning(unittest.TestCase):
 
         cloned = ops[3].clone()
         self.assertIsNot(cloned, ops[3])
-        self.assertIsNot(ops[3].skrub_impl, cloned.skrub_impl)
-        self.assertIsNot(ops[3].skrub_impl.estimator, cloned.skrub_impl.estimator)
+        self.assertIsNot(ops[3].estimator, cloned.estimator)
 
         cloned = ops[4].clone()
         self.assertIsNot(cloned, ops[4])

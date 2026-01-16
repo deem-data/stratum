@@ -170,7 +170,6 @@ def unroll_simple_choice(sink: Op, op: ChoiceOp, outcomes: list) -> Op:
                           else ChoiceOp(outcome_names=op.outcome_names, append_choice_name=False))
     if not EVAL_OP_ENABLED:
         dag_sink.inputs = [sink]
-        dag_sink.outputs = []
 
     # clones sub-dag after choice op for all outcomes[1:]
     for outcome in outcomes[1:]:

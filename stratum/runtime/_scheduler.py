@@ -158,7 +158,7 @@ class Scheduler:
         try:
             op.process(mode=self.mode, environment=self.env)
         except Exception as e:
-            raise RuntimeError(f"Error processing '{op}': {e}")
+            raise RuntimeError(f"[{self.mode}] Error processing '{op}': {e}")
 
         if self.timings is not None:
             duration = perf_counter() - t0

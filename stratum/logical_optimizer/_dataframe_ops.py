@@ -6,15 +6,17 @@ from stratum.logical_optimizer._op_utils import topological_iterator
 
 class DataSourceOp(Op):
     def __init__(self, data: DataFrame = None, file_path: str = None, _format: str = None,
-                 read_args: tuple | list = None, read_kwargs: dict = None, outputs: list[Op] = None,is_X=False, is_y=False):
-        super().__init__(name="Frame" if data is not None else f"read_{_format}", is_X=is_X, is_y=is_y)
+                 read_args: tuple | list = None, read_kwargs: dict = None, is_X=False, is_y=False, outputs: list[Op] = None):
+        if outputs is None:
+            outputs = []
+        super().__init__(name="Frame" if data is not None else f"read_{_format}", is_X=is_X, is_y=is_y, outputs=outputs, inputs=None)
+        if read_kwargs is not None:
+            self.check_kwargs(read_kwargs)
         self.data = data
         self.format = _format
         self.file_path = file_path
         self.read_args = read_args
         self.read_kwargs = read_kwargs
-        self.inputs = []
-        self.outputs = outputs
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict):
@@ -27,12 +29,12 @@ class MetadataOp(Op):
     fields = ["func", "args", "kwargs"]
 
     def __init__(self, func: str, args: tuple | list = None, kwargs: dict = None, inputs: list[Op] = None, outputs: list[Op] = None, is_X=False, is_y=False):
-        super().__init__(name=func.upper(), is_X=is_X, is_y=is_y)
+        super().__init__(name=func.upper(), is_X=is_X, is_y=is_y, inputs=inputs, outputs=outputs)
+        if kwargs is not None:
+            self.check_kwargs(kwargs)
         self.func = func
         self.args = args
         self.kwargs = kwargs
-        self.inputs = inputs
-        self.outputs = outputs
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict):
@@ -47,14 +49,14 @@ class ProjectionOp(Op):
     
     def __init__(self, func, is_method: bool = True, args: tuple | list = None, kwargs: dict = None, 
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None, is_X=False, is_y=False):
-        super().__init__(name=func.upper() if is_method else f"{func.__name__.upper()}", is_X=is_X, is_y=is_y)
+        super().__init__(name=func.upper() if is_method else f"{func.__name__.upper()}", is_X=is_X, is_y=is_y, inputs=inputs, outputs=outputs)
+        if kwargs is not None:
+            self.check_kwargs(kwargs)
         self.is_method = is_method
         self.func = func
         self.args = args
         self.columns = columns
         self.kwargs = kwargs
-        self.inputs = inputs
-        self.outputs = outputs
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict):
@@ -71,9 +73,7 @@ class ProjectionOp(Op):
 
 class SplitOp(Op):
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
-        super().__init__(name="Train/Test", is_X=False, is_y=False)
-        self.inputs = inputs
-        self.outputs = outputs
+        super().__init__(name="Train/Test", is_X=False, is_y=False, inputs=inputs, outputs=outputs)
         self.is_split_op = True
         self.is_dataframe_op = True
         self.indices = None
@@ -84,10 +84,8 @@ class SplitOp(Op):
 class SplitOutput(Op):
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, ):
         name = "X" if is_x else "y"
-        super().__init__(name=name, is_X=False, is_y=False)
+        super().__init__(name=name, is_X=False, is_y=False, inputs=inputs, outputs=outputs)
         self.is_x = is_x
-        self.inputs = inputs
-        self.outputs = outputs
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict):
@@ -131,16 +129,14 @@ def rewrite_dataframe_ops(sink: Op) -> Op:
                 assert all(isinstance(arg, ValueOp) for arg in op.inputs), "All inputs must be ValueOps"
                 args = [next(input_iter).value if arg is DATA_OP_PLACEHOLDER else arg for arg in op.args]
                 kwargs = {k: next(input_iter).value if v is DATA_OP_PLACEHOLDER else v for k, v in op.kwargs.items()}
-                new_op = DataSourceOp(file_path=args[0], _format = "csv", read_args=args[1:], read_kwargs=kwargs, is_X=op.is_X, is_y=op.is_y)
-                new_op.outputs = op.outputs
+                new_op = DataSourceOp(file_path=args[0], _format = "csv", read_args=args[1:], read_kwargs=kwargs, is_X=op.is_X, is_y=op.is_y, outputs=op.outputs)
                 op.replace_input_of_outputs(new_op)
             elif op.inputs[0].is_dataframe_op and op.func is pd.to_datetime:
                 new_op = ProjectionOp(func=op.func, is_method=False, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs, is_X=op.is_X, is_y=op.is_y)
                 op.replace_output_of_inputs(new_op)
                 op.replace_input_of_outputs(new_op)
         elif isinstance(op, ValueOp) and isinstance(op.value, DataFrame):
-            new_op = DataSourceOp(data=op.value, is_X=op.is_X, is_y=op.is_y)
-            new_op.outputs = op.outputs
+            new_op = DataSourceOp(data=op.value, is_X=op.is_X, is_y=op.is_y, outputs=op.outputs)
             op.replace_input_of_outputs(new_op)
 
         # Projection detection
