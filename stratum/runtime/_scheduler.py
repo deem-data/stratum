@@ -17,10 +17,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, show_stats=False):
+def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
     """Perform grid search with cross-validation on a DataOp DAG."""
     # TODO maybe remove the option to show stats here and make args similar to scikit-learn's grid_search
-    show_stats = FLAGS.stats or show_stats
+
+    show_stats = FLAGS.stats is not None
     ops_ordered = optimize(dag, OptConfig(cse=True))
     sched = Scheduler(ops_ordered, show_stats)
 
@@ -34,7 +35,7 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, sh
         table = table.reset_index().sort_values(by="Time", ascending=False)
         print("\n" + "=" * 80)
         print(f"Heavy hitters (sorted by time spent in DataOp evaluation):")
-        print(table.head(20).to_string(index=False))
+        print(table.head(FLAGS.stats).to_string(index=False))
         print("=" * 80 + "\n")
     return (sched,preds) if return_predictions else sched
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
+logger = logging.getLogger(__name__)
 
 def _env_bool(name, default=False):
     val = os.getenv(name)
@@ -25,7 +27,7 @@ class _Flags:
     debug_timing: bool = _env_bool("SKRUB_RUST_DEBUG_TIMING", False)
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
     scheduler: bool =  False
-    stats: bool = False # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
+    stats: int | None = None # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
     open_graph: bool = True,
     DEBUG: bool = False
 
@@ -35,7 +37,7 @@ def set_config(rust_backend: bool | None = None,
            num_threads: int | None = None,
            debug_timing: bool | None = None,
            allow_patch: bool | None = None,
-           stats: bool | None = None,
+           stats: int | None = None,
            scheduler: bool | None = None,
            open_graph: bool | None = None,
            DEBUG: bool | None = None) -> None:
@@ -82,8 +84,11 @@ def set_config(rust_backend: bool | None = None,
         os.environ["SKRUB_RUST_ALLOW_MONKEYPATCH"] = "1" if FLAGS.allow_patch else "0"
     if scheduler is not None:
         FLAGS.scheduler = bool(scheduler)
-        if stats is not None:
-            FLAGS.stats = bool(stats)
+    if stats is not None:
+        if isinstance(stats, bool):
+            logger.warning("stats flag is a boolean, expected an integer. Ignoring stats flag.")
+            stats = None
+        FLAGS.stats = int(stats) if stats >= 0 else None
     if open_graph is not None:
         FLAGS.open_graph = bool(open_graph)
     if DEBUG is not None:

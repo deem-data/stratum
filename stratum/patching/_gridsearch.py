@@ -19,7 +19,6 @@ def _stratum_make_grid_search(self, *, fitted=False, keep_subsampling=False, **k
         cv = kwargs.get("cv", None)
         scoring = kwargs.get("scoring", None)
         return_predictions = kwargs.get("return_predictions", False)
-        show_stats = kwargs.get("show_stats", False)
         
         # Get the DataOp from the namespace instance
         dag = self._data_op
@@ -28,8 +27,7 @@ def _stratum_make_grid_search(self, *, fitted=False, keep_subsampling=False, **k
             dag=dag,
             cv=cv,
             scoring=scoring,
-            return_predictions=return_predictions,
-            show_stats=show_stats
+            return_predictions=return_predictions
         )
     else:
         # Fall back to original implementation

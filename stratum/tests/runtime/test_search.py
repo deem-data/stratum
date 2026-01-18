@@ -48,7 +48,8 @@ class SearchTest(RuntimeTest):
         end = start.skb.apply_func(lambda a: a).skb.mark_as_y()
 
         try:
-            grid_search(end, return_predictions=True, show_stats=True)
+            with skrub.config(stats=20):
+                grid_search(end, return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
             self.assertEqual("X and y nodes not found in the DAG",str(e))
@@ -58,7 +59,8 @@ class SearchTest(RuntimeTest):
         end = start.skb.apply_func(lambda a: a).skb.mark_as_X()
 
         try:
-            grid_search(end, return_predictions=True, show_stats=True)
+            with skrub.config(stats=20):
+                grid_search(end, return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
             self.assertEqual("X and y nodes not found in the DAG",str(e))
@@ -115,8 +117,8 @@ class SearchTest(RuntimeTest):
         X2 = X.skb.apply_func(lambda a: (a, time.sleep(0.01))[0])
         pred = X2.skb.apply(DummyRegressor(), y=y)
         # capture stdout
-        with redirect_stdout(StringIO()) as stdout:
-            grid_search(pred, return_predictions=False, show_stats=True)
+        with redirect_stdout(StringIO()) as stdout, skrub.config(stats=20):
+            grid_search(pred, return_predictions=False)
         out = stdout.getvalue()
         out = out.split("\n")
         self.assertIn("Heavy hitters", out[2])

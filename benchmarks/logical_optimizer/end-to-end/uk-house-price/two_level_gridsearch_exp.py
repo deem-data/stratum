@@ -112,7 +112,7 @@ preds = preds.skb.apply_func(lambda a, m: (a, print(m))[0], skrub.eval_mode())
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42)
 scorer = make_scorer(r2_score)
 t0 = perf_counter()
-with skrub.config(scheduler=True, stats=True):
+with skrub.config(scheduler=True, stats=20):
     search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
 t1 = perf_counter()
 print("="*80)
