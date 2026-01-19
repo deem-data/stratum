@@ -6,7 +6,7 @@ from sklearn.linear_model import Ridge, LinearRegression, LogisticRegression
 from sklearn.svm import LinearSVC
 
 from stratum.logical_optimizer import apply_cse_on_skrub_ir
-from stratum.runtime import grid_search
+from stratum.api.gridsearch import grid_search
 
 import stratum as skrub
 import logging

@@ -1,6 +1,6 @@
 from skrub._data_ops._skrub_namespace import SkrubNamespace
 from stratum._config import FLAGS
-from stratum.runtime import grid_search as stratum_grid_search
+from stratum._api import grid_search as stratum_grid_search
 
 # Store reference to original method before patching
 _original_make_grid_search = SkrubNamespace.make_grid_search

@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from skrub._data_ops._data_ops import DataOp
-from stratum.runtime._scheduler import evaluate
+from stratum._api import evaluate
 import stratum as skrub
 from sklearn.dummy import DummyRegressor
 

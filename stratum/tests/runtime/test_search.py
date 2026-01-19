@@ -1,7 +1,7 @@
 from sklearn.base import BaseEstimator
 from sklearn.dummy import DummyRegressor
 from stratum import config
-from stratum.runtime import grid_search
+from stratum._api import grid_search
 from sklearn.model_selection import KFold
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1, datetime_pipeline2
 from contextlib import redirect_stdout
