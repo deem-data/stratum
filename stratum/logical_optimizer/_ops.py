@@ -7,9 +7,20 @@ from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, _wrap_estimator
 from pandas import DataFrame
+from polars import DataFrame as PlDataFrame, Series as PlSeries
+
+class PlaceHolder():
+    def __init__(self, name: str):
+        self.name = name
+    
+    def __str__(self):
+        return self.name
+
+    def __repr__(self):
+        return self.name
 
 # unique identifier for arguments, which need to be replaced with Op references later
-DATA_OP_PLACEHOLDER = object()
+DATA_OP_PLACEHOLDER = PlaceHolder("DATA_OP_PLACEHOLDER")
 
 class Op():
     def __init__(self, inputs=None,outputs=None, name=None, is_X=False, is_y=False):
@@ -23,13 +34,18 @@ class Op():
         self.is_split_op = False
         self.was_cloned = False
 
+    def to_str_helper(self):
+        class_name = self.__class__.__name__
+        is_df = " [df]" if self.is_dataframe_op else ""
+        name = f"({self.name})" if self.name and len(self.name) > 0 else ""
+        return class_name, name, is_df
+
     def __str__(self):
-        is_df = " [returns_df]" if self.is_dataframe_op else ""
-        return f"{self.__class__.__name__}({self.name}){is_df}"
+        return "".join(self.to_str_helper())
     
     def __repr__(self):
-        is_df = " [returns_df]" if self.is_dataframe_op else ""
-        return f"{self.__class__.__name__}({self.name}, cloned={self.was_cloned}, id={id(self)}){is_df}"
+        class_name, name, is_df = self.to_str_helper()
+        return f"{class_name}{name}[cloned={self.was_cloned}, id={id(self)}{is_df}]"
 
     def update_name(self):
         pass
@@ -181,7 +197,11 @@ class EstimatorOp(Op):
     def process(self, mode: str, environment: dict):
         input_iter = iter(self.inputs)
         x = next(input_iter).intermediate
+        if isinstance(x, PlDataFrame):
+            x = x.to_pandas()
         y = next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
+        if isinstance(y, PlSeries):
+            y = y.to_pandas()
         cols = next(input_iter).intermediate if self.cols == DATA_OP_PLACEHOLDER else self.cols
         if mode == "fit_transform":
             self.estimator = _wrap_estimator(self.estimator, cols, how=self.how, allow_reject=self.allow_reject, X=x)
@@ -294,11 +314,6 @@ class GetAttrOp(Op):
     def __init__(self, attr_name: str=None):
         super().__init__(name=attr_name if attr_name else '?')
         self.attr_name = attr_name
-
-    def __str__(self):
-        is_df = " [returns_df]" if self.is_dataframe_op else super().__str__()
-        attr_name = ".".join(self.attr_name)
-        return f"ProjectionOp(GetAttr: {attr_name}){is_df}"
 
     def process(self, mode: str, environment: dict):
         if self.is_dataframe_op:

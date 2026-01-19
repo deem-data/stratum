@@ -1,10 +1,12 @@
 from numpy import True_
 from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
+from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque
 from ._cse import apply_cse
 from ._dataframe_ops import rewrite_dataframe_ops, add_splitting_op
-from ._ops import ChoiceOp, Op, SearchEvalOp, as_op
+from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops
+from ._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
 from time import perf_counter
 import logging
@@ -81,6 +83,7 @@ def optimize(dag: DataOp, config: OptConfig = None):
     # Parsing of dataframe ops
     if config.dataframe_ops:
         sink = rewrite_dataframe_ops(sink)
+        sink = group_dataframe_ops(sink)
         _debug_show_graph(sink, "dataframe_rewrite")
 
     # Unrolling of choices to a dag wit only a single choice op at the end
@@ -91,7 +94,7 @@ def optimize(dag: DataOp, config: OptConfig = None):
     _debug_show_graph(sink, "optimized")
     output = [op for op in topological_iterator(sink)]
     t1 = perf_counter()
-    logger.info(f"Optimization took {t1 - t0:.2f} seconds")
+    logger.info("="*100 + f"\nOptimization took {t1 - t0:.2f} seconds\n" + "="*100)
     return output
 
 
@@ -108,12 +111,24 @@ def convert_to_ops(dag: DataOp) -> Op:
     ids_to_ops = {node: as_op(nodes[node]) for node in order}
     for node in order:
         op = ids_to_ops[node]
-        op.outputs = [ids_to_ops[output] for output in parents.get(node, [])]
-
-        if op.is_choice():
-            convert_handle_choice(node, op, ids_to_ops, children)
+        if isinstance(op, ImplOp) and isinstance(op.skrub_impl, SubsamplePreviews):
+            output_ids = parents.get(node, [])
+            output_ops = [ids_to_ops[output] for output in output_ids]
+            input_id = children.get(node, [])[0]
+            input_op = ids_to_ops[input_id]
+            input_op.outputs.remove(op)
+            input_op.outputs.extend(output_ops)
+            for output_id in output_ids:
+                children[output_id].remove(node)
+                children[output_id].append(input_id)
+            del ids_to_ops[node]
         else:
-            op.inputs = [ids_to_ops[input] for input in children.get(node, [])]
+            op.outputs = [ids_to_ops[output] for output in parents.get(node, [])]
+
+            if op.is_choice():
+                convert_handle_choice(node, op, ids_to_ops, children)
+            else:
+                op.inputs = [ids_to_ops[input] for input in children.get(node, [])]
     return ids_to_ops[sink_id]
 
 

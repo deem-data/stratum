@@ -49,7 +49,7 @@ def define_pipeline(file_path):
     X = df.drop("Price", axis=1).skb.mark_as_X()
 
     def df1(X, y):
-        date = X["Date of Transfer"].apply(pd.to_datetime)
+        date = X["Date of Transfer"].skb.apply_func(pd.to_datetime)
         X = X.assign(
             month_sin=(date.dt.month * (2 * np.pi / 12)).apply(np.sin),
             month_cos=(date.dt.month * (2.0 * np.pi / 12)).apply(np.cos),

@@ -4,13 +4,11 @@ from sklearn.model_selection import train_test_split, check_cv
 from sklearn.metrics._scorer import _Scorer
 from skrub._data_ops._data_ops import EvalMode
 from skrub._data_ops import DataOp
-from types import SimpleNamespace
-import io
-from contextlib import redirect_stdout, redirect_stderr
 from stratum._config import FLAGS
 from stratum.logical_optimizer._dataframe_ops import SplitOp
 from stratum.logical_optimizer._optimize import optimize,OptConfig
-from stratum.logical_optimizer._ops import CallOp, ChoiceOp, GetItemOp, ImplOp, MethodCallOp, Op, ValueOp
+from stratum.logical_optimizer._ops import ImplOp, Op
+import polars as pl
 
 import pandas as pd
 import logging
@@ -19,10 +17,9 @@ logger = logging.getLogger(__name__)
 
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
     """Perform grid search with cross-validation on a DataOp DAG."""
-    # TODO maybe remove the option to show stats here and make args similar to scikit-learn's grid_search
 
     show_stats = FLAGS.stats is not None
-    ops_ordered = optimize(dag, OptConfig(cse=True))
+    ops_ordered = optimize(dag)
     sched = Scheduler(ops_ordered, show_stats)
 
     preds = sched.grid_search(cv, scoring, return_predictions)
@@ -67,7 +64,7 @@ class Scheduler:
                 return self.ops_ordered[-1].intermediate
             else:
                 raise e
-        
+
         train_index, test_index = train_test_split(range(len(split_op.inputs[0].intermediate)), test_size=test_size, random_state=seed)
         split_op.indices = train_index
         self.compute(self.pos_split_op)
@@ -81,48 +78,54 @@ class Scheduler:
         # default to scikit-learn's CV
         cv = check_cv(cv)
 
-        # get scoring function
+        # start with computing till X and y node
+        logger.debug("\n" + "="*100 + "\n" + "Starting grid search" + "\n" + "="*100 + "\n")
+        split_op = self.compute_xy()
+        results, predictions = [], []
+
+        logger.debug("\n" + "="*100 + "\n" + "XY computed" + "\n" + "="*100 + "\n")
+        results = self.cross_validate(split_op, cv, scoring, predictions, results, return_predictions)
+        self.results_ = results
+        return predictions if return_predictions else None
+
+
+    def get_scoring_func(self, scoring):
+        """Get scoring function from str or _Scorer object."""
         if type(scoring) == str:
             coeff = -1 if scoring.startswith("neg_") else 1
-            scoring_func = lambda test, pred: mean_squared_error(test, pred)*coeff
+            scoring_func = lambda test, pred: mean_squared_error(test, pred) * coeff
         elif type(scoring) == _Scorer:
             scoring_func = scoring._score_func
         else:
             scoring_func = mean_squared_error
+        return scoring_func
 
-        # start with computing till X and y node
-        logger.debug("\n", "="*100, "\n", "Starting grid search", "\n","="*100, "\n")
-        split_op = self.compute_xy()
-        results, predictions = [], []
+    def cross_validate(self, split_op, cv, scoring, predictions: list, results: list, return_predictions: bool):
+        scoring_func = self.get_scoring_func(scoring)
 
-        logger.debug("\n", "="*100, "\n", "XY computed", "\n","="*100, "\n")
-        #TODO we can parallelize over the folds
+        # TODO we can parallelize over the folds
         for i, (train_index, test_index) in enumerate(cv.split(split_op.inputs[0].intermediate)):
-            logger.debug(f"CV Fold Nr. {i+1}")
-
-            split_op.indices = train_index
+            logger.debug(f"CV Fold Nr. {i + 1}")
 
             # fit and predict the pipeline
             split_op.indices = train_index
             self.compute(self.pos_split_op)
-            logger.debug("\n", "="*100, "\n", "Training done for fold", i+1, "\n","="*100, "\n")
+            logger.debug("\n" + "="*100 + "\n" + "Training done for fold " + str(i+1) + "\n" + "="*100 + "\n")
             split_op.indices = test_index
             df = self.compute(self.pos_split_op, mode="predict")
-            logger.debug("\n", "="*100, "\n", "Predicting done for fold", i+1, "\n","="*100, "\n")
+            logger.debug("\n" + "="*100 + "\n" + "Predicting done for fold " + str(i+1) + "\n" + "="*100 + "\n")
             if return_predictions:
-                predictions.append(df.copy())
+                predictions.append(df)
 
             # scoring
             y_test = split_op.intermediate[1]
-            df["scores"] = df["vals"].apply(
-                lambda pred: scoring_func(y_test, pred))
-            df = df.drop("vals", axis=1)
+            df = df.with_columns(df["vals"].map_elements(lambda pred: scoring_func(y_test, pl.Series(pred))).alias("scores"))
+            df = df.drop("vals")
             results.append(df)
 
-        results = pd.concat(results, axis=0)
-        results = results.groupby("id").aggregate("mean").sort_values(by="scores", ascending=False)
-        self.results_ = results
-        return predictions if return_predictions else None
+        results = pl.concat(results)
+        results = results.group_by("id").mean().sort("scores", descending=True)
+        return results
 
     def compute(self, start_pos: int, mode="fit_transform"):
         """Compute the pipeline from start_pos onwards with given inputs."""
@@ -137,9 +140,9 @@ class Scheduler:
         if mode == "predict":
             pred = self.ops_ordered[-1].intermediate
             if isinstance(pred, list):
-                return pd.DataFrame(pred)
+                return pl.DataFrame(pred)
             else:
-                return pd.DataFrame({"vals": [pred], "id": ["default"]})
+                return pl.DataFrame({"vals": [pred], "id": ["default"]})
         return None
 
     def compute_xy(self) -> SplitOp:
@@ -155,6 +158,7 @@ class Scheduler:
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
+        logger.debug(f"Processing op: {op}")
         t0 = perf_counter() if self.timings is not None else 0
         try:
             op.process(mode=self.mode, environment=self.env)

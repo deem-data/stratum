@@ -1,8 +1,11 @@
 from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp
 from pandas import DataFrame
 import pandas as pd
+import polars as pl
 from stratum.logical_optimizer._op_utils import topological_iterator
+from stratum._config import FLAGS
 
+POLARS = FLAGS.force_polars
 
 class DataSourceOp(Op):
     def __init__(self, data: DataFrame = None, file_path: str = None, _format: str = None,
@@ -20,7 +23,17 @@ class DataSourceOp(Op):
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict):
-        self.intermediate = self.data if self.data is not None else pd.read_csv(self.file_path, *self.read_args, **self.read_kwargs)
+        if self.data is not None:
+            if POLARS:
+                self.intermediate = pl.DataFrame(self.data)
+            else:
+                self.intermediate = self.data
+
+        else:
+            if POLARS:
+                self.intermediate = pl.read_csv(self.file_path, *self.read_args, **self.read_kwargs)
+            else:
+                self.intermediate = pd.read_csv(self.file_path, *self.read_args, **self.read_kwargs)
 
     def clone(self):
         raise ValueError(f"We should not clone DataSourceOp objects.")
@@ -42,14 +55,19 @@ class MetadataOp(Op):
         _obj = next(iter_ins).intermediate
         _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
         _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
-        self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
+        if POLARS:
+            if "columns" in _kwargs:
+                _args.append(_kwargs["columns"])
+            self.intermediate = getattr(_obj, self.func)(*_args)
+        else:
+            self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
 
 class ProjectionOp(Op):
-    fields = ["func", "args", "kwargs", "columns"]
+    fields = ["func", "is_method", "args", "kwargs", "columns"]
     
-    def __init__(self, func, is_method: bool = True, args: tuple | list = None, kwargs: dict = None, 
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None, is_X=False, is_y=False):
-        super().__init__(name=func.upper() if is_method else f"{func.__name__.upper()}", is_X=is_X, is_y=is_y, inputs=inputs, outputs=outputs)
+    def __init__(self, func="", is_method: bool = True, args: tuple | list = None, kwargs: dict = None,
+        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
+        super().__init__(name=func.upper() if is_method else f"{func.__name__.upper()}", inputs=inputs, outputs=outputs)
         if kwargs is not None:
             self.check_kwargs(kwargs)
         self.is_method = is_method
@@ -59,17 +77,159 @@ class ProjectionOp(Op):
         self.kwargs = kwargs
         self.is_dataframe_op = True
 
-    def process(self, mode: str, environment: dict):
+    def _extract_args_and_kwargs(self):
+        """Extract and process arguments and kwargs from inputs."""
         iter_ins, args_iter = iter(self.inputs), iter(self.args)
         _obj = next(iter_ins).intermediate
         if not self.is_method:
             next(args_iter)
         _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in args_iter]
         _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
+        return _obj, _args, _kwargs
+
+    def process(self, mode: str, environment: dict):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+        if self.is_method:
+            if POLARS:
+                raise ValueError(f"Unsupported method: {self.func}")
+            else:
+                self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
+        else:
+            self.intermediate = self.func(_obj, *_args, **_kwargs)
+
+class DropOp(ProjectionOp):
+    def __init__(self, args: tuple | list = (), kwargs: dict = {},
+        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
+        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+
+    def process(self, mode: str, environment: dict):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+
+        if POLARS:
+            if "columns" in _kwargs:
+                _args.append(_kwargs["columns"])
+            if "ignore_errors" in _kwargs:
+                _args.append(_kwargs["ignore_errors"] == "raise")
+            self.intermediate = _obj.drop(*_args)
+        else:
+            self.intermediate = _obj.drop(*_args, **_kwargs)
+
+class ApplyUDFOp(ProjectionOp):
+    fields = ["args", "kwargs", "columns"]
+    def __init__(self, args: tuple | list = (), kwargs: dict = {},
+        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
+        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+
+    def process(self, mode: str, environment: dict):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+
+        n_cols = None
         if self.columns:
             _obj = _obj[self.columns]
-        self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs) if self.is_method else self.func(_obj, *_args, **_kwargs)
+            if type(self.columns) == str:
+                n_cols = 1
+            else:
+                n_cols = len(self.columns)
 
+        if POLARS:
+            if isinstance(_obj, pl.Series):
+                n_cols = 1
+            if n_cols == 1:
+                self.intermediate = _obj.map_elements(*_args, **_kwargs)
+            else:
+                self.intermediate = _obj.map_rows(*_args, **_kwargs)
+        else:
+            self.intermediate = _obj.apply(*_args, **_kwargs)
+
+class AssignOp(ProjectionOp):
+    def __init__(self, args: tuple | list = (), kwargs: dict = {},
+        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
+        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+
+    def process(self, mode: str, environment: dict):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+        if POLARS:
+            self.intermediate = _obj.with_columns(*_args, **_kwargs)
+        else:
+            self.intermediate = _obj.assign(*_args, **_kwargs)
+
+class DatetimeConversionOp(ProjectionOp):
+    def __init__(self, args: tuple | list = (), kwargs: dict = {},
+        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
+        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+
+    def process(self, mode: str, environment: dict):
+        if POLARS:
+            self.intermediate = self.inputs[0].intermediate.str.to_datetime(*self.args, **self.kwargs)
+        else:
+            self.intermediate = pd.to_datetime(self.inputs[0].intermediate, *self.args, **self.kwargs)
+
+class GetAttrProjectionOp(Op):
+    fields = ["attr_name"]
+
+    POLARS_ATTR_NAME_MAP = {"dayofweek": "weekday"}
+
+    def __init__(self, attr_name: list[str] | str = None, inputs: list[Op] = None, outputs: list[Op] = None):
+        if attr_name is None:
+            self.attr_name = []
+        elif isinstance(attr_name, str):
+            self.attr_name = [attr_name]
+        else:
+            self.attr_name = attr_name
+        attr_name_str = ".".join(self.attr_name) if self.attr_name else '?'
+        super().__init__(name=attr_name_str)
+        self.inputs = inputs
+        self.outputs = outputs
+        self.is_dataframe_op = True
+
+    def __str__(self):
+        attr_name = ".".join(self.attr_name)
+        return f"GetAttrProjectionOp({attr_name}) [df]"
+
+    def process(self, mode: str, environment: dict):
+        self.intermediate = self.inputs[0].intermediate
+        if POLARS:
+            for attr in self.attr_name:
+                attr = self.POLARS_ATTR_NAME_MAP.get(attr, attr)
+                # polars implements dt.day as a method, not an attribute
+                # use getattr to handle both attributes and methods
+                self.intermediate = getattr(self.intermediate, attr)
+            self.intermediate = self.intermediate()
+        else:
+            for attr in self.attr_name:
+                self.intermediate = self.intermediate.__getattribute__(attr)
+
+class GroupedDataframeOp(Op):
+    def __init__(self, ops: list[Op]):
+        super().__init__(name="GROUPED_DATAFRAME", is_X=False, is_y=False)
+        self.ops = ops
+        self.is_dataframe_op = True
+
+    def process(self, mode: str, environment: dict):
+        for op in self.ops:
+            op.process(mode, environment)
+        self.intermediate = self.ops[-1].intermediate
+
+
+def rewrite_fuse_get_item_ops(op: Op) -> Op:
+    pass
+    # obj = op.inputs[0]
+    # fuse GetItem and Projection
+    # if isinstance(obj, GetItemOp) and not obj.is_X and not obj.is_y:
+    #     op.inputs[0] = op.inputs[0].inputs[0]
+    #     new_op = ProjectionOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs, columns=obj.key, is_X=op.is_X, is_y=op.is_y)
+    #     # remove GetItem --> Projection connection
+    #     obj.outputs.remove(op)
+    #     # check if GetItem has other outputs, if not remove op
+    #     if len(obj.outputs) == 0:
+    #         obj.replace_output_of_inputs(new_op)
+    #     else:
+    #         # append new_op to all GetItem's inputs
+    #         for in_ in obj.inputs:
+    #             in_.add_output(new_op)
+    #     # set the output of all new op's inputs correctly
+    #     for in_ in new_op.inputs[1:]:
+    #         in_.replace_output(op, new_op)
 
 class SplitOp(Op):
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
@@ -79,7 +239,15 @@ class SplitOp(Op):
         self.indices = None
 
     def process(self, mode: str, environment: dict):
-        self.intermediate = (self.inputs[0].intermediate.iloc[self.indices], self.inputs[1].intermediate.iloc[self.indices])
+        # we need to handle both pandas and polars dfs
+        x = self.inputs[0].intermediate
+        y = self.inputs[1].intermediate
+        if isinstance(x, pd.DataFrame):
+            self.intermediate = (x.iloc[self.indices], y.iloc[self.indices])
+        elif isinstance(x, pl.DataFrame):
+            self.intermediate = (x[self.indices], y[self.indices])
+        else:
+            raise ValueError(f"Unsupported dataframe type: {type(x)}")
 
 class SplitOutput(Op):
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, ):
@@ -120,84 +288,106 @@ def rewrite_dataframe_ops(sink: Op) -> Op:
     """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
     for op in topological_iterator(sink):
         new_op = None
+        # DataSource detection (directly passed dataframe)
+        if len(op.inputs) == 0:
+            if isinstance(op, ValueOp) and isinstance(op.value, DataFrame):
+                new_op = DataSourceOp(data=op.value)
+                new_op.outputs = op.outputs
 
-        # DataSource detection
-        if isinstance(op, CallOp):
-            if op.func is pd.read_csv:
-                input_iter = iter(op.inputs)
-                # assume all inputs are ValueOps
-                assert all(isinstance(arg, ValueOp) for arg in op.inputs), "All inputs must be ValueOps"
-                args = [next(input_iter).value if arg is DATA_OP_PLACEHOLDER else arg for arg in op.args]
-                kwargs = {k: next(input_iter).value if v is DATA_OP_PLACEHOLDER else v for k, v in op.kwargs.items()}
-                new_op = DataSourceOp(file_path=args[0], _format = "csv", read_args=args[1:], read_kwargs=kwargs, is_X=op.is_X, is_y=op.is_y, outputs=op.outputs)
-                op.replace_input_of_outputs(new_op)
-            elif op.inputs[0].is_dataframe_op and op.func is pd.to_datetime:
-                new_op = ProjectionOp(func=op.func, is_method=False, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs, is_X=op.is_X, is_y=op.is_y)
-                op.replace_output_of_inputs(new_op)
-                op.replace_input_of_outputs(new_op)
-        elif isinstance(op, ValueOp) and isinstance(op.value, DataFrame):
-            new_op = DataSourceOp(data=op.value, is_X=op.is_X, is_y=op.is_y, outputs=op.outputs)
-            op.replace_input_of_outputs(new_op)
+        # DataSource detection (read operation)
+        elif not op.inputs[0].is_dataframe_op:
+            if isinstance(op, CallOp):
+                if op.func is pd.read_csv:
+                    new_op = make_read_op(new_op, op)
 
-        # Projection detection
-        elif isinstance(op, MethodCallOp) and op.inputs[0].is_dataframe_op:
-            if op.method_name in ["rename"]:
-                new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs, is_X=op.is_X, is_y=op.is_y)
-                op.replace_output_of_inputs(new_op)
-                op.replace_input_of_outputs(new_op)
-            elif op.method_name in ["drop", "apply", "assign"]:
-                obj = op.inputs[0]
-                # fuse GetItem and Projection
-                if isinstance(obj, GetItemOp) and not obj.is_X and not obj.is_y:
-                    op.inputs[0] = op.inputs[0].inputs[0]
-                    new_op = ProjectionOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs, columns=obj.key, is_X=op.is_X, is_y=op.is_y)
-                    # remove GetItem --> Projection connection
-                    obj.outputs.remove(op)
-                    # check if GetItem has other outputs, if not remove op
-                    if len(obj.outputs) == 0:
-                        obj.replace_output_of_inputs(new_op)
-                    else:
-                        # append new_op to all GetItem's inputs
-                        for in_ in obj.inputs:
-                            in_.add_output(new_op)
-                    # set the output of all new op's inputs correctly
-                    for in_ in new_op.inputs[1:]:
-                        in_.replace_output(op, new_op)
-                    
-                else:
-                    new_op = ProjectionOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs, is_X=op.is_X, is_y=op.is_y)
+        # input is a dataframe op
+        else:
+            if isinstance(op, CallOp):
+                # Datetime conversion detection
+                if op.func is pd.to_datetime:
+                    new_op = make_datetime_conversion_op(new_op, op)
+
+            elif isinstance(op, MethodCallOp):
+                if op.method_name in ["rename"]:
+                    new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
                     op.replace_output_of_inputs(new_op)
-                op.replace_input_of_outputs(new_op)
+                elif op.method_name == "drop":
+                    new_op = DropOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                    op.replace_output_of_inputs(new_op)
+                elif op.method_name == "apply":
+                    new_op = ApplyUDFOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                    op.replace_output_of_inputs(new_op)
+                elif op.method_name in ["assign"]:
+                    new_op = AssignOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                    op.replace_output_of_inputs(new_op)
 
-        # mark as dataframe op
-        elif isinstance(op, GetItemOp) and op.inputs[0].is_dataframe_op:
-            op.is_dataframe_op = True
+            # GetAttr Fusing and conversion to GetAttrDataframeOp
+            elif isinstance(op, GetAttrOp) and op.inputs[0].is_dataframe_op:
+                new_op = make_frame_get_attr(new_op, op)
 
-        # GetAttr Fusing
-        elif isinstance(op, GetAttrOp) and op.inputs[0].is_dataframe_op:
-            input_ = op.inputs[0]
-            op.is_dataframe_op = True
-            if isinstance(input_, GetAttrOp):
-                concat_attr_name = input_.attr_name.copy()
-                concat_attr_name.append(op.attr_name)
-                op.attr_name = concat_attr_name
-                new_input = input_.inputs[0]
-                op.inputs[0] = new_input
-                if len(input_.outputs) > 1:
-                    input_.outputs.remove(op)
-                    new_input.add_output(op)
-                else:
-                    new_input.replace_output(input_, op)
-                    del input_
-                
-            else:
-                op.attr_name = [op.attr_name]
+            # Projection: BinOp detection
+            elif isinstance(op, BinOp) and op.inputs[0].is_dataframe_op:
+                op.is_dataframe_op = True
 
-        # Projection: BinOp detection
-        elif isinstance(op, BinOp) and op.inputs[0].is_dataframe_op:
-            op.is_dataframe_op = True
+            # mark as dataframe op
+            elif isinstance(op, GetItemOp):
+                op.is_dataframe_op = True
 
-        if sink is op and new_op is not None:
-            sink = new_op
+        if new_op is not None:
+            op.replace_input_of_outputs(new_op)
+            if sink is op:
+                sink = new_op
 
+    return sink
+
+
+def make_datetime_conversion_op(new_op: DatetimeConversionOp, op: CallOp) -> DatetimeConversionOp:
+    # arg[0] is the input
+    if len(op.args) > 1:
+        args = op.args[1:]
+    else:
+        args = ()
+
+    new_op = DatetimeConversionOp(args=args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+
+def make_read_op(new_op: DataSourceOp, op: CallOp) -> DataSourceOp:
+    input_iter = iter(op.inputs)
+    # assume all inputs are ValueOps
+    assert all(isinstance(arg, ValueOp) for arg in op.inputs), "All inputs must be ValueOps"
+    args = [next(input_iter).value if arg is DATA_OP_PLACEHOLDER else arg for arg in op.args]
+    kwargs = {k: next(input_iter).value if v is DATA_OP_PLACEHOLDER else v for k, v in op.kwargs.items()}
+    new_op = DataSourceOp(file_path=args[0], _format="csv", read_args=args[1:], read_kwargs=kwargs)
+    new_op.outputs = op.outputs
+    return new_op
+
+
+def make_frame_get_attr(new_op: GetAttrProjectionOp, op: GetAttrOp) -> GetAttrProjectionOp:
+    input_ = op.inputs[0]
+    if isinstance(input_, GetAttrProjectionOp):
+        # Fuse chained GetAttr operations
+        concat_attr_name = input_.attr_name.copy()
+        attr_to_add = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
+        concat_attr_name.extend(attr_to_add)
+
+        new_input = input_.inputs[0]
+        new_op = GetAttrProjectionOp(attr_name=concat_attr_name, inputs=[new_input], outputs=op.outputs)
+
+        if len(input_.outputs) > 1:
+            input_.outputs.remove(op)
+            new_input.add_output(new_op)
+        else:
+            new_input.replace_output(input_, new_op)
+
+    else:
+        # Convert single GetAttrOp to GetAttrDataframeOp
+        attr_name = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
+        new_op = GetAttrProjectionOp(attr_name=attr_name, inputs=op.inputs, outputs=op.outputs)
+        op.replace_output_of_inputs(new_op)
+    return new_op
+
+
+def group_dataframe_ops(sink: Op) -> Op:
     return sink

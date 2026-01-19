@@ -22,11 +22,13 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Libraries",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
+    "scikit-learn==1.8",
     "skrub>=0.3",
     "polars",
     "graphviz",
+    "pyarrow>=22.0.0",
 ]
 
 [project.optional-dependencies]

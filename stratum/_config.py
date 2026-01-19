@@ -30,6 +30,7 @@ class _Flags:
     stats: int | None = None # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
     open_graph: bool = True,
     DEBUG: bool = False
+    force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
 
 FLAGS = _Flags()
 
@@ -40,7 +41,8 @@ def set_config(rust_backend: bool | None = None,
            stats: int | None = None,
            scheduler: bool | None = None,
            open_graph: bool | None = None,
-           DEBUG: bool | None = None) -> None:
+           DEBUG: bool | None = None,
+           force_polars: bool | None = None) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -67,6 +69,9 @@ def set_config(rust_backend: bool | None = None,
 
         DEBUG: bool, default false
             Enable/disable debug mode.
+
+        force_polars: bool, default false
+            Force use of Polars instead of Pandas for dataframe operations.
     """
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
@@ -94,6 +99,9 @@ def set_config(rust_backend: bool | None = None,
     if DEBUG is not None:
         FLAGS.DEBUG = bool(DEBUG)
         os.environ["STRATUM_DEBUG"] = "1" if FLAGS.DEBUG else "0"
+    if force_polars is not None:
+        FLAGS.force_polars = bool(force_polars)
+        os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
 
 
 def get_config() -> dict:
@@ -107,6 +115,7 @@ def get_config() -> dict:
         "stats": FLAGS.stats,
         "open_graph": FLAGS.open_graph,
         "DEBUG" : FLAGS.DEBUG,
+        "force_polars": FLAGS.force_polars,
     }
 
 @contextmanager

@@ -1,6 +1,6 @@
 from sklearn.metrics import make_scorer, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, ShuffleSplit
-import pandas as pd
+import polars as pl
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 from sklearn.linear_model import ElasticNet,  Ridge
@@ -13,32 +13,45 @@ test=True
 
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
-file_path = "price_paid_records_1M.csv" if test else "input/price_paid_records.csv"
-df = skrub.as_data_op(file_path).skb.apply_func(pd.read_csv).skb.subsample(n=1000)
-print(df.columns.skb.preview())
-df = df.rename(columns={"Town/City": "Town"}, inplace=False)
+file_path = "input/price_paid_records_small.csv" if test else "input/price_paid_records.csv"
+df = skrub.as_data_op(file_path).skb.apply_func(pl.read_csv).skb.subsample(n=1000)
+df = df.rename({"Town/City": "Town"})
 y = df["Price"].skb.mark_as_y()
-X = df.drop("Price", axis=1).skb.mark_as_X()
+X = df.drop("Price").skb.mark_as_X()
 
 from sklearn.base import BaseEstimator, TransformerMixin
 class TargetEncoder(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         print("fit target encoder")
         self.global_mean_ = y.mean()
-        tmp = pd.concat([X, y], axis=1)
+        y_name = y.name if isinstance(y, pl.Series) and y.name else 'target'
+        # Handle both Polars Series and numpy arrays
+        if isinstance(y, pl.Series):
+            tmp = X.with_columns(y.alias(y_name))
+        else:
+            tmp = X.with_columns(pl.Series(y_name, y))
         self.cols = X.columns
         self.means = {}
         for col in self.cols:
-            self.means[col] = tmp.groupby(col)[tmp.columns[-1]].mean()
+            # Store as DataFrame with column name and mean for efficient join
+            self.means[col] = tmp.group_by(col).agg(pl.col(y_name).mean().alias(f"{col}_mean"))
         return self
 
     def transform(self, X):
         print("transform target encoder")
-        X_out = X.copy()
+        X_out = X.clone()
         for col in self.cols:
-            X_out[col] = X_out[col].map(self.means[col]).fillna(self.global_mean_)
+            # Use join instead of map for better performance
+            mean_col_name = f"{col}_mean"
+            X_out = X_out.join(
+                self.means[col],
+                on=col,
+                how="left"
+            ).with_columns(
+                pl.col(mean_col_name).fill_null(self.global_mean_).alias(col)
+            ).drop(mean_col_name)
         return X_out
 
     def fit_transform(self, X, y=None):
@@ -50,37 +63,37 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
 
 
 def pre_process_1(X, y):
-    date = X["Date of Transfer"].skb.apply_func(pd.to_datetime)
-    X = X.assign(
-        year=date.dt.year, 
-        month=date.dt.month, 
-        day=date.dt.day, 
-        dayofweek=date.dt.dayofweek, 
-        hour=date.dt.hour)
-    X = X.assign(
-        month_sin=(date.dt.month * (2 * np.pi / 12)).apply(np.sin),
-        month_cos=(date.dt.month * (2 * np.pi / 12)).apply(np.cos),
-        day_sin=(date.dt.day * (2 * np.pi / 30)).apply(np.sin),
-        day_cos=(date.dt.day * (2 * np.pi / 30)).apply(np.cos),
-        dayofweek_sin=(date.dt.dayofweek * (2 * np.pi / 7)).apply(np.sin),
-        dayofweek_cos=(date.dt.dayofweek * (2 * np.pi / 7)).apply(np.cos),
-        hour_sin=(date.dt.hour * (2 * np.pi / 24)).apply(np.sin),
-        hour_cos=(date.dt.hour * (2 * np.pi / 24)).apply(np.cos),
+    date = X["Date of Transfer"].str.to_datetime()
+    X = X.with_columns(
+        year=date.dt.year(), 
+        month=date.dt.month(), 
+        day=date.dt.day(), 
+        dayofweek=date.dt.weekday(), 
+        hour=date.dt.hour())
+    X = X.with_columns(
+        month_sin=(date.dt.month() * (2 * np.pi / 12)).sin(),
+        month_cos=(date.dt.month() * (2 * np.pi / 12)).cos(),
+        day_sin=(date.dt.day() * (2 * np.pi / 30)).sin(),
+        day_cos=(date.dt.day()   * (2 * np.pi / 30)).cos(),
+        dayofweek_sin=(date.dt.weekday() * (2 * np.pi / 7)).sin(),
+        dayofweek_cos=(date.dt.weekday() * (2 * np.pi / 7)).cos(),
+        hour_sin=(date.dt.hour() * (2 * np.pi / 24)).sin(),
+        hour_cos=(date.dt.hour() * (2 * np.pi / 24)).cos(),
     )
     X = X.drop([
         "Date of Transfer", 
         'Duration', 
         'Transaction unique identifier', 
         'PPDCategory Type', 
-        'Record Status - monthly file only'], axis=1)
+        'Record Status - monthly file only'])
 
-    cat_selector = skrub.selectors.filter(lambda col: col.dtype == "object")
+    cat_selector = skrub.selectors.filter(lambda col: col.dtype == pl.String)
     X_cat = X.skb.select(cat_selector)
     X_cat_enc = X_cat.skb.apply(skrub.StringEncoder())
-    num_selector = skrub.selectors.filter(lambda col: col.dtype != "object")
+    num_selector = skrub.selectors.filter(lambda col: col.dtype != pl.String)
 
     X_te = X[["District", "County", "Town"]].skb.apply(TargetEncoder(), y=y)
-    X_te = X_te.rename(columns={"District": "district_te", "County": "county_te", "Town": "town_te"})
+    X_te = X_te.rename({"District": "district_te", "County": "county_te", "Town": "town_te"})
     X_num = X.skb.select(num_selector)
     X_num = X_num.skb.concat([X_te], axis=1)
 
@@ -91,8 +104,8 @@ def pre_process_1(X, y):
 def pre_process_2(X):
     X_enc = X.skb.apply(skrub.TableVectorizer())
     return X_enc
-
 X_1 = pre_process_1(X,y)
+print(X_1.skb.preview())
 X_2 = pre_process_2(X)
 X_enc = skrub.choose_from({
     "1": X_1, 
@@ -110,17 +123,17 @@ preds = skrub.choose_from(preds, name="models").as_data_op()
 preds = preds.skb.apply_func(lambda a, m: (a, print(m))[0], skrub.eval_mode())
 
 # play with cvs
-cv = 3
+cv = 1
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42) if cv == 1 else KFold(n_splits=cv, shuffle=True, random_state=42)
-scorer = make_scorer(r2_score)
+scorer = make_scorer(mean_squared_error)
 t0 = perf_counter()
-with skrub.config(scheduler=True, stats=20, rust_backend=True):
+with skrub.config(scheduler=True, stats=True):
     search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
 t1 = perf_counter()
 print("="*80)
 print(f"Stratum gridsearch scheduler time: {t1 - t0} seconds")
 print("="*80)
-search = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer, refit=False)
+search = preds.skb.make_grid_search(cv=cv, n_jobs=-1, fitted=True, scoring=scorer, refit=False)
 t2 = perf_counter()
 print("="*80)
 print(f"Skrub default gridsearch time: {t2 - t1} seconds")

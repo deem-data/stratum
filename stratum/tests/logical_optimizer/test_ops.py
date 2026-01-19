@@ -42,7 +42,9 @@ class TestOpCloning(unittest.TestCase):
     def test_clone_ops(self):
         """Test cloning an Op with skrub_impl."""
         data = skrub.as_data_op(self.df)
-        data_op = data[["x"]].apply(lambda x: x + 1)
+        #data_op = data[["x"]].apply(lambda x: x + 1)
+        data_op = data.apply(lambda x: x + 1)
+
         pred = data_op.skb.apply(DummyRegressor(), y=data["y"])
         pred = pred.skb.apply_func(lambda x,a, b: x, 1, b=1)
         choice = skrub.choose_from([pred], name="choice").as_data_op()
@@ -56,7 +58,7 @@ class TestOpCloning(unittest.TestCase):
         
         cloned = ops[1].clone()
         self.assertIsNot(cloned, ops[1])
-        self.assertTrue(ops[1].func == cloned.func)
+        self.assertTrue(ops[1].args == cloned.args)
         self.assertTrue(ops[1].columns == cloned.columns)
 
         cloned = ops[2].clone()
