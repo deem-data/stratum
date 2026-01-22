@@ -2436,7 +2436,7 @@ wheels = [
 
 [[package]]
 name = "skrub"
-version = "0.6.2"
+version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
@@ -2448,9 +2448,9 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9a/33/4e566b9bd590fc57442daa6879b7048dcf52be0fdc1bdf5af9472252a597/skrub-0.6.2.tar.gz", hash = "sha256:0573f1c12b5bfc609f28adecf091893ab4f09d6bbb94a3db20058c7572568e77", size = 7966546, upload-time = "2025-09-25T15:06:56.252Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/8e/effe0f2f313fff1a56990020be1c4d88cc74954e063f6c4c55fe6a34d36e/skrub-0.7.1.tar.gz", hash = "sha256:7710786f1b3c48f6432abe79d421748c442350fc853959aab780366f432e447f", size = 8011681, upload-time = "2026-01-06T14:21:41.276Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/c9/5c73686480c7cd84400c27f7120ebb378caf94beaaf26ba56471625e1c66/skrub-0.6.2-py3-none-any.whl", hash = "sha256:c4478caf511f128ff60469e77e4f1b3a20f9b391b69765ad73f28d794256270f", size = 478814, upload-time = "2025-09-25T15:06:53.866Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/63/bf84b02c890214e3402952e7eff57fbc2c700682baa6d327c553c9902565/skrub-0.7.1-py3-none-any.whl", hash = "sha256:591a434f9345e1c866248783c73cccd2a1ac94932d9f22d20d47e5460f5bec7d", size = 499350, upload-time = "2026-01-06T14:21:38.021Z" },
 ]
 
 [[package]]

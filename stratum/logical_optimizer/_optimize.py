@@ -106,8 +106,11 @@ def convert_to_ops(dag: DataOp) -> Op:
 
     order = topological_traverse(nodes, parents, children)
     sink_id = order[-1]
+
     # make logical IR:
+    # we start by making unconnected ops
     ids_to_ops = {node: as_op(nodes[node]) for node in order}
+    # we then connect the ops to a graph
     for node in order:
         op = ids_to_ops[node]
         if isinstance(op, ImplOp) and isinstance(op.skrub_impl, SubsamplePreviews):

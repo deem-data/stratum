@@ -3,16 +3,15 @@ from types import SimpleNamespace
 from typing import Callable
 
 from joblib import parallel_config
-from lightgbm import LGBMRegressor
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
-from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, _wrap_estimator
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Var, _wrap_estimator
 from pandas import DataFrame
 from polars import DataFrame as PlDataFrame, Series as PlSeries
-from logging import getLogger
-
-logger = getLogger(__name__)
+from stratum.runtime._hash_utils import stable_hash
+import logging
+logger = logging.getLogger(__name__)
 
 class PlaceHolder():
     def __init__(self, name: str):
@@ -41,11 +40,15 @@ class Op():
         self.is_split_op = False
         self.was_cloned = False
         self.parallel_group = None
+        self.cached_hash = None
 
     def to_str_helper(self):
         class_name = self.__class__.__name__
         is_df = " [df]" if self.is_dataframe_op else ""
         name = f"({self.name})" if self.name and len(self.name) > 0 else ""
+        # truncate name if it is too long
+        if len(name) > 50:
+            name = name[:50] + "..."
         return class_name, name, is_df
 
     def __str__(self):
@@ -111,6 +114,18 @@ class Op():
                 f" {type(kwargs).__name__!r} instead: {kwargs!r}"
             )
 
+    def simple_hash(self):
+        raise NotImplementedError(f"Simple_hash must be implemented in {self.__class__.__name__}")
+
+    def get_hash(self):
+        if self.cached_hash is not None:
+            return self.cached_hash
+        sub_dag_hash = [op.get_hash() for op in self.inputs]
+        sub_dag_hash.append(self.simple_hash())
+        self.cached_hash = stable_hash(sub_dag_hash)
+        return self.cached_hash
+
+
 def clone_value(value):
     if isinstance(value, dict):
         return {k:clone_value(v) for k,v in value.items()}
@@ -170,6 +185,21 @@ class ImplOp(Op):
             ns = self.replace_fields_with_values()
             self.intermediate = self.skrub_impl.compute(ns, mode, environment)
 
+class VariableOp(Op):
+    def __init__(self, name: str, value = None):
+        super().__init__(name=name)
+        self.name = name
+        if value is not None:
+            self.value = value
+        else:
+            self.value = "EMPTY_VARIABLE"
+
+    def clone(self):
+        return VariableOp(name=self.name)
+
+    def process(self, mode: str, environment: dict):
+        self.intermediate = environment[self.name]
+
 class BaseEstimatorOp(Op):
     fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs"]
     
@@ -179,6 +209,8 @@ class BaseEstimatorOp(Op):
             kwargs = {}
         self.check_kwargs(kwargs)
         self.estimator = estimator
+        place_holders = {k: v for k, v in self.estimator.get_params().items() if isinstance(v, DataOp)}
+        self.estimator.set_params(**place_holders)
         self.original_estimator = clone(self.estimator)
         self.y = DATA_OP_PLACEHOLDER if isinstance(y, DataOp) else y
         self.cols = DATA_OP_PLACEHOLDER if isinstance(cols, DataOp) else cols
@@ -187,6 +219,9 @@ class BaseEstimatorOp(Op):
         self.unsupervised = unsupervised
         self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
         self.parallelism = 8
+
+    def simple_hash(self):
+        return stable_hash((self.estimator, self.y, self.cols, self.how, self.allow_reject, self.unsupervised, self.kwargs))
 
     def clone(self):
         params = self.estimator.get_params()
@@ -215,6 +250,8 @@ class BaseEstimatorOp(Op):
         assert x is not None, f"X is None for {self}"
         y = None if mode == 'predict' else next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
         estm = self.estimator if mode == "predict" else self.original_estimator
+        place_holders = {k: next(input_iter).intermediate for k, v in estm.get_params().items() if isinstance(v, DataOp)}
+        estm.set_params(**place_holders)
         cols = next(input_iter).intermediate if self.cols == DATA_OP_PLACEHOLDER else self.cols
         return (
             estm,
@@ -262,7 +299,6 @@ def estimator_parallel_config(n_jobs: int = 8):
         return DummyConfigManager()
 
 def estm_supports_polars(estimator):
-    print(estimator.__class__.__module__, estimator.__class__.__name__)
     is_sklearn = estimator.__class__.__module__.startswith("sklearn.") or estimator.__class__.__module__.startswith("skrub.")
     is_stratum = estimator.__class__.__module__.startswith("stratum.") and estimator.__class__.__name__.startswith("Rusty")
     other_frameworks = estimator.__class__.__module__.startswith("xgboost.")
@@ -341,7 +377,11 @@ class ChoiceOp(Op):
             ) for combi in self.outcome_names]
 
     def update_name(self):
-        self.name = "  |  ".join(self.make_outcome_names())
+        opts = " | ".join(self.make_outcome_names())
+        max_len = 50
+        if len(opts) > max_len:
+            opts = opts[:max_len] + "..."
+        self.name = opts
 
     def clone(self):
         new_op = ChoiceOp(outcome_names=self.outcome_names, append_choice_name=False)
@@ -380,6 +420,8 @@ class MethodCallOp(Op):
     def process(self, mode: str, environment: dict):
         iter_ins = iter(self.inputs)
         _obj = next(iter_ins).intermediate
+        if isinstance(_obj, PlDataFrame) or isinstance(_obj, PlSeries):
+            _obj = _obj.to_pandas()
         _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
         _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
         self.intermediate = _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
@@ -412,19 +454,27 @@ class GetAttrOp(Op):
         if self.is_dataframe_op:
             self.intermediate = self.inputs[0].intermediate
             for attr in self.attr_name:
-                self.intermediate = self.intermediate.__getattribute__(attr)
+                self.intermediate = getattr(self.intermediate, attr)
         else:
-            self.intermediate = self.inputs[0].intermediate.__getattribute__(self.attr_name)
+            self.intermediate = getattr(self.inputs[0].intermediate, self.attr_name)
 
 class GetItemOp(Op):
     fields = ["key"]
     
     def __init__(self, key=None):
         super().__init__(name=str(key) if key is not None else '?')
-        self.key = key
+        self.key = DATA_OP_PLACEHOLDER if isinstance(key, DataOp) else key 
 
     def process(self, mode: str, environment: dict):
+        if self.key is DATA_OP_PLACEHOLDER:
+            self.key = self.inputs[1].intermediate
         self.intermediate = self.inputs[0].intermediate[self.key]
+
+    def simple_hash(self):
+        if isinstance(self.key, str) or isinstance(self.key, list):
+            return stable_hash(self.key)
+        else:
+            raise NotImplementedError(f"Hashing is nt implemented for key type: {type(self.key)}")
 
 class BinOp(Op):
     fields = ["op", "left", "right"]
@@ -436,7 +486,7 @@ class BinOp(Op):
         self.right = DATA_OP_PLACEHOLDER if isinstance(right, DataOp) else right
 
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, cv_id = None):
         i = 0
         if self.left is DATA_OP_PLACEHOLDER:
             left = self.inputs[i].intermediate
@@ -512,7 +562,9 @@ def as_op(data_op: DataOp):
             how=impl.how, 
             allow_reject=impl.allow_reject, 
             unsupervised=impl.unsupervised, 
-            kwargs=impl.kwargs if hasattr(impl, "kwargs") else {})
+            kwargs= {})
+    elif isinstance(impl, Var):
+        return_op = VariableOp(name=impl.name, value=impl.value)
     else:
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
 

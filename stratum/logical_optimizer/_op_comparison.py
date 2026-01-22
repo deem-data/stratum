@@ -1,9 +1,11 @@
 from typing import Iterable
 from sklearn.base import BaseEstimator
+from skrub import SelectCols
 from skrub._data_ops import DataOp
 from skrub._data_ops._choosing import Choice
-from skrub._data_ops._data_ops import Call, GetItem, CallMethod, GetAttr, Apply, Value, BinOp
-from skrub.selectors._base import All
+from skrub._data_ops._data_ops import Call, GetItem, CallMethod, GetAttr, Apply, Value, BinOp, Concat
+from skrub.selectors._base import All, Filter, Inv
+from pandas import isna
 
 def equals_data_op(op1: DataOp, op2: DataOp):
     """
@@ -54,6 +56,10 @@ def equals_skrub_impl(impl1, impl2):
                 # TODO also match All with set(cols) if cols contains all columns of the input frame
                 if set(cols1) == set(cols2):
                     return estimator_equality_check(est1, est2)
+        elif isinstance(impl1, Concat):
+            # op1 = col1.skb.concat(col2, axis=1)
+            # op2 = col1.skb.concat(col2, axis=1)
+            return _stable_id(impl1.first) == _stable_id(impl2.first) and _stable_id(impl1.others) == _stable_id(impl2.others)
         elif isinstance(impl1, BinOp):
             # op1 = col1 / col2
             # op2 = col1 / col2
@@ -72,7 +78,7 @@ def estimator_equality_check(est1: BaseEstimator, est2: BaseEstimator) -> bool:
     params2 = est2.get_params()
     for key, value in params1.items():
         value2 = params2.get(key)
-        if value2 != value and (
+        if value2 != value and not isna(value) and not isna(value2) and (
                 type(value) != type(value2)
                 or not isinstance(value, BaseEstimator)
                 or not estimator_equality_check(value, value2)):
@@ -129,7 +135,10 @@ def hash_skrub_impl(impl) -> int:
             return hash((t, id(impl.X), col_ids, est_type, est_params))
     elif isinstance(impl, BinOp):
         return hash((t, impl.op, _stable_id(impl.left), _stable_id(impl.right)))
-
+    elif isinstance(impl, Concat):
+        # op1 = col1.skb.concat(col2, axis=1)
+        # op2 = col1.skb.concat(col2, axis=1)
+        return hash((_stable_id(impl.first), _stable_id(impl.others)))
     else:
         # Fallback for unknown DataOp types
         return hash((t, id(impl)))
@@ -159,6 +168,10 @@ def _stable_id(obj):
         return frozenset(_stable_id(x) for x in obj)
     elif isinstance(obj, dict):
         return frozenset((k, _stable_id(v)) for k, v in obj.items())
+    elif isinstance(obj, Filter):
+        return id(obj.predicate)
+    elif isinstance(obj, Inv):
+        return _stable_id(obj.complement)*-1
     elif hasattr(obj, "__hash__") and not isinstance(obj, DataOp):
         # hashable primitive or object
         return hash(obj)
@@ -234,6 +247,14 @@ def update_data_op(op: DataOp, old_input: DataOp, new_input: DataOp):
         elif impl.right is old_input:
             impl.right = new_input
             return
+    elif isinstance(impl, Concat):
+        if impl.first is old_input:
+            impl.first = new_input
+            return
+        for i, other in enumerate(impl.others):
+            if other is old_input:
+                impl.others[i] = new_input
+                return
     raise Exception(f"Could not find old DataOp {old_input} during input update for {op}")
 
 

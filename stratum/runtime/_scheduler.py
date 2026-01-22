@@ -1,11 +1,11 @@
 from time import perf_counter
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split, check_cv
-from sklearn.metrics._scorer import _Scorer
+from sklearn.metrics._scorer import _Scorer, get_scorer
 from skrub._data_ops._data_ops import EvalMode
 from stratum.logical_optimizer._dataframe_ops import SplitOp
 from stratum.logical_optimizer._op_utils import show_graph, topological_iterator
-from stratum.logical_optimizer._ops import EstimatorOp, ImplOp, Op
+from stratum.logical_optimizer._ops import EstimatorOp, ImplOp, Op, TransformerOp
 from joblib import Parallel, delayed
 from concurrent.futures import ThreadPoolExecutor
 import polars as pl
@@ -13,31 +13,37 @@ from stratum._config import FLAGS
 import os
 
 import logging
+
+from stratum.runtime._hash_utils import stable_hash
 logger = logging.getLogger(__name__)
 
 
 def get_scoring_func(scoring):
     """Get scoring function from str or _Scorer object."""
     if type(scoring) == str:
-        coeff = -1 if scoring.startswith("neg_") else 1
-        scoring_func = lambda test, pred: mean_squared_error(test, pred) * coeff
-    elif type(scoring) == _Scorer:
+        scoring = get_scorer(scoring)
+    if type(scoring) == _Scorer:
+        logger.info(f"Using scorer: {scoring}")
+        greater_is_better = scoring._sign > 0 
         scoring_func = scoring._score_func
     else:
+        greater_is_better = False
         scoring_func = mean_squared_error
-    return scoring_func
+    return scoring_func, greater_is_better
 
 class Scheduler:
     """Scheduler for executing DataOpDAGs in topological order."""
     
-    def __init__(self, print_heavy_hitters=False):
+    def __init__(self, print_heavy_hitters=False, cache=None, env=None):
         """Initialize scheduler with a data operations DAG."""
         self.mode = "fit_transform"
-        self.env = {}
+        self.env = env if env else {}
         self.flagged_for_recomputation = []
         self.pos_split_op = None
         self.timings = [] if print_heavy_hitters else None
         self.results_ = None
+        self.cv_id = -1
+        self.cache = cache
 
     def grid_search(self, cv=None, scoring=None, return_predictions=False):
         """Perform grid search with cross-validation on the logical DAG."""
@@ -56,10 +62,11 @@ class Scheduler:
 
     def cross_validate(self, split_op, cv, scoring, predictions: list, results: list, return_predictions: bool):
         """Perform cross-validation on the logical DAG."""
-        scoring_func = get_scoring_func(scoring)
+        scoring_func, greater_is_better = get_scoring_func(scoring)
 
         # TODO we can parallelize over the folds
         for i, (train_index, test_index) in enumerate(cv.split(split_op.inputs[0].intermediate)):
+            self.cv_id = i
             logger.debug(f"CV Fold Nr. {i + 1}")
 
             # fit and predict the pipeline
@@ -79,21 +86,39 @@ class Scheduler:
             results.append(df)
 
         results = pl.concat(results)
-        results = results.group_by("id").mean().sort("scores", descending=True)
+        results = results.group_by("id").mean().sort("scores", descending=greater_is_better)
         return results
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
         logger.debug(f"Processing op: {op}")
-        t0 = perf_counter() if self.timings is not None else 0
+        
         try:
+            # cache lookup
+            cache_key = None
+            if self.cache is not None and isinstance(op, TransformerOp) and op.name == "TableVectorizer":
+                cache_key = stable_hash((op.get_hash(), self.cv_id, self.mode))
+                logger.debug(f"Cache lookup for op: {op} with key: {cache_key}")
+                cache_value = self.cache.get(cache_key)
+                if cache_value is not None:
+                    logger.debug(f"Cache hit for op: {op}")
+                    op.intermediate = cache_value
+                    return op
+
+            t0 = perf_counter() if self.timings is not None else 0
             op.process(mode=self.mode, environment=self.env)
+            if self.timings is not None:
+                duration = perf_counter() - t0
+                self.timings.append((str(op), duration))
+
+            # cache write
+            if self.cache is not None and isinstance(op, TransformerOp) and op.name == "TableVectorizer":
+                cache_value = op.intermediate
+                self.cache.set(cache_key, cache_value)
+                logger.debug(f"Cached result of op: {op} with key: {cache_key}")
+
         except Exception as e:
             raise RuntimeError(f"[{self.mode}] Error processing '{op}': {e}")
-
-        if self.timings is not None:
-            duration = perf_counter() - t0
-            self.timings.append((str(op), duration))
         return op
 
     def _format_predict_result(self, pred):
@@ -109,8 +134,8 @@ class Scheduler:
             self.flagged_for_recomputation.append(op)
 
 class SequentialScheduler(Scheduler):
-    def __init__(self, dag_sink: Op, print_heavy_hitters=False):
-        super().__init__(print_heavy_hitters)
+    def __init__(self, dag_sink: Op, print_heavy_hitters=False, cache=None, env=None):
+        super().__init__(print_heavy_hitters, cache=cache, env=env)
         self.ops_ordered = [op for op in topological_iterator(dag_sink)]
 
     def evaluate(self, seed: int = 42, test_size = 0.2):
@@ -158,8 +183,8 @@ class SequentialScheduler(Scheduler):
         raise RuntimeError("X and y nodes not found in the DAG")
 
 class ParallelScheduler(Scheduler):
-    def __init__(self, dag_sink: Op, parallel_groups: dict[int, (int, list[Op])], print_heavy_hitters=False, backend="threading", max_workers=None):
-        super().__init__(print_heavy_hitters)
+    def __init__(self, dag_sink: Op, parallel_groups: dict[int, (int, list[Op])], print_heavy_hitters=False, backend="threading", max_workers=None, cache=None, env=None):
+        super().__init__(print_heavy_hitters, cache=cache, env=env)
         self.linearize_dag(dag_sink)
         self.backend = backend
         if max_workers is None:
