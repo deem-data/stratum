@@ -50,10 +50,13 @@ def mark_ops_for_parallelization(ops: list[Op], ancestors: dict[Op]):
     par_group_id = uuid.uuid4()
     ops = [op for op in ops if get_estimator_memory_estimate(op) is not None]
     selected_ops = get_independent_set(ops, ancestors)
-    selected_ops_str = ",".join(op.name for op in selected_ops)
-    logger.debug(f"Selected {len(selected_ops)} ops for parallelization: [{selected_ops_str}]")
-    for op in selected_ops:
-        op.parallel_group = par_group_id
+    if len(selected_ops) > 1:
+        selected_ops_str = ",".join(op.name for op in selected_ops)
+        logger.debug(f"Selected {len(selected_ops)} ops for parallelization: [{selected_ops_str}]")
+        for op in selected_ops:
+            op.parallel_group = par_group_id
+    else:
+        logger.debug(f"No ops selected for parallelization. Not enough ops to parallelize: {len(selected_ops)}.")
 
 
 def compute_ancestors(sink: Op) -> dict[Op]:

@@ -120,6 +120,8 @@ def topological_iterator(sink: Op) -> Iterator[Op]:
         yield op
         op_outputs = op.outputs + (op.additional_outputs if op.additional_outputs is not None else [])
         for out_op in op_outputs:
+            if out_op not in indegree:
+                raise RuntimeError(f"Encountered op {out_op} which should not exist in the DAG. Probably due to a buggy rewrite, which did not updated the its inputs / outputs correctly.")
             indegree[out_op] -= 1
             if indegree[out_op] == 0:
                 queue2.append(out_op)

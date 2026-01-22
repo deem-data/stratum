@@ -44,6 +44,7 @@ class _Flags:
     DEBUG: bool = False
     scheduler_parallelism: str | None = _env_str("STRATUM_SCHEDULER_PARALLELISM", None)
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
+    caching: bool = _env_bool("STRATUM_CACHING", False)
 
 FLAGS = _Flags()
 
@@ -56,7 +57,8 @@ def set_config(rust_backend: bool | None = None,
            open_graph: bool | None = None,
            DEBUG: bool | None = None,
            force_polars: bool | None = None,
-           scheduler_parallelism: str | None = _UNSET) -> None:
+           scheduler_parallelism: str | None = _UNSET,
+           caching: bool | None = None) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -90,6 +92,9 @@ def set_config(rust_backend: bool | None = None,
         scheduler_parallelism: str | None, default None
             Scheduler parallelism mode. None uses SequentialScheduler, "threading" or "process" 
             uses ParallelScheduler with the specified backend.
+
+        caching: bool, default false
+            Enable/disable caching for DataOp operations.
     """
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
@@ -131,6 +136,9 @@ def set_config(rust_backend: bool | None = None,
             FLAGS.scheduler_parallelism = None
             if "STRATUM_SCHEDULER_PARALLELISM" in os.environ:
                 del os.environ["STRATUM_SCHEDULER_PARALLELISM"]
+    if caching is not None:
+        FLAGS.caching = bool(caching)
+        os.environ["STRATUM_CACHING"] = "1" if FLAGS.caching else "0"
 
 
 def get_config() -> dict:
@@ -146,6 +154,7 @@ def get_config() -> dict:
         "DEBUG" : FLAGS.DEBUG,
         "force_polars": FLAGS.force_polars,
         "scheduler_parallelism": FLAGS.scheduler_parallelism,
+        "caching": FLAGS.caching,
     }
 
 @contextmanager

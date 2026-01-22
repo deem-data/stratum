@@ -95,3 +95,9 @@ class TestOpCloning(unittest.TestCase):
             op.replace_output(3, 4)
         except ValueError as e:
             self.assertEqual(str(e), "Output 3 not found in Op.")
+
+
+    def test_var_ops(self):
+        var = skrub.var("test")
+        out = var.skb.apply_func(pd.read_csv)
+        ops = list(topological_iterator(optimize_(out)))
