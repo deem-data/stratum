@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import unittest
 from sklearn.datasets import make_regression
 from sklearn.preprocessing import StandardScaler
@@ -6,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
 from stratum._api import evaluate
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1
-import stratum
+from stratum.runtime._scheduler import logger
 import logging
 logging.basicConfig(level=logging.INFO)
 
@@ -76,5 +78,23 @@ class EvaluateTest(RuntimeTest):
         pred = x_scaled.skb.apply(RandomForestRegressor(random_state=42), y=y)
         self.compare_evaluate(pred)
 
+    def test_evaluate_with_error(self):
+        # generate data using sklearn
+        data = skrub.as_data_op(self.df)
+        data = data.skb.apply_func(lambda x,m: x if m == "preview" else int("not a number :P"), m=skrub.eval_mode())
+        try:
+            evaluate(data, seed=self.seed, test_size=self.test_size)
+            self.fail("Expected RuntimeError")
+        except RuntimeError as e:
+            self.assertEqual("[fit_transform] Error processing 'CallOp(<lambda>)': invalid literal for int() with base 10: 'not a number :P'",str(e))
+        except Exception as e:
+            self.fail("Expected RuntimeError, got %s" % type(e))
+
+    def test_evaluate_no_X_y(self):
+        # generate data using sklearn
+        data = skrub.as_data_op(self.df)
+        with self.assertLogs(logger, level=logging.WARNING) as log:
+            evaluate(data, seed=self.seed, test_size=self.test_size)
+        self.assertIn("X and y nodes not found in the DAG", log.output[0])
 if __name__ == "__main__":
     unittest.main()

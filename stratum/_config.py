@@ -5,6 +5,9 @@ from dataclasses import dataclass
 import logging
 logger = logging.getLogger(__name__)
 
+# Sentinel to detect if scheduler_parallelism was explicitly provided
+_UNSET = object()
+
 def _env_bool(name, default=False):
     val = os.getenv(name)
     if val is None:
@@ -20,6 +23,15 @@ def _env_int(name, default=0):
     v = os.getenv(name)
     return int(v) if v is not None else int(default)
 
+def _env_str(name, default=None):
+    v = os.getenv(name)
+    if v is None:
+        return default
+    s = str(v).strip().lower()
+    if s in ("", "none", "null"):
+        return None
+    return s
+
 @dataclass
 class _Flags:
     rust_backend: bool = _env_bool("SKRUB_RUST", False)
@@ -28,9 +40,9 @@ class _Flags:
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
     scheduler: bool =  False
     stats: int | None = None # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
-    open_graph: bool = True,
+    open_graph: bool = False,
     DEBUG: bool = False
-    physical_planning: bool = _env_bool("STRATUM_PHYSICAL_PLANNING", False)
+    scheduler_parallelism: str | None = _env_str("STRATUM_SCHEDULER_PARALLELISM", None)
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
 
 FLAGS = _Flags()
@@ -44,7 +56,7 @@ def set_config(rust_backend: bool | None = None,
            open_graph: bool | None = None,
            DEBUG: bool | None = None,
            force_polars: bool | None = None,
-           physical_planning: bool | None = None) -> None:
+           scheduler_parallelism: str | None = _UNSET) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -75,8 +87,9 @@ def set_config(rust_backend: bool | None = None,
         force_polars: bool, default false
             Force use of Polars instead of Pandas for dataframe operations.
 
-        physical_planning: bool, default false
-            Enable/disable physical planning optimization in the logical optimizer.
+        scheduler_parallelism: str | None, default None
+            Scheduler parallelism mode. None uses SequentialScheduler, "threading" or "process" 
+            uses ParallelScheduler with the specified backend.
     """
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
@@ -107,9 +120,17 @@ def set_config(rust_backend: bool | None = None,
     if force_polars is not None:
         FLAGS.force_polars = bool(force_polars)
         os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
-    if physical_planning is not None:
-        FLAGS.physical_planning = bool(physical_planning)
-        os.environ["STRATUM_PHYSICAL_PLANNING"] = "1" if FLAGS.physical_planning else "0"
+    if scheduler_parallelism is not _UNSET:
+        if scheduler_parallelism is not None:
+            if scheduler_parallelism not in ("threading", "process", "auto"):
+                raise ValueError(f"scheduler_parallelism must be None, 'threading', 'process', or 'auto', got {scheduler_parallelism}")
+            FLAGS.scheduler_parallelism = scheduler_parallelism
+            os.environ["STRATUM_SCHEDULER_PARALLELISM"] = scheduler_parallelism
+        else:
+            # Explicitly set to None
+            FLAGS.scheduler_parallelism = None
+            if "STRATUM_SCHEDULER_PARALLELISM" in os.environ:
+                del os.environ["STRATUM_SCHEDULER_PARALLELISM"]
 
 
 def get_config() -> dict:
@@ -124,7 +145,7 @@ def get_config() -> dict:
         "open_graph": FLAGS.open_graph,
         "DEBUG" : FLAGS.DEBUG,
         "force_polars": FLAGS.force_polars,
-        "physical_planning": FLAGS.physical_planning,
+        "scheduler_parallelism": FLAGS.scheduler_parallelism,
     }
 
 @contextmanager

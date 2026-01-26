@@ -3,7 +3,8 @@ from skrub import DataOp
 
 from stratum._config import FLAGS
 from stratum.logical_optimizer._optimize import optimize
-from stratum.runtime._scheduler import SequentialScheduler
+from stratum.runtime._physical_planning import physical_planning
+from stratum.runtime._scheduler import ParallelScheduler, SequentialScheduler
 
 
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
@@ -11,7 +12,11 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False):
 
     show_stats = FLAGS.stats is not None
     dag = optimize(dag)
-    sched = SequentialScheduler(dag, show_stats)
+    if FLAGS.scheduler_parallelism is not None:
+        dag = physical_planning(dag)
+        sched = ParallelScheduler(dag, {}, show_stats, backend=FLAGS.scheduler_parallelism)
+    else:
+        sched = SequentialScheduler(dag, show_stats)
 
     preds = sched.grid_search(cv, scoring, return_predictions)
 

@@ -7,15 +7,16 @@ from sklearn.linear_model import ElasticNet,  Ridge
 
 from time import perf_counter
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import stratum as skrub
-test=True
 
 import logging
 
 logging.basicConfig(level=logging.DEBUG)
-
-file_path = "input/price_paid_records_300K.csv" if test else "input/price_paid_records.csv"
+size = input("Enter the size of the dataset: ")
+if len(size) > 0:
+    size = "_" + size
+file_path = f"input/price_paid_records{size}.csv"
 df = skrub.as_data_op(file_path).skb.apply_func(pd.read_csv).skb.subsample(n=1000)
 print(df.columns.skb.preview())
 df = df.rename(columns={"Town/City": "Town"}, inplace=False)
@@ -25,7 +26,6 @@ X = df.drop("Price", axis=1).skb.mark_as_X()
 from sklearn.base import BaseEstimator, TransformerMixin
 class TargetEncoder(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
-        print("fit target encoder")
         self.global_mean_ = y.mean()
         tmp = pd.concat([X, y], axis=1)
         self.cols = X.columns
@@ -35,7 +35,6 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        print("transform target encoder")
         X_out = X.copy()
         for col in self.cols:
             X_out[col] = X_out[col].map(self.means[col]).fillna(self.global_mean_)
@@ -89,8 +88,13 @@ def pre_process_1(X, y):
     return X_vec
 
 def pre_process_2(X):
-    X_enc = X.skb.apply(skrub.TableVectorizer())
-    return X_enc
+    X_enc = X.skb.apply(skrub.TableVectorizer(n_jobs=-1,
+            high_cardinality=skrub.StringEncoder(), 
+            low_cardinality=OneHotEncoder(drop='if_binary', dtype='float32', handle_unknown='ignore', sparse_output=False))
+        )
+    # Scaling is necessary for ElasticNet and Ridge (converge quick and fast)
+    X_vec = X_enc.skb.apply(StandardScaler())
+    return X_vec
 
 X_1 = pre_process_1(X,y)
 X_2 = pre_process_2(X)
@@ -107,17 +111,15 @@ models = {
 }
 preds = {k: X_enc.skb.apply(model, y=y) for k,model in models.items()}
 preds = skrub.choose_from(preds, name="models").as_data_op()
-preds = preds.skb.apply_func(lambda a, m: (a, print(m))[0], skrub.eval_mode())
 
 # play with cvs
-cv = 1
+cv = 3
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42) if cv == 1 else KFold(n_splits=cv, shuffle=True, random_state=42)
 scorer = make_scorer(r2_score)
 t0 = perf_counter()
-with skrub.config(scheduler=True, stats=20, rust_backend=True, physical_planning=True):
+with skrub.config(scheduler=True, stats=20, rust_backend=True, scheduler_parallelism="auto"):
     search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
 t1 = perf_counter()
-print("="*80)
 print(f"Stratum gridsearch scheduler time: {t1 - t0} seconds")
 print("="*80)
 print(search_stratum.results_)
