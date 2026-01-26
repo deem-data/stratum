@@ -29,6 +29,7 @@ dependencies = [
     "polars",
     "graphviz",
     "pyarrow>=22.0.0",
+    "joblib",
 ]
 
 [project.optional-dependencies]

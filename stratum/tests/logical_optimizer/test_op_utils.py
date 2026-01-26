@@ -1,10 +1,13 @@
 #from curses import flash
 import unittest
 import stratum as skrub
-from stratum.logical_optimizer._optimize import optimize, OptConfig, choice_unrolling
-from stratum.logical_optimizer._op_utils import show_graph, clone_sub_dag
+from stratum.logical_optimizer._optimize import optimize as optimize_, OptConfig, choice_unrolling
+from stratum.logical_optimizer._op_utils import show_graph, clone_sub_dag, topological_iterator
 from stratum._config import config
 graph = False
+
+def optimize(dag, conf=None):
+    return list(topological_iterator(optimize_(dag, conf)))
 
 class TestOpUtils(unittest.TestCase):
     def setUp(self):

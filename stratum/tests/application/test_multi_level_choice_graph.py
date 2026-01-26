@@ -15,7 +15,8 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import make_scorer, mean_squared_error, r2_score
 from stratum.logical_optimizer._optimize import optimize
 
-
+import logging
+logging.basicConfig(level=logging.DEBUG)
 class TargetEncoder(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         print("fit target encoder")
@@ -87,15 +88,15 @@ def define_pipeline(file_path):
     def df2(X):
         return X.skb.apply(TableVectorizer())
 
-    X_vec = skrub.choose_from({"1": df1(X,y), "2": df2(X)}, name = "data engineering").as_data_op()
+    X_vec = skrub.choose_from({"1": df1(X,y), "2": df2(X)}, name = "pre").as_data_op()
     models = {
         "Ridge": Ridge(random_state=42),
-        "XGBoost": XGBRegressor(random_state=42),
-        "LightGBM": LGBMRegressor(random_state=42),
-        "ElasticNet": ElasticNet(random_state=42),
+        "xgb": XGBRegressor(random_state=42),
+        "lgbm": LGBMRegressor(random_state=42),
+        "elastic": ElasticNet(random_state=42),
     }
     preds = {name: X_vec.skb.apply(m, y=y) for name, m in models.items()}
-    return skrub.choose_from(preds, name="models").as_data_op()
+    return skrub.choose_from(preds, name="m").as_data_op()
     # model = skrub.choose_from(models, name="models").as_data_op()
     # preds = X_vec.skb.apply(model, y=y)
     return preds
@@ -133,6 +134,10 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
         scorer = make_scorer(r2_score)
-        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False):
+        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, physical_planning=True):
             search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
             print(search.results_)
+
+
+if __name__ == "__main__":
+    unittest.main()

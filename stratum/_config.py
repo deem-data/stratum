@@ -30,6 +30,7 @@ class _Flags:
     stats: int | None = None # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
     open_graph: bool = True,
     DEBUG: bool = False
+    physical_planning: bool = _env_bool("STRATUM_PHYSICAL_PLANNING", False)
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
 
 FLAGS = _Flags()
@@ -42,7 +43,8 @@ def set_config(rust_backend: bool | None = None,
            scheduler: bool | None = None,
            open_graph: bool | None = None,
            DEBUG: bool | None = None,
-           force_polars: bool | None = None) -> None:
+           force_polars: bool | None = None,
+           physical_planning: bool | None = None) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -72,6 +74,9 @@ def set_config(rust_backend: bool | None = None,
 
         force_polars: bool, default false
             Force use of Polars instead of Pandas for dataframe operations.
+
+        physical_planning: bool, default false
+            Enable/disable physical planning optimization in the logical optimizer.
     """
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
@@ -102,6 +107,9 @@ def set_config(rust_backend: bool | None = None,
     if force_polars is not None:
         FLAGS.force_polars = bool(force_polars)
         os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
+    if physical_planning is not None:
+        FLAGS.physical_planning = bool(physical_planning)
+        os.environ["STRATUM_PHYSICAL_PLANNING"] = "1" if FLAGS.physical_planning else "0"
 
 
 def get_config() -> dict:
@@ -116,6 +124,7 @@ def get_config() -> dict:
         "open_graph": FLAGS.open_graph,
         "DEBUG" : FLAGS.DEBUG,
         "force_polars": FLAGS.force_polars,
+        "physical_planning": FLAGS.physical_planning,
     }
 
 @contextmanager
