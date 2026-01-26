@@ -193,35 +193,72 @@ class EstimatorOp(Op):
         )
         new_op.was_cloned = True
         return new_op
-    
-    def process(self, mode: str, environment: dict):
+
+    def extract_args_from_inputs(self, mode: str):
+        """
+        Extract all necessary data from an EstimatorOp to make it picklable for multiprocessing.
+        
+        Returns a tuple of picklable data that can be sent to worker processes.
+        """
         input_iter = iter(self.inputs)
         x = next(input_iter).intermediate
-        if isinstance(x, PlDataFrame):
-            x = x.to_pandas()
-        y = next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
-        if isinstance(y, PlSeries):
-            y = y.to_pandas()
-        cols = next(input_iter).intermediate if self.cols == DATA_OP_PLACEHOLDER else self.cols
-        if mode == "fit_transform":
-            self.estimator = _wrap_estimator(self.estimator, cols, how=self.how, allow_reject=self.allow_reject, X=x)
-            y_arg = () if self.unsupervised else (y,)
-            if not hasattr(self.estimator, mode):
-                # Predictors
-                self.estimator.fit(x, *y_arg, **self.kwargs)
-                self.intermediate = self.estimator.predict(x, **self.kwargs)
-            else:
-                # Transformers
-                self.intermediate = self.estimator.fit_transform(x, *y_arg, **self.kwargs)
-        elif mode == "predict":
-            if not hasattr(self.estimator, mode):
-                # Transformers
-                self.intermediate = self.estimator.transform(x, **self.kwargs)
-            else:
-                # Predictors
-                self.intermediate = self.estimator.predict(x, **self.kwargs)
+        
+        if self.y == DATA_OP_PLACEHOLDER:
+            y = next(input_iter).intermediate
         else:
-            raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
+            y = self.y
+
+        if mode == "predict":
+            y = None
+        
+        if self.cols == DATA_OP_PLACEHOLDER:
+            cols = next(input_iter).intermediate
+        else:
+            cols = self.cols
+        
+        return (
+            self.estimator,
+            x,
+            y,
+            cols,
+            self.how,
+            self.allow_reject,
+            self.unsupervised,
+            self.kwargs,
+            mode,
+        )
+    
+    def process(self, mode: str, environment: dict):
+        # we use a separate function to process the estimator to allow reuse for multiprocessing
+        task_data = self.extract_args_from_inputs(mode)
+        self.intermediate, self.estimator = process_estimator_task(task_data)
+
+def process_estimator_task(task_data):
+    """ Process an estimator task in a worker process. """
+    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode) = task_data
+    
+    if mode == "fit_transform":
+        estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
+        y_arg = () if unsupervised else (y,)
+        if not hasattr(estimator, mode):
+            # Predictors
+            estimator.fit(x, *y_arg, **kwargs)
+            result = estimator.predict(x, **kwargs)
+        else:
+            # Transformers
+            result = estimator.fit_transform(x, *y_arg, **kwargs)
+        # Return both result and fitted estimator (in case of multi-processing)
+        return (result, estimator)
+    elif mode == "predict":
+        if not hasattr(estimator, mode):
+            # Transformers
+            result = estimator.transform(x, **kwargs)
+        else:
+            # Predictors
+            result = estimator.predict(x, **kwargs)
+        return (result, estimator)
+    else:
+        raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
 
 
 class ChoiceOp(Op):

@@ -15,7 +15,7 @@ import logging
 
 logging.basicConfig(level=logging.DEBUG)
 
-file_path = "price_paid_records_1M.csv" if test else "input/price_paid_records.csv"
+file_path = "input/price_paid_records_300K.csv" if test else "input/price_paid_records.csv"
 df = skrub.as_data_op(file_path).skb.apply_func(pd.read_csv).skb.subsample(n=1000)
 print(df.columns.skb.preview())
 df = df.rename(columns={"Town/City": "Town"}, inplace=False)
@@ -110,22 +110,15 @@ preds = skrub.choose_from(preds, name="models").as_data_op()
 preds = preds.skb.apply_func(lambda a, m: (a, print(m))[0], skrub.eval_mode())
 
 # play with cvs
-cv = 3
+cv = 1
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42) if cv == 1 else KFold(n_splits=cv, shuffle=True, random_state=42)
 scorer = make_scorer(r2_score)
 t0 = perf_counter()
-with skrub.config(scheduler=True, stats=20, rust_backend=True):
+with skrub.config(scheduler=True, stats=20, rust_backend=True, physical_planning=True):
     search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
 t1 = perf_counter()
 print("="*80)
 print(f"Stratum gridsearch scheduler time: {t1 - t0} seconds")
 print("="*80)
-search = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer, refit=False)
-t2 = perf_counter()
-print("="*80)
-print(f"Skrub default gridsearch time: {t2 - t1} seconds")
-print("="*80)
-print("Results:")
-print(search.results_)
 print(search_stratum.results_)
 print("="*80)

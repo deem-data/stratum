@@ -8,6 +8,7 @@ from ._dataframe_ops import rewrite_dataframe_ops, add_splitting_op
 from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops
 from ._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
+from ._physical_planning import physical_planning
 from time import perf_counter
 import logging
 from stratum._config import FLAGS
@@ -48,33 +49,34 @@ def apply_cse_on_skrub_ir(dag: DataOp):
     return dag
 
 class OptConfig():
-    def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True):
+    def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True, physical_planning: bool = None):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
+        self.physical_planning = physical_planning if physical_planning is not None else FLAGS.physical_planning
 
 def _debug_show_graph(sink: Op, name: str):
     if FLAGS.DEBUG:
         show_graph(sink, name)
 
-def optimize(dag: DataOp, config: OptConfig = None):
+def optimize(dag_sink: DataOp, config: OptConfig = None):
     """ Entry point for the logical optimizer. Takes a Skrub DataOp DAG, applies logical optimizations 
-    and returns a topologically sorted list of Op nodes."""
+    and returns an Op sink node."""
     t0 = perf_counter()
     if config is None:
         config = OptConfig()
         
-    graph = _Graph().run(dag)
+    graph = _Graph().run(dag_sink)
     nodes = graph["nodes"]
     parents = graph["parents"]
     children = graph["children"]
 
     order = topological_traverse(nodes, parents, children)
     if config.cse:
-        apply_cse(dag, nodes, order, parents)
+        apply_cse(dag_sink, nodes, order, parents)
         # TODO cse should direcly return the new list of ops ordered so we dont have to iterate again
 
-    sink = convert_to_ops(dag)
+    sink = convert_to_ops(dag_sink)
     sink = add_splitting_op(sink)
     _debug_show_graph(sink, "convertion")
 
@@ -89,13 +91,15 @@ def optimize(dag: DataOp, config: OptConfig = None):
     # Unrolling of choices to a dag wit only a single choice op at the end
     if config.unroll_choices:
         sink = choice_unrolling(sink)
+
+    if config.physical_planning:
+        sink = physical_planning(sink)
     
     # Final optimized DAG
     _debug_show_graph(sink, "optimized")
-    output = [op for op in topological_iterator(sink)]
     t1 = perf_counter()
-    logger.info("="*100 + f"\nOptimization took {t1 - t0:.2f} seconds\n" + "="*100)
-    return output
+    logger.info("\n" + "="*100 + f"\nOptimization took {t1 - t0:.2f} seconds\n" + "="*100)
+    return sink
 
 
 def convert_to_ops(dag: DataOp) -> Op:
