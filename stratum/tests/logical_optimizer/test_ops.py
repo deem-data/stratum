@@ -1,11 +1,11 @@
 import unittest
 import pandas as pd
 import stratum as skrub
+from stratum.logical_optimizer._op_utils import topological_iterator
 from stratum.logical_optimizer._ops import (
     ImplOp, Op, ChoiceOp, ValueOp, MethodCallOp, CallOp, GetAttrOp, GetItemOp, SearchEvalOp, as_op
 )
-from stratum.logical_optimizer._optimize import optimize
-from sklearn.ensemble import RandomForestRegressor
+from stratum.logical_optimizer._optimize import optimize as optimize_
 from sklearn.dummy import DummyRegressor
 
 class TestOpCloning(unittest.TestCase):
@@ -49,7 +49,7 @@ class TestOpCloning(unittest.TestCase):
         pred = pred.skb.apply_func(lambda x,a, b: x, 1, b=1)
         choice = skrub.choose_from([pred], name="choice").as_data_op()
         out = choice.empty
-        ops = optimize(out)
+        ops = list(topological_iterator(optimize_(out)))
 
         try:
             ops[0].clone()
