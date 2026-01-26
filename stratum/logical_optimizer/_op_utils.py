@@ -110,14 +110,16 @@ def topological_iterator(sink: Op) -> Iterator[Op]:
         else:
             for in_op in op.inputs:
                 if in_op not in indegree:
-                    indegree[in_op] = 0 if not in_op.inputs else len(in_op.inputs)
+                    curr_indegree = len(in_op.inputs) + (0 if in_op.additional_inputs is None else len(in_op.additional_inputs))
+                    indegree[in_op] = curr_indegree
                     queue1.append(in_op)
 
     # now we can do topological traversal
     while queue2:
         op = queue2.popleft()
         yield op
-        for out_op in op.outputs:
+        op_outputs = op.outputs + (op.additional_outputs if op.additional_outputs is not None else [])
+        for out_op in op_outputs:
             indegree[out_op] -= 1
             if indegree[out_op] == 0:
                 queue2.append(out_op)
@@ -134,6 +136,9 @@ def show_graph(sink: Op, filename: str = 'plan'):
             dot.node(str(id(current_op)), name)
             for outputs in current_op.outputs:
                 dot.edge(str(id(current_op)), str(id(outputs)))
+            if current_op.additional_outputs is not None:
+                for additional_output in current_op.additional_outputs:
+                    dot.edge(str(id(current_op)), str(id(additional_output)), color='blue')
         filename = "graphs/" + filename
         # make sure folder exists
         os.makedirs(os.path.dirname(filename), exist_ok=True)

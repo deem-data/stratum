@@ -2,6 +2,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Callable
 
+from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
@@ -27,12 +28,15 @@ class Op():
         self.name = name
         self.outputs = outputs if outputs is not None else []
         self.inputs = inputs if inputs is not None else []
+        self.additional_inputs = None
+        self.additional_outputs = None
         self.intermediate = None
         self.is_X = is_X
         self.is_y = is_y
         self.is_dataframe_op = False
         self.is_split_op = False
         self.was_cloned = False
+        self.parallel_group = None
 
     def to_str_helper(self):
         class_name = self.__class__.__name__
@@ -162,7 +166,7 @@ class ImplOp(Op):
             ns = self.replace_fields_with_values()
             self.intermediate = self.skrub_impl.compute(ns, mode, environment)
 
-class EstimatorOp(Op):
+class BaseEstimatorOp(Op):
     fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs"]
     
     def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None):
@@ -177,12 +181,13 @@ class EstimatorOp(Op):
         self.allow_reject = allow_reject
         self.unsupervised = unsupervised
         self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
+        self.parallelism = 8
 
     def clone(self):
         params = self.estimator.get_params()
         estimator_new = clone(self.estimator)
         estimator_new.set_params(**params)
-        new_op = EstimatorOp(
+        new_op = self.__class__(
             estimator=estimator_new, 
             y=self.y, 
             cols=self.cols, 
@@ -215,7 +220,8 @@ class EstimatorOp(Op):
             cols = next(input_iter).intermediate
         else:
             cols = self.cols
-        
+        if x is None:
+            raise ValueError(f"X is None for {self}")
         return (
             self.estimator,
             x,
@@ -226,39 +232,72 @@ class EstimatorOp(Op):
             self.unsupervised,
             self.kwargs,
             mode,
+            self.parallelism
         )
     
     def process(self, mode: str, environment: dict):
         # we use a separate function to process the estimator to allow reuse for multiprocessing
         task_data = self.extract_args_from_inputs(mode)
-        self.intermediate, self.estimator = process_estimator_task(task_data)
+        process_task = self.get_process_task()
+        self.intermediate, self.estimator = process_task(task_data)
+
+    def get_process_task(self):
+        raise NotImplementedError(f"get_process_task must be implemented in {self.__class__.__name__}")
+
+class EstimatorOp(BaseEstimatorOp):
+    def get_process_task(self):
+        return process_estimator_task
+
+class TransformerOp(BaseEstimatorOp):
+    def get_process_task(self):
+        return process_transformer_task
+
+class DummyConfigManager:
+    """A no-op context manager that does nothing."""
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        return False
+
+def estimator_parallel_config(n_jobs: int = 8):
+    if n_jobs is not None:
+        return parallel_config(backend='threading', n_jobs=n_jobs)
+    else:
+        return DummyConfigManager()
 
 def process_estimator_task(task_data):
-    """ Process an estimator task in a worker process. """
-    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode) = task_data
+    """ Process a predictor (EstimatorOp) task in a worker process. """
+    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
     
     if mode == "fit_transform":
         estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
         y_arg = () if unsupervised else (y,)
-        if not hasattr(estimator, mode):
-            # Predictors
-            estimator.fit(x, *y_arg, **kwargs)
-            result = estimator.predict(x, **kwargs)
-        else:
-            # Transformers
-            result = estimator.fit_transform(x, *y_arg, **kwargs)
+        estimator.fit(x, *y_arg, **kwargs)
+        result = estimator.predict(x, **kwargs)
         # Return both result and fitted estimator (in case of multi-processing)
         return (result, estimator)
     elif mode == "predict":
-        if not hasattr(estimator, mode):
-            # Transformers
-            result = estimator.transform(x, **kwargs)
-        else:
-            # Predictors
-            result = estimator.predict(x, **kwargs)
+        result = estimator.predict(x, **kwargs)
         return (result, estimator)
     else:
         raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
+
+def process_transformer_task(task_data):
+    """ Process a transformer (TransformerOp) task in a worker process. """
+    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    with estimator_parallel_config(parallelism):
+        if mode == "fit_transform":
+            estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
+            y_arg = () if unsupervised else (y,)
+            result = estimator.fit_transform(x, *y_arg, **kwargs)
+            # Return both result and fitted estimator (in case of multi-processing)
+            return (result, estimator)
+        elif mode == "predict":
+            result = estimator.transform(x, **kwargs)
+            return (result, estimator)
+        else:
+            raise ValueError(f"Mode {mode} not supported for TransformerOp.")
 
 
 class ChoiceOp(Op):
@@ -448,7 +487,8 @@ def as_op(data_op: DataOp):
     elif isinstance(impl, SkrubBinOp):
         return_op = BinOp(op=impl.op, left=impl.left, right=impl.right)
     elif isinstance(impl, Apply):
-        return_op = EstimatorOp(
+        estimator_class = EstimatorOp if hasattr(impl.estimator, "predict") else TransformerOp
+        return_op = estimator_class(
             y=impl.y, 
             estimator=impl.estimator, 
             cols=impl.cols, 

@@ -65,6 +65,17 @@ class SearchTest(RuntimeTest):
         except RuntimeError as e:
             self.assertEqual("X and y nodes not found in the DAG",str(e))
 
+    def test_search_with_no_y_parrel_scheduler(self):
+        start = skrub.as_data_op(True)
+        end = start.skb.apply_func(lambda a: a).skb.mark_as_X()
+
+        try:
+            with skrub.config(stats=20, scheduler_parallelism="threading"):
+                grid_search(end, return_predictions=True)
+            self.fail("Expected RuntimeError")
+        except RuntimeError as e:
+            self.assertEqual("X and y nodes not found in the DAG",str(e))
+
 
     def test_search_choice_not_at_the_end1(self):
         data = skrub.as_data_op(self.df)
