@@ -2,10 +2,14 @@ import os
 import tempfile
 from stratum.logical_optimizer._dataframe_ops import AssignOp, DataSourceOp, DatetimeConversionOp, GetAttrProjectionOp, ProjectionOp
 from stratum.logical_optimizer._ops import GetItemOp, MethodCallOp
-from stratum.logical_optimizer._optimize import OptConfig, optimize
+from stratum.logical_optimizer._optimize import OptConfig, optimize as optimize_
+from stratum.logical_optimizer._op_utils import topological_iterator
 import stratum as skrub
 import pandas as pd
 import unittest
+
+def optimize(dag, conf=None):
+    return list(topological_iterator(optimize_(dag, conf)))
 
 class TestDataframeOps(unittest.TestCase):
     def setUp(self):

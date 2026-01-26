@@ -4,18 +4,31 @@ from sklearn.model_selection import train_test_split, check_cv
 from sklearn.metrics._scorer import _Scorer
 from skrub._data_ops._data_ops import EvalMode
 from stratum.logical_optimizer._dataframe_ops import SplitOp
+from stratum.logical_optimizer._op_utils import topological_iterator
 from stratum.logical_optimizer._ops import ImplOp, Op
 import polars as pl
 
 import logging
 logger = logging.getLogger(__name__)
 
+
+def get_scoring_func(scoring):
+    """Get scoring function from str or _Scorer object."""
+    if type(scoring) == str:
+        coeff = -1 if scoring.startswith("neg_") else 1
+        scoring_func = lambda test, pred: mean_squared_error(test, pred) * coeff
+    elif type(scoring) == _Scorer:
+        scoring_func = scoring._score_func
+    else:
+        scoring_func = mean_squared_error
+    return scoring_func
+
 class Scheduler:
     """Scheduler for executing DataOpDAGs in topological order."""
     
-    def __init__(self, ops_ordered: list[Op], print_heavy_hitters=False):
+    def __init__(self, dag_sink: Op, print_heavy_hitters=False):
         """Initialize scheduler with a data operations DAG."""
-        self.ops_ordered = ops_ordered
+        self.ops_ordered = [op for op in topological_iterator(dag_sink)]
         self.mode = "fit_transform"
         self.env = {}
         self.flagged_for_recomputation = []
@@ -23,6 +36,7 @@ class Scheduler:
         self.timings = [] if print_heavy_hitters else None
         self.results_ = None
 
+class SequentialScheduler(Scheduler):
     def evaluate(self, seed: int = 42, test_size = 0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
         try:
@@ -57,20 +71,8 @@ class Scheduler:
         self.results_ = results
         return predictions if return_predictions else None
 
-
-    def get_scoring_func(self, scoring):
-        """Get scoring function from str or _Scorer object."""
-        if type(scoring) == str:
-            coeff = -1 if scoring.startswith("neg_") else 1
-            scoring_func = lambda test, pred: mean_squared_error(test, pred) * coeff
-        elif type(scoring) == _Scorer:
-            scoring_func = scoring._score_func
-        else:
-            scoring_func = mean_squared_error
-        return scoring_func
-
     def cross_validate(self, split_op, cv, scoring, predictions: list, results: list, return_predictions: bool):
-        scoring_func = self.get_scoring_func(scoring)
+        scoring_func = get_scoring_func(scoring)
 
         # TODO we can parallelize over the folds
         for i, (train_index, test_index) in enumerate(cv.split(split_op.inputs[0].intermediate)):
@@ -138,3 +140,6 @@ class Scheduler:
             duration = perf_counter() - t0
             self.timings.append((str(op), duration))
         return op
+
+class ParallelScheduler(Scheduler):
+    pass

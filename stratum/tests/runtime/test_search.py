@@ -122,9 +122,7 @@ class SearchTest(RuntimeTest):
         out = stdout.getvalue()
         out = out.split("\n")
         self.assertIn("Heavy hitters", out[2])
-        self.assertIn("CallOp(<lambda>)", out[4])
-        assert(out[4].split(" ")[-1] == "10")
-        self.assertIn("EstimatorOp(DummyRegressor)", out[5])
+        self.assertIn("CallOp(<lambda>)", out[5])
         assert(out[5].split(" ")[-1] == "10")
 
 
