@@ -28,12 +28,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]  # macOS 14 = Apple Silicon
-        python-version: ["3.12", "3.14"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: macos-14
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install OS specific dependencies
+        if: matrix.os == 'macos-14'
+        run: |
+          brew update
+          brew install libomp
 
       - name: Set up Python
         uses: actions/setup-python@v5

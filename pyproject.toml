@@ -36,10 +36,10 @@ test = [
     "pytest",
     "pytest-cov",
     "coverage[toml]",
-]
-benchmark = [
     "lightgbm>=4.6.0",
     "xgboost>=3.1.1",
+]
+benchmark = [
 ]
 dev = [
     "jupyter",

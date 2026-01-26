@@ -2498,17 +2498,15 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-benchmark = [
-    { name = "lightgbm" },
-    { name = "xgboost" },
-]
 dev = [
     { name = "jupyter" },
 ]
 test = [
     { name = "coverage", extra = ["toml"] },
+    { name = "lightgbm" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "xgboost" },
 ]
 
 [package.dev-dependencies]
@@ -2521,14 +2519,14 @@ requires-dist = [
     { name = "coverage", extras = ["toml"], marker = "extra == 'test'" },
     { name = "graphviz" },
     { name = "jupyter", marker = "extra == 'dev'" },
-    { name = "lightgbm", marker = "extra == 'benchmark'", specifier = ">=4.6.0" },
+    { name = "lightgbm", marker = "extra == 'test'", specifier = ">=4.6.0" },
     { name = "polars" },
     { name = "pyarrow", specifier = ">=22.0.0" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-cov", marker = "extra == 'test'" },
     { name = "scikit-learn", specifier = "==1.8" },
     { name = "skrub", specifier = ">=0.3" },
-    { name = "xgboost", marker = "extra == 'benchmark'", specifier = ">=3.1.1" },
+    { name = "xgboost", marker = "extra == 'test'", specifier = ">=3.1.1" },
 ]
 provides-extras = ["test", "benchmark", "dev"]
 
