@@ -1,4 +1,4 @@
-name: Build & Test (Rust + Python)
+name: Python Tests
 
 on:
   push:
@@ -9,6 +9,7 @@ on:
       - 'benchmarks/**'
       - '.gitignore'
       - 'LICENSE'
+      - '_rust/**'
     branches: [main, master]
   pull_request:
     paths-ignore:
@@ -18,11 +19,12 @@ on:
       - 'benchmarks/**'
       - '.gitignore'
       - 'LICENSE'
+      - '_rust/**'
     branches: [main, master]
   workflow_dispatch:
 
 jobs:
-  build-test:
+  python-test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -76,10 +78,6 @@ jobs:
 
       - name: Install maturin
         run: uv pip install maturin
-
-      - name: Run Rust tests
-        working-directory: _rust
-        run: cargo test --release
 
       - name: Build Rust extension
         shell: bash
@@ -136,8 +134,8 @@ jobs:
   coverage-check:
     name: Coverage Threshold Check
     runs-on: ubuntu-latest
-    needs: build-test
-    if: needs.build-test.result == 'success'
+    needs: python-test
+    if: needs.python-test.result == 'success'
     
     steps:
       - name: Download coverage artifact
