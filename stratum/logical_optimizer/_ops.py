@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 from types import SimpleNamespace
 from typing import Callable
 
@@ -7,7 +8,7 @@ from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Var, _wrap_estimator
-from pandas import DataFrame
+from pandas import DataFrame, Series
 from polars import DataFrame as PlDataFrame, Series as PlSeries
 from stratum.runtime._hash_utils import stable_hash
 import logging
@@ -125,6 +126,14 @@ class Op():
         self.cached_hash = stable_hash(sub_dag_hash)
         return self.cached_hash
 
+
+    def get_intermediate_size(self):
+        if isinstance(self.intermediate, DataFrame):
+            return self.intermediate.memory_usage(deep=True).sum()
+        elif isinstance(self.intermediate, Series):
+            return self.intermediate.memory_usage(deep=True)
+        else:
+            return sys.getsizeof(self.intermediate)
 
 def clone_value(value):
     if isinstance(value, dict):
@@ -291,7 +300,7 @@ class DummyConfigManager:
     def __exit__(self, *args):
         return False
 
-def estimator_parallel_config(n_jobs: int = 8):
+def estimator_parallel_config(n_jobs: int = None):
     if n_jobs is not None:
         logger.debug(f"Using threading backend with {n_jobs} jobs")
         return parallel_config(backend='threading', n_jobs=n_jobs)

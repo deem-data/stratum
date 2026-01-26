@@ -1,4 +1,7 @@
+import gc
 from time import perf_counter
+from numpy import int32
+import psutil
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split, check_cv
 from sklearn.metrics._scorer import _Scorer, get_scorer
@@ -17,6 +20,21 @@ import logging
 from stratum.runtime._hash_utils import stable_hash
 logger = logging.getLogger(__name__)
 
+show_memory_usage = True
+stratum_gc = True
+
+
+def measure_memory_usage():
+    memory_usage = psutil.Process().memory_info().rss
+    return format_bytes(memory_usage)
+
+def format_bytes(bytes: int32):
+    l = ["B", "KB", "MB", "GB"]
+    for i in range(len(l)):
+        if bytes < 1024:
+            return f"{bytes:.2f} {l[i]}"
+        bytes /= 1024
+    return f"{bytes:.2f} {l[-1]}"
 
 def get_scoring_func(scoring):
     """Get scoring function from str or _Scorer object."""
@@ -44,15 +62,35 @@ class Scheduler:
         self.results_ = None
         self.cv_id = -1
         self.cache = cache
+        self.intermediate_dependencies = {}
+
+    def run_gc(self):
+        if stratum_gc:
+            kv = list(self.intermediate_dependencies.items())
+            for k, v in kv:
+                if v == 0:
+                    logger.debug(f"GC: deleting {k}")
+                    # delete the intermediate stored in the op
+                    k.intermediate = None
+                    del self.intermediate_dependencies[k]
+                    
+            # logger.debug(f"Existing intermediates after GC:\n \n{"\n".join(f"{k}: {v}" for k, v in self.intermediate_dependencies.items())}\n")
+
 
     def grid_search(self, cv=None, scoring=None, return_predictions=False):
         """Perform grid search with cross-validation on the logical DAG."""
         # default to scikit-learn's CV
         cv = check_cv(cv)
 
+        if show_memory_usage:
+            memory_usage = measure_memory_usage()
+            logger.debug(f"Memory usage at start of grid search: {memory_usage}")
+
         # start with computing till we reach the split op
         logger.debug("\n" + "="*100 + "\n" + "Starting grid search" + "\n" + "="*100 + "\n")
         split_op = self.compute_xy()
+        for in_ in split_op.inputs:
+            self.intermediate_dependencies[in_] *= cv.get_n_splits()*2
         results, predictions = [], []
 
         logger.debug("\n" + "="*100 + "\n" + "XY computed" + "\n" + "="*100 + "\n")
@@ -74,13 +112,12 @@ class Scheduler:
             self.compute(self.pos_split_op)
             logger.debug("\n" + "="*100 + "\n" + "Training done for fold " + str(i+1) + "\n" + "="*100 + "\n")
             split_op.indices = test_index
-            df = self.compute(self.pos_split_op, mode="predict")
+            df, y_test = self.compute(self.pos_split_op, mode="predict")
             logger.debug("\n" + "="*100 + "\n" + "Predicting done for fold " + str(i+1) + "\n" + "="*100 + "\n")
             if return_predictions:
                 predictions.append(df)
 
             # scoring
-            y_test = split_op.intermediate[1]
             df = df.with_columns(df["vals"].map_elements(lambda pred: scoring_func(y_test, pl.Series(pred))).alias("scores"))
             df = df.drop("vals")
             results.append(df)
@@ -91,6 +128,8 @@ class Scheduler:
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
+        for in_ in op.inputs:
+            self.intermediate_dependencies[in_] -= 1
         logger.debug(f"Processing op: {op}")
         
         try:
@@ -119,6 +158,20 @@ class Scheduler:
 
         except Exception as e:
             raise RuntimeError(f"[{self.mode}] Error processing '{op}': {e}")
+
+        if self.timings is not None:
+            duration = perf_counter() - t0
+            self.timings.append((str(op), duration))
+
+        self.run_gc()
+        self.intermediate_dependencies[op] = len(op.outputs)
+
+        if show_memory_usage:
+            gc.collect()
+            memory_usage = measure_memory_usage()
+            logger.debug(f"Memory usage after processing {op}: {memory_usage}")
+            logger.debug(f"Memory usage of intermediate of {op}: {format_bytes(op.get_intermediate_size())}")
+        
         return op
 
     def _format_predict_result(self, pred):
@@ -153,7 +206,7 @@ class SequentialScheduler(Scheduler):
         split_op.indices = train_index
         self.compute(self.pos_split_op)
         split_op.indices = test_index
-        pred = self.compute(self.pos_split_op, mode="predict")
+        pred, _ = self.compute(self.pos_split_op, mode="predict")
         return pred["vals"][0]
 
 
@@ -164,12 +217,15 @@ class SequentialScheduler(Scheduler):
             ops_to_compute = self.flagged_for_recomputation + ops_to_compute
         self.mode = mode
 
+        y_true = None
         for node in ops_to_compute:
             self.process_op(node)
+            if mode == "predict" and isinstance(node, SplitOp):
+                y_true = node.intermediate[1]
 
         if mode == "predict":
             pred = self.ops_ordered[-1].intermediate
-            return self._format_predict_result(pred)
+            return self._format_predict_result(pred), y_true
         return None
 
     def compute_xy(self) -> SplitOp:
