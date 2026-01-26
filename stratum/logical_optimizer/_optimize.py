@@ -1,14 +1,12 @@
-from numpy import True_
 from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque
 from ._cse import apply_cse
-from ._dataframe_ops import rewrite_dataframe_ops, add_splitting_op
+from ._dataframe_ops import add_splitting_op
 from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops
 from ._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
-from ._physical_planning import physical_planning
 from time import perf_counter
 import logging
 from stratum._config import FLAGS
@@ -49,11 +47,10 @@ def apply_cse_on_skrub_ir(dag: DataOp):
     return dag
 
 class OptConfig():
-    def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True, physical_planning: bool = None):
+    def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
-        self.physical_planning = physical_planning if physical_planning is not None else FLAGS.physical_planning
 
 def _debug_show_graph(sink: Op, name: str):
     if FLAGS.DEBUG:
@@ -91,14 +88,12 @@ def optimize(dag_sink: DataOp, config: OptConfig = None):
     # Unrolling of choices to a dag wit only a single choice op at the end
     if config.unroll_choices:
         sink = choice_unrolling(sink)
-
-    if config.physical_planning:
-        sink = physical_planning(sink)
+        _debug_show_graph(sink, "unrolled")
     
     # Final optimized DAG
-    _debug_show_graph(sink, "optimized")
+    
     t1 = perf_counter()
-    logger.info("\n" + "="*100 + f"\nOptimization took {t1 - t0:.2f} seconds\n" + "="*100)
+    logger.info(f"Optimization took {t1 - t0:.2f} seconds")
     return sink
 
 

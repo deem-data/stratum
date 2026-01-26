@@ -1,4 +1,5 @@
 import os
+import pickle
 import tempfile
 import unittest
 import uuid
@@ -13,8 +14,9 @@ from lightgbm import LGBMRegressor
 from xgboost import XGBRegressor
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import make_scorer, mean_squared_error, r2_score
+from sklearn.model_selection import KFold
 from stratum.logical_optimizer._optimize import optimize
-
+import polars as pl
 import logging
 logging.basicConfig(level=logging.DEBUG)
 class TargetEncoder(BaseEstimator, TransformerMixin):
@@ -97,31 +99,30 @@ def define_pipeline(file_path):
     }
     preds = {name: X_vec.skb.apply(m, y=y) for name, m in models.items()}
     return skrub.choose_from(preds, name="m").as_data_op()
-    # model = skrub.choose_from(models, name="models").as_data_op()
-    # preds = X_vec.skb.apply(model, y=y)
-    return preds
 
-def make_data(n: int = 1000):
+def make_data(n: int = 1000, seed: int = 42):
+    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     df = pd.DataFrame({
         "Transaction unique identifier": [str(uuid.uuid4()) for _ in range(n)],
-        "Price": np.random.randint(50000, 2_000_000, size=n),
+        "Price": rng.integers(50000, 2_000_000, size=n),
         "Date of Transfer": pd.to_datetime(
-            np.random.choice(pd.date_range("2010-01-01", "2024-12-31"), size=n)
+            rng.choice(pd.date_range("2010-01-01", "2024-12-31"), size=n)
         ).astype(str),
-        "Property Type": np.random.choice(list("DSTFO"), size=n),
-        "Old/New": np.random.choice(["Y", "N"], size=n),
-        "Duration": np.random.choice(["F", "L"], size=n),
-        "Town/City": np.random.choice(
+        "Property Type": rng.choice(list("DSTFO"), size=n),
+        "Old/New": rng.choice(["Y", "N"], size=n),
+        "Duration": rng.choice(["F", "L"], size=n),
+        "Town/City": rng.choice(
             ["London", "Manchester", "Birmingham", "Leeds", "Bristol"], size=n
         ),
-        "District": np.random.choice(
+        "District": rng.choice(
             ["District A", "District B", "District C"], size=n
         ),
-        "County": np.random.choice(
+        "County": rng.choice(
             ["Greater London", "West Midlands", "Greater Manchester"], size=n
         ),
-        "PPDCategory Type": np.random.choice(["A", "B"], size=n),
-        "Record Status - monthly file only": np.random.choice(["A", "C"], size=n),
+        "PPDCategory Type": rng.choice(["A", "B"], size=n),
+        "Record Status - monthly file only": rng.choice(["A", "C"], size=n),
     })
     return df
 
@@ -134,10 +135,44 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
         scorer = make_scorer(r2_score)
-        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, physical_planning=True):
-            search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
-            print(search.results_)
+        cv = KFold(n_splits=2, shuffle=True, random_state=42)
+        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, scheduler_parallelism="threading", stats=20):
+            search = preds.skb.make_grid_search(fitted=True, cv = cv, scoring=scorer)
+        print(search.results_)
+        expected_results = pl.DataFrame({
+            "id": [
+                "m:elastic, pre:2",
+                "m:elastic, pre:1",
+                "m:Ridge, pre:2",
+                "m:Ridge, pre:1",
+                "m:xgb, pre:2",
+                "m:lgbm, pre:2",
+                "m:lgbm, pre:1",
+                "m:xgb, pre:1"
+            ],
+            "scores": [
+                -0.000779,
+                -0.028774,
+                -0.021469,
+                -0.040625,
+                -0.156263,
+                -0.174555,
+                -0.172825,
+                -0.251869
+            ]
+        })
 
+        actual_results = search.results_
+        # Convert to pandas for comparison
+        # TODO: pre:2 is non-deterministic right now, so we need to filter it out
+        actual_df = actual_results.sort("id").filter(pl.col("id").str.contains("pre:1") & ~pl.col("id").str.contains("xgb")).to_pandas()
+        expected_df = expected_results.sort("id").filter(pl.col("id").str.contains("pre:1") & ~pl.col("id").str.contains("xgb")).to_pandas()
+        pd.testing.assert_frame_equal(
+            actual_df,
+            expected_df,
+            atol=1e-6,
+            check_dtype=False
+        )
 
 if __name__ == "__main__":
     unittest.main()
