@@ -116,7 +116,7 @@ preds = {k: X_enc.skb.apply(model, y=y) for k,model in models.items()}
 preds = skrub.choose_from(preds, name="models").as_data_op()
 
 # play with cvs
-cv = 3
+cv = 1
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42) if cv == 1 else KFold(n_splits=cv, shuffle=True, random_state=42)
 scorer = make_scorer(r2_score)
 t0 = perf_counter()

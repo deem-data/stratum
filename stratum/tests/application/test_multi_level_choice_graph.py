@@ -128,28 +128,40 @@ def make_data(n: int = 1000, seed: int = 42):
     return df
 
 class TestMultiLevelChoiceGraph(unittest.TestCase):
-    expected_results = pl.DataFrame({
-        "id": [
-            "m:elastic, pre:2",
-            "m:elastic, pre:1",
-            "m:Ridge, pre:2",
-            "m:Ridge, pre:1",
-            "m:xgb, pre:2",
-            "m:lgbm, pre:2",
-            "m:lgbm, pre:1",
-            "m:xgb, pre:1"
-        ],
-        "scores": [
-            -0.000779,
-            -0.028774,
-            -0.021469,
-            -0.040625,
-            -0.156263,
-            -0.174555,
-            -0.172825,
-            -0.251869
-        ]
-    })
+
+    def test_application(self):
+        tmp_path = tempfile.mkdtemp()
+        df = make_data()
+        print(df.dtypes)
+        df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
+        preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
+        scorer = make_scorer(r2_score)
+        cv = KFold(n_splits=2, shuffle=True, random_state=42)
+        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, scheduler_parallelism="threading", stats=20):
+            search = preds.skb.make_grid_search(fitted=True, cv = cv, scoring=scorer)
+        print(search.results_)
+        expected_results = pl.DataFrame({
+            "id": [
+                "m:elastic, pre:2",
+                "m:elastic, pre:1",
+                "m:Ridge, pre:2",
+                "m:Ridge, pre:1",
+                "m:xgb, pre:2",
+                "m:lgbm, pre:2",
+                "m:lgbm, pre:1",
+                "m:xgb, pre:1"
+            ],
+            "scores": [
+                -0.000779,
+                -0.028774,
+                -0.021469,
+                -0.040625,
+                -0.156263,
+                -0.174555,
+                -0.172825,
+                -0.251869
+            ]
+        })
 
     def run_application(self, sched_par: str = None):
         tmp_path = tempfile.mkdtemp()
