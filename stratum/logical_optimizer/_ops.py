@@ -3,12 +3,16 @@ from types import SimpleNamespace
 from typing import Callable
 
 from joblib import parallel_config
+from lightgbm import LGBMRegressor
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, _wrap_estimator
 from pandas import DataFrame
 from polars import DataFrame as PlDataFrame, Series as PlSeries
+from logging import getLogger
+
+logger = getLogger(__name__)
 
 class PlaceHolder():
     def __init__(self, name: str):
@@ -175,6 +179,7 @@ class BaseEstimatorOp(Op):
             kwargs = {}
         self.check_kwargs(kwargs)
         self.estimator = estimator
+        self.original_estimator = clone(self.estimator)
         self.y = DATA_OP_PLACEHOLDER if isinstance(y, DataOp) else y
         self.cols = DATA_OP_PLACEHOLDER if isinstance(cols, DataOp) else cols
         self.how = how
@@ -207,23 +212,12 @@ class BaseEstimatorOp(Op):
         """
         input_iter = iter(self.inputs)
         x = next(input_iter).intermediate
-        
-        if self.y == DATA_OP_PLACEHOLDER:
-            y = next(input_iter).intermediate
-        else:
-            y = self.y
-
-        if mode == "predict":
-            y = None
-        
-        if self.cols == DATA_OP_PLACEHOLDER:
-            cols = next(input_iter).intermediate
-        else:
-            cols = self.cols
-        if x is None:
-            raise ValueError(f"X is None for {self}")
+        assert x is not None, f"X is None for {self}"
+        y = None if mode == 'predict' else next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
+        estm = self.estimator if mode == "predict" else self.original_estimator
+        cols = next(input_iter).intermediate if self.cols == DATA_OP_PLACEHOLDER else self.cols
         return (
-            self.estimator,
+            estm,
             x,
             y,
             cols,
@@ -262,42 +256,65 @@ class DummyConfigManager:
 
 def estimator_parallel_config(n_jobs: int = 8):
     if n_jobs is not None:
+        logger.debug(f"Using threading backend with {n_jobs} jobs")
         return parallel_config(backend='threading', n_jobs=n_jobs)
     else:
         return DummyConfigManager()
 
+def estm_supports_polars(estimator):
+    print(estimator.__class__.__module__, estimator.__class__.__name__)
+    is_sklearn = estimator.__class__.__module__.startswith("sklearn.") or estimator.__class__.__module__.startswith("skrub.")
+    is_stratum = estimator.__class__.__module__.startswith("stratum.") and estimator.__class__.__name__.startswith("Rusty")
+    other_frameworks = estimator.__class__.__module__.startswith("xgboost.")
+    return is_sklearn or is_stratum or other_frameworks
+
+def check_estm_inputs(estimator, mode, x, y):
+    input_is_polars = type(x) == PlDataFrame
+    converted = False
+    if estimator.__class__.__module__.startswith("skrub."):
+        if estimator.__class__.__name__.startswith("ApplyTo"):
+            estimator = estimator.transformer
+    if input_is_polars and not estm_supports_polars(estimator):
+        converted = True
+        logger.debug(f"Estimator {estimator.__class__.__name__} does not support Polars DataFrame. Converting to Pandas DataFrame.")
+        x = x.to_pandas()
+        if y is not None and mode == "fit_transform":
+            y = y.to_pandas()
+    return converted, x, y
+
 def process_estimator_task(task_data):
     """ Process a predictor (EstimatorOp) task in a worker process. """
     (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
-    
+    _, x, y = check_estm_inputs(estimator, mode, x, y)
     if mode == "fit_transform":
         estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
         y_arg = () if unsupervised else (y,)
         estimator.fit(x, *y_arg, **kwargs)
         result = estimator.predict(x, **kwargs)
         # Return both result and fitted estimator (in case of multi-processing)
-        return (result, estimator)
+        return result, estimator
     elif mode == "predict":
         result = estimator.predict(x, **kwargs)
-        return (result, estimator)
+        return result, estimator
     else:
         raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
 
 def process_transformer_task(task_data):
     """ Process a transformer (TransformerOp) task in a worker process. """
     (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    converted, x, y = check_estm_inputs(estimator, mode, x, y)
     with estimator_parallel_config(parallelism):
         if mode == "fit_transform":
             estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
             y_arg = () if unsupervised else (y,)
             result = estimator.fit_transform(x, *y_arg, **kwargs)
-            # Return both result and fitted estimator (in case of multi-processing)
-            return (result, estimator)
         elif mode == "predict":
             result = estimator.transform(x, **kwargs)
-            return (result, estimator)
         else:
             raise ValueError(f"Mode {mode} not supported for TransformerOp.")
+    if converted:
+        result = PlDataFrame(result)
+    return result, estimator
 
 
 class ChoiceOp(Op):
