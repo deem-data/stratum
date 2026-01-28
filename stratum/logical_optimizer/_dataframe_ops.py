@@ -1,11 +1,12 @@
-from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp
+from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp
 from pandas import DataFrame
 import pandas as pd
 import polars as pl
 from stratum.logical_optimizer._op_utils import topological_iterator
 from stratum._config import FLAGS
-
-POLARS = FLAGS.force_polars
+import logging
+from numpy import sin, cos
+logger = logging.getLogger(__name__)
 
 class DataSourceOp(Op):
     def __init__(self, data: DataFrame = None, file_path: str = None, _format: str = None,
@@ -23,14 +24,15 @@ class DataSourceOp(Op):
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict):
+        logger.debug(f"Using Polars: {FLAGS.force_polars}")
         if self.data is not None:
-            if POLARS:
+            if FLAGS.force_polars:
                 self.intermediate = pl.DataFrame(self.data)
             else:
                 self.intermediate = self.data
 
         else:
-            if POLARS:
+            if FLAGS.force_polars:
                 self.intermediate = pl.read_csv(self.file_path, *self.read_args, **self.read_kwargs)
             else:
                 self.intermediate = pd.read_csv(self.file_path, *self.read_args, **self.read_kwargs)
@@ -55,7 +57,7 @@ class MetadataOp(Op):
         _obj = next(iter_ins).intermediate
         _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
         _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
-        if POLARS:
+        if FLAGS.force_polars:
             if "columns" in _kwargs:
                 _args.append(_kwargs["columns"])
             self.intermediate = getattr(_obj, self.func)(*_args)
@@ -90,7 +92,7 @@ class ProjectionOp(Op):
     def process(self, mode: str, environment: dict):
         _obj, _args, _kwargs = self._extract_args_and_kwargs()
         if self.is_method:
-            if POLARS:
+            if FLAGS.force_polars:
                 raise ValueError(f"Unsupported method: {self.func}")
             else:
                 self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
@@ -105,7 +107,7 @@ class DropOp(ProjectionOp):
     def process(self, mode: str, environment: dict):
         _obj, _args, _kwargs = self._extract_args_and_kwargs()
 
-        if POLARS:
+        if FLAGS.force_polars:
             if "columns" in _kwargs:
                 _args.append(_kwargs["columns"])
             if "ignore_errors" in _kwargs:
@@ -131,11 +133,18 @@ class ApplyUDFOp(ProjectionOp):
             else:
                 n_cols = len(self.columns)
 
-        if POLARS:
+        if FLAGS.force_polars:
             if isinstance(_obj, pl.Series):
                 n_cols = 1
             if n_cols == 1:
-                self.intermediate = _obj.map_elements(*_args, **_kwargs)
+                if _args[0] == sin:
+                    logger.debug("Rewrite UDF sin to polars sin")
+                    self.intermediate = _obj.sin()
+                elif _args[0] == cos:
+                    logger.debug("Rewrite UDF cos to polars cos")
+                    self.intermediate = _obj.cos()
+                else:
+                    self.intermediate = _obj.map_elements(*_args, **_kwargs)
             else:
                 self.intermediate = _obj.map_rows(*_args, **_kwargs)
         else:
@@ -148,7 +157,7 @@ class AssignOp(ProjectionOp):
 
     def process(self, mode: str, environment: dict):
         _obj, _args, _kwargs = self._extract_args_and_kwargs()
-        if POLARS:
+        if FLAGS.force_polars:
             self.intermediate = _obj.with_columns(*_args, **_kwargs)
         else:
             self.intermediate = _obj.assign(*_args, **_kwargs)
@@ -159,7 +168,7 @@ class DatetimeConversionOp(ProjectionOp):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
 
     def process(self, mode: str, environment: dict):
-        if POLARS:
+        if FLAGS.force_polars:
             self.intermediate = self.inputs[0].intermediate.str.to_datetime(*self.args, **self.kwargs)
         else:
             self.intermediate = pd.to_datetime(self.inputs[0].intermediate, *self.args, **self.kwargs)
@@ -188,7 +197,7 @@ class GetAttrProjectionOp(Op):
 
     def process(self, mode: str, environment: dict):
         self.intermediate = self.inputs[0].intermediate
-        if POLARS:
+        if FLAGS.force_polars:
             for attr in self.attr_name:
                 attr = self.POLARS_ATTR_NAME_MAP.get(attr, attr)
                 # polars implements dt.day as a method, not an attribute
@@ -330,8 +339,9 @@ def rewrite_dataframe_ops(sink: Op) -> Op:
                 op.is_dataframe_op = True
 
             # mark as dataframe op
-            elif isinstance(op, GetItemOp):
+            elif isinstance(op, GetItemOp) or isinstance(op, BaseEstimatorOp):
                 op.is_dataframe_op = True
+            
 
         if new_op is not None:
             op.replace_input_of_outputs(new_op)

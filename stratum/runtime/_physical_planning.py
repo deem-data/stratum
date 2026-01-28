@@ -59,7 +59,7 @@ def physical_planning(sink: Op) -> Op:
 
     estimators = [op for op in topological_iterator(sink) if isinstance(op, EstimatorOp)]
     transformers = [op for op in topological_iterator(sink) if isinstance(op, TransformerOp)]
-    mark_ops_for_parallelization(estimators, ancestors)
+    # mark_ops_for_parallelization(estimators, ancestors)
     mark_ops_for_parallelization(transformers, ancestors)
     # make_parallel_block(estimators, ancestors)
     # make_parallel_block(transformers, ancestors)
