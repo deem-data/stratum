@@ -7,6 +7,17 @@ import uuid
 import logging
 logger = logging.getLogger(__name__)
 
+def get_estimator_memory_estimate(op: Op, size = 1) -> int | None:
+    if isinstance(op, TransformerOp):
+        estm = op.estimator
+        if isinstance(estm, TableVectorizer):
+            return 10*size
+        elif isinstance(estm, StringEncoder):
+            return 3*size
+        return None
+    else:
+        return None
+
 def get_independent_set(ops: list[Op], ancestors: dict[Op]) -> list[Op]:
     # Find the largest subset of ops that don't depend on each other
     # Two ops conflict if one is an ancestor of the other
@@ -35,6 +46,7 @@ def get_independent_set(ops: list[Op], ancestors: dict[Op]) -> list[Op]:
 
 def mark_ops_for_parallelization(ops: list[Op], ancestors: dict[Op]):
     par_group_id = uuid.uuid4()
+    ops = [op for op in ops if get_estimator_memory_estimate(op) is not None]
     selected_ops = get_independent_set(ops, ancestors)
     selected_ops_str = ",".join(op.name for op in selected_ops)
     logger.debug(f"Selected {len(selected_ops)} ops for parallelization: [{selected_ops_str}]")
@@ -57,9 +69,9 @@ def physical_planning(sink: Op) -> Op:
     t0 = perf_counter()
     ancestors = compute_ancestors(sink)
 
-    estimators = [op for op in topological_iterator(sink) if isinstance(op, EstimatorOp)]
-    transformers = [op for op in topological_iterator(sink) if isinstance(op, TransformerOp)]
+    # estimators = [op for op in topological_iterator(sink) if isinstance(op, EstimatorOp)]
     # mark_ops_for_parallelization(estimators, ancestors)
+    transformers = [op for op in topological_iterator(sink) if isinstance(op, TransformerOp)]
     mark_ops_for_parallelization(transformers, ancestors)
     # make_parallel_block(estimators, ancestors)
     # make_parallel_block(transformers, ancestors)
