@@ -1,4 +1,4 @@
-from sklearn.metrics import make_scorer, mean_squared_error, r2_score
+from sklearn.metrics import make_scorer, r2_score
 from sklearn.model_selection import KFold, ShuffleSplit
 import pandas as pd
 from xgboost import XGBRegressor
@@ -9,7 +9,6 @@ from time import perf_counter
 import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import stratum as skrub
-import polars as pl
 import argparse
 import logging
 
@@ -53,12 +52,6 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
     def get_feature_names_out(self):
         return self.cols
 
-def is_num(col):
-    if isinstance(col, pl.Series):
-        return col.dtype.is_numeric()
-    else:
-        return pd.api.types.is_numeric_dtype(col.dtype)
-
 
 def pre_process_1(X, y):
     date = X["Date of Transfer"].skb.apply_func(pd.to_datetime)
@@ -85,14 +78,12 @@ def pre_process_1(X, y):
         'PPDCategory Type', 
         'Record Status - monthly file only'], axis=1)
 
-    cat_selector = skrub.selectors.filter(lambda col: not is_num(col))
-    X_cat = X.skb.select(cat_selector)
+    X_cat = X.skb.select(~skrub.selectors.numeric())
     X_cat_enc = X_cat.skb.apply(skrub.StringEncoder())
-    num_selector = skrub.selectors.filter(lambda col: is_num(col))
 
     X_te = X[["District", "County", "Town"]].skb.apply(TargetEncoder(), y=y)
     X_te = X_te.rename(columns={"District": "district_te", "County": "county_te", "Town": "town_te"})
-    X_num = X.skb.select(num_selector)
+    X_num = X.skb.select(skrub.selectors.numeric())
     X_num = X_num.skb.concat([X_te], axis=1)
 
     X_num_scaled = X_num.skb.apply(StandardScaler())
@@ -129,7 +120,7 @@ cv = 3
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42) if cv == 1 else KFold(n_splits=cv, shuffle=True, random_state=42)
 scorer = make_scorer(r2_score)
 t0 = perf_counter()
-with skrub.config(scheduler=True, stats=20, rust_backend=True, scheduler_parallelism="auto",force_polars=True,):
+with skrub.config(scheduler=True, stats=20, rust_backend=True, scheduler_parallelism="threading",force_polars=True,):
     search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
 t1 = perf_counter()
 print(f"Stratum gridsearch scheduler time: {t1 - t0} seconds")
