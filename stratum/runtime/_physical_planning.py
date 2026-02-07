@@ -15,6 +15,8 @@ def get_estimator_memory_estimate(op: Op, size = 1) -> int | None:
         elif isinstance(estm, StringEncoder):
             return 3*size
         return None
+    # elif isinstance(op, EstimatorOp):
+    #     return 10*size
     else:
         return None
 
@@ -69,8 +71,8 @@ def physical_planning(sink: Op) -> Op:
     t0 = perf_counter()
     ancestors = compute_ancestors(sink)
 
-    # estimators = [op for op in topological_iterator(sink) if isinstance(op, EstimatorOp)]
-    # mark_ops_for_parallelization(estimators, ancestors)
+    estimators = [op for op in topological_iterator(sink) if isinstance(op, EstimatorOp)]
+    mark_ops_for_parallelization(estimators, ancestors)
     transformers = [op for op in topological_iterator(sink) if isinstance(op, TransformerOp)]
     mark_ops_for_parallelization(transformers, ancestors)
     # make_parallel_block(estimators, ancestors)
