@@ -6,11 +6,11 @@ from stratum.logical_optimizer._optimize import optimize
 from stratum.runtime._caching import Cache
 from stratum.runtime._physical_planning import physical_planning
 from stratum.runtime._scheduler import ParallelScheduler, SequentialScheduler
-
+from time import perf_counter
 
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, env=None):
     """Perform grid search with cross-validation on a DataOp DAG."""
-
+    t0 = perf_counter()
     show_stats = FLAGS.stats is not None
     env_extra = env if env else {}
     env = dag.skb.get_data()
@@ -24,7 +24,7 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
         dag = physical_planning(dag)
         sched = ParallelScheduler(dag, {}, show_stats, backend=FLAGS.scheduler_parallelism, cache=cache, env=env)
     else:
-        sched = SequentialScheduler(dag, show_stats, cache=cache, env=env)
+        sched = SequentialScheduler(dag, show_stats, cache=cache, env=env, t0=t0)
 
     preds = sched.grid_search(cv, scoring, return_predictions)
 
@@ -41,6 +41,7 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
         print("\n" + "=" * 80)
         print(f"Heavy hitters (sorted by time spent in DataOp evaluation):\n")
         print(table.head(FLAGS.stats).to_string(index=False))
+        table.head(FLAGS.stats).to_csv("heavy_hitters.csv", index=False)
         print("=" * 80 + "\n")
         if FLAGS.caching and cache is not None:
             print("\n" + "=" * 80)

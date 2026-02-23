@@ -41,6 +41,7 @@ class _Flags:
     scheduler: bool =  False
     stats: int | None = None # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
     open_graph: bool = False,
+    cse: bool = True,
     DEBUG: bool = False
     scheduler_parallelism: str | None = _env_str("STRATUM_SCHEDULER_PARALLELISM", None)
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
@@ -58,7 +59,8 @@ def set_config(rust_backend: bool | None = None,
            DEBUG: bool | None = None,
            force_polars: bool | None = None,
            scheduler_parallelism: str | None = _UNSET,
-           caching: bool | None = None) -> None:
+           caching: bool | None = None,
+           cse: bool = True) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -139,6 +141,8 @@ def set_config(rust_backend: bool | None = None,
     if caching is not None:
         FLAGS.caching = bool(caching)
         os.environ["STRATUM_CACHING"] = "1" if FLAGS.caching else "0"
+    if cse is not None:
+        FLAGS.cse = bool(cse)
 
 
 def get_config() -> dict:
@@ -155,6 +159,7 @@ def get_config() -> dict:
         "force_polars": FLAGS.force_polars,
         "scheduler_parallelism": FLAGS.scheduler_parallelism,
         "caching": FLAGS.caching,
+        "cse": FLAGS.cse,
     }
 
 @contextmanager

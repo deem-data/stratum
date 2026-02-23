@@ -18,7 +18,7 @@ def get_estimator_memory_estimate(op: Op, size = 1) -> int | None:
     # elif isinstance(op, EstimatorOp):
     #     return 10*size
     else:
-        return None
+        return 1
 
 def get_independent_set(ops: list[Op], ancestors: dict[Op]) -> list[Op]:
     # Find the largest subset of ops that don't depend on each other

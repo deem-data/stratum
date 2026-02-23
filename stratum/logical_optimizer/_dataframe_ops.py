@@ -5,6 +5,7 @@ import polars as pl
 from stratum.logical_optimizer._op_utils import topological_iterator
 from stratum._config import FLAGS
 from stratum.runtime._hash_utils import stable_hash
+from skrub._data_ops._data_ops import DataOp
 import logging
 from numpy import sin, cos
 logger = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ class ProjectionOp(Op):
             self.intermediate = self.func(_obj, *_args, **_kwargs)
 
 class DropOp(ProjectionOp):
+    fields = ["args", "kwargs", "columns"]
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
@@ -255,6 +257,30 @@ class GroupedDataframeOp(Op):
         for op in self.ops:
             op.process(mode, environment)
         self.intermediate = self.ops[-1].intermediate
+
+class ConcatOp(Op):
+    fields = ["first", "others", "axis"] # Add more if needed
+
+    axis_map = {
+        0: "diagonal_relaxed",
+        1: "horizontal",
+    }
+    def __init__(self, first: Op, others: list[Op], axis: int):
+        super().__init__(name="CONCAT", is_X=False, is_y=False)
+        self.first = DATA_OP_PLACEHOLDER if isinstance(first, DataOp) else first
+        self.others = [DATA_OP_PLACEHOLDER if isinstance(other, DataOp) else other for other in others]
+        self.axis = DATA_OP_PLACEHOLDER if isinstance(axis, DataOp) else axis
+        self.is_dataframe_op = True
+
+    def process(self, mode: str, environment: dict):
+        input_iter = iter(self.inputs)
+        first = next(input_iter).intermediate if self.first is DATA_OP_PLACEHOLDER else self.first
+        others = [next(input_iter).intermediate if other is DATA_OP_PLACEHOLDER else other for other in self.others]
+        axis = next(input_iter).intermediate if self.axis is DATA_OP_PLACEHOLDER else self.axis
+        if FLAGS.force_polars:
+            self.intermediate = pl.concat([first, *others], how=self.axis_map[axis])
+        else:
+            self.intermediate = pd.concat([first, *others], axis=axis)
 
 
 def rewrite_fuse_get_item_ops(op: Op) -> Op:

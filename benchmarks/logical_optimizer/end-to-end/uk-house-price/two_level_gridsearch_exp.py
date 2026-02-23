@@ -16,6 +16,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--size", type=str, default="10K")
+parser.add_argument("--stratum", action="store_true")
 args = parser.parse_args()
 
 size = args.size
@@ -116,12 +117,12 @@ preds = {k: X_enc.skb.apply(model, y=y) for k,model in models.items()}
 preds = skrub.choose_from(preds, name="models").as_data_op()
 
 # play with cvs
-cv = 1
+cv = 3
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42) if cv == 1 else KFold(n_splits=cv, shuffle=True, random_state=42)
 scorer = make_scorer(r2_score)
 t0 = perf_counter()
-with skrub.config(scheduler=True, stats=20, rust_backend=True, scheduler_parallelism="threading",force_polars=True,):
-    search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
+with skrub.config(scheduler=args.stratum, stats=20, rust_backend=False, scheduler_parallelism=None,force_polars=False,):
+    search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=4, fitted=True, scoring=scorer)
 t1 = perf_counter()
 print(f"Stratum gridsearch scheduler time: {t1 - t0} seconds")
 print("="*80)

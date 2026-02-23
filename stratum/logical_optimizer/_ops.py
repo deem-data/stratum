@@ -7,7 +7,7 @@ from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
-from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Var, _wrap_estimator
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Concat, Var, _wrap_estimator
 from pandas import DataFrame, Series
 from polars import DataFrame as PlDataFrame, Series as PlSeries
 from stratum.runtime._hash_utils import stable_hash
@@ -132,6 +132,8 @@ class Op():
             return self.intermediate.memory_usage(deep=True).sum()
         elif isinstance(self.intermediate, Series):
             return self.intermediate.memory_usage(deep=True)
+        elif isinstance(self.intermediate, PlDataFrame) or isinstance(self.intermediate, PlSeries):
+            return self.intermediate.estimated_size()
         else:
             return sys.getsizeof(self.intermediate)
 
@@ -310,8 +312,8 @@ def estimator_parallel_config(n_jobs: int = None):
 def estm_supports_polars(estimator):
     is_sklearn = estimator.__class__.__module__.startswith("sklearn.") or estimator.__class__.__module__.startswith("skrub.")
     is_stratum = estimator.__class__.__module__.startswith("stratum.") and estimator.__class__.__name__.startswith("Rusty")
-    other_frameworks = estimator.__class__.__module__.startswith("xgboost.")
-    return is_sklearn or is_stratum or other_frameworks
+    # other_frameworks = estimator.__class__.__module__.startswith("xgboost.")
+    return is_sklearn or is_stratum #or other_frameworks
 
 def check_estm_inputs(estimator, mode, x, y):
     input_is_polars = type(x) == PlDataFrame
@@ -438,7 +440,9 @@ class MethodCallOp(Op):
 class CallOp(Op):
     fields = ["func", "args", "kwargs"]
     
-    def __init__(self, name: str = "CallOp", func=None, args=None, kwargs=None):
+    def __init__(self, name=None, func=None, args=None, kwargs=None):
+        if name is None:
+            name = "CallOp" if func is None else func.__name__
         super().__init__(name=name)
         if kwargs is not None:
             self.check_kwargs(kwargs)
@@ -471,13 +475,16 @@ class GetItemOp(Op):
     fields = ["key"]
     
     def __init__(self, key=None):
-        super().__init__(name=str(key) if key is not None else '?')
-        self.key = DATA_OP_PLACEHOLDER if isinstance(key, DataOp) else key 
+        self.key = DATA_OP_PLACEHOLDER if isinstance(key, DataOp) else key
+        name = key._skrub_impl.__class__.__name__ if isinstance(key, DataOp) else str(self.key)
+        super().__init__(name=name)
+
 
     def process(self, mode: str, environment: dict):
-        if self.key is DATA_OP_PLACEHOLDER:
-            self.key = self.inputs[1].intermediate
-        self.intermediate = self.inputs[0].intermediate[self.key]
+        key = self.key
+        if key is DATA_OP_PLACEHOLDER:
+            key = self.inputs[1].intermediate
+        self.intermediate = self.inputs[0].intermediate[key]
 
     def simple_hash(self):
         if isinstance(self.key, str) or isinstance(self.key, list):
@@ -574,6 +581,9 @@ def as_op(data_op: DataOp):
             kwargs= {})
     elif isinstance(impl, Var):
         return_op = VariableOp(name=impl.name, value=impl.value)
+    elif isinstance(impl, Concat):
+        from stratum.logical_optimizer._dataframe_ops import ConcatOp
+        return_op = ConcatOp(first=impl.first, others=impl.others, axis=impl.axis)
     else:
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
 
