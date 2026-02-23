@@ -2,7 +2,7 @@ import pandas as pd
 from sklearn.model_selection import KFold, ShuffleSplit
 from sklearn.metrics import make_scorer, r2_score
 import logging
-logging.basicConfig(level=logging.WARN)
+logging.basicConfig(level=logging.DEBUG)
 import stratum as skrub
 from time import perf_counter
 import argparse
@@ -58,7 +58,7 @@ cv = ShuffleSplit(n_splits=cv, test_size=0.2, random_state=42) if cv == 1 else K
 scoring = make_scorer(r2_score)
 
 t0 = perf_counter()
-with skrub.config(scheduler=args.stratum, stats=20, force_polars=True, rust_backend=False):
+with skrub.config(scheduler=args.stratum, stats=20, force_polars=True, rust_backend=True, scheduler_parallelism="threading", DEBUG=True):
     search =pred.skb.make_grid_search(fitted=True, refit=False,scoring=scoring, cv=cv, n_jobs=1)
 t1 = perf_counter()
 print(f"Time taken: {t1 - t0} seconds")

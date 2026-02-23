@@ -1,4 +1,6 @@
+import ctypes
 import gc
+import sys
 from time import perf_counter
 from numpy import int32
 import psutil
@@ -20,8 +22,21 @@ import logging
 from stratum.runtime._hash_utils import stable_hash
 logger = logging.getLogger(__name__)
 
-show_memory_usage = True
+show_memory_usage = False
 stratum_gc = True
+stratum_malloc_trim = False
+
+_libc = None
+if sys.platform == "linux":
+    try:
+        _libc = ctypes.CDLL("libc.so.6")
+    except OSError:
+        pass
+
+def _malloc_trim():
+    """Ask glibc to return free heap pages to the OS."""
+    if _libc is not None:
+        _libc.malloc_trim(0)
 
 
 def measure_memory_usage():
@@ -52,7 +67,7 @@ def get_scoring_func(scoring):
 class Scheduler:
     """Scheduler for executing DataOpDAGs in topological order."""
     
-    def __init__(self, print_heavy_hitters=False, cache=None, env=None):
+    def __init__(self, print_heavy_hitters=False, cache=None, env=None, t0 = None):
         """Initialize scheduler with a data operations DAG."""
         self.mode = "fit_transform"
         self.env = env if env else {}
@@ -63,18 +78,22 @@ class Scheduler:
         self.cv_id = -1
         self.cache = cache
         self.intermediate_dependencies = {}
+        self.t0 = t0 if t0 is not None else perf_counter()
 
     def run_gc(self):
         if stratum_gc:
+            freed_any = False
             kv = list(self.intermediate_dependencies.items())
             for k, v in kv:
                 if v == 0:
                     logger.debug(f"GC: deleting {k}")
-                    # delete the intermediate stored in the op
                     k.intermediate = None
                     del self.intermediate_dependencies[k]
-                    
-            # logger.debug(f"Existing intermediates after GC:\n \n{"\n".join(f"{k}: {v}" for k, v in self.intermediate_dependencies.items())}\n")
+                    freed_any = True
+
+            if freed_any and stratum_malloc_trim:
+                gc.collect()
+                _malloc_trim()
 
 
     def grid_search(self, cv=None, scoring=None, return_predictions=False):
@@ -128,9 +147,10 @@ class Scheduler:
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
-        for in_ in op.inputs:
-            self.intermediate_dependencies[in_] -= 1
-        logger.debug(f"Processing op: {op}")
+        if stratum_gc:
+            for in_ in op.inputs:
+                self.intermediate_dependencies[in_] -= 1
+        logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
         
         try:
             # cache lookup
@@ -159,17 +179,13 @@ class Scheduler:
         except Exception as e:
             raise RuntimeError(f"[{self.mode}] Error processing '{op}': {e}")
 
-        if self.timings is not None:
-            duration = perf_counter() - t0
-            self.timings.append((str(op), duration))
-
         self.run_gc()
         self.intermediate_dependencies[op] = len(op.outputs)
 
         if show_memory_usage:
             gc.collect()
             memory_usage = measure_memory_usage()
-            logger.debug(f"Memory usage after processing {op}: {memory_usage}")
+            logger.debug(f"[{(perf_counter() - self.t0):.2f}s] Memory usage after processing {op}: {memory_usage}")
             logger.debug(f"Memory usage of intermediate of {op}: {format_bytes(op.get_intermediate_size())}")
         
         return op
@@ -178,6 +194,8 @@ class Scheduler:
         """Helper method to format prediction results consistently."""
         if isinstance(pred, list):
             return pl.DataFrame(pred)
+        elif isinstance(pred, dict) and "id" in pred and "vals" in pred:
+            return pl.DataFrame([pred])
         else:
             return pl.DataFrame({"vals": [pred], "id": ["default"]})
 
@@ -187,8 +205,8 @@ class Scheduler:
             self.flagged_for_recomputation.append(op)
 
 class SequentialScheduler(Scheduler):
-    def __init__(self, dag_sink: Op, print_heavy_hitters=False, cache=None, env=None):
-        super().__init__(print_heavy_hitters, cache=cache, env=env)
+    def __init__(self, dag_sink: Op, print_heavy_hitters=False, cache=None, env=None, t0 = None):
+        super().__init__(print_heavy_hitters, cache=cache, env=env, t0=t0)
         self.ops_ordered = [op for op in topological_iterator(dag_sink)]
 
     def evaluate(self, seed: int = 42, test_size = 0.2):
@@ -296,13 +314,15 @@ class ParallelScheduler(Scheduler):
             blocks_to_compute = [op for op in self.flagged_for_recomputation] + blocks_to_compute
         self.mode = mode
 
+        y_true = None
         for block in blocks_to_compute:
             self.process_block(block)
-
+            if mode == "predict" and isinstance(block, SplitOp):
+                y_true = block.intermediate[1]
         if mode == "predict":
             # Get the last block's output
             last_block = self.blocks[-1]
-            return self._format_predict_result(last_block.intermediate)
+            return self._format_predict_result(last_block.intermediate), y_true
         return None
 
     def compute_xy(self) -> SplitOp:
@@ -325,7 +345,7 @@ class ParallelScheduler(Scheduler):
             
             if self.backend == "process" or (self.backend == "auto" and all(isinstance(op, EstimatorOp) for op in ops)):
                 logger.debug(f"Using process-based parallel processing with joblib)")
-                results = Parallel(n_jobs=len(ops))(
+                results = Parallel(n_jobs=len(ops), backend="loky")(
                     delayed(op.get_process_task())(op.extract_args_from_inputs(self.mode)) 
                     for op in ops
                 )
