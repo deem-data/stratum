@@ -29,10 +29,9 @@ def main():
 
     # Use stratum's TableVectorizer
     t0 = time.perf_counter()
-    skrub.set_config(rust_backend=True, debug_timing=False)
+    skrub.set_config(rust_backend=True, debug_timing=False, scheduler=True, stats=True)
     with parallel_backend('threading'):
         vectorizer = TableVectorizer(high_cardinality=StringEncoder(), low_cardinality=OneHotEncoder(), n_jobs=-1) #default setup
-        #vectorizer = TableVectorizer(high_cardinality=StringEncoder(), low_cardinality=StringEncoder(), n_jobs=-1)
         employees_enc = vectorizer.fit_transform(employees)
     t1 = time.perf_counter()
     exec_time = t1 - t0

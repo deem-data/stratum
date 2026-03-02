@@ -1,5 +1,7 @@
 import cProfile
 from joblib import parallel_backend
+from sklearn.metrics import r2_score, make_scorer
+
 import stratum as skrub
 from skrub import StringEncoder
 from sklearn.model_selection import KFold
@@ -14,7 +16,6 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import pstats
 
-skrub.set_config(rust_backend=True, debug_timing=False)
 pr = cProfile.Profile()
 
 test=True
@@ -116,11 +117,13 @@ models = {
 preds = {k: X_enc.skb.apply(model, y=y) for k,model in models.items()}
 preds = skrub.choose_from(preds, name="preds").as_data_op()
 
+skrub.set_config(rust_backend=True, debug_timing=False, scheduler=True, stats=True)
 cv = KFold(n_splits=3, shuffle=True, random_state=42)
+scorer = make_scorer(r2_score)
 t0 = perf_counter()
 #pr.enable()
 #with parallel_backend('threading'):
-search = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True)
+search = preds.skb.make_grid_search(cv=cv, scoring=scorer, n_jobs=1, fitted=True, refit=True)
 #pr.disable()
 t1 = perf_counter()
 print(f"Time taken: {t1 - t0} seconds")
