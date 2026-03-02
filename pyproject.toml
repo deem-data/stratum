@@ -8,12 +8,12 @@ version = "0.0.0.dev0"
 description = "skrub with a Rust backend"
 readme = "README.md"
 authors = [{name = "Arnab Phani"}]
-license = {text = "BSD-3-Clause"}
+license = {text = "Apache-2.0"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: BSD License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

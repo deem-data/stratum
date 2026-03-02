@@ -8,7 +8,7 @@ on:
       - 'examples/**'
       - 'benchmarks/**'
       - '.gitignore'
-      - 'LICENSE.txt'
+      - 'LICENSE'
     branches: [main, master]
   pull_request:
     paths-ignore:
@@ -17,7 +17,7 @@ on:
       - 'examples/**'
       - 'benchmarks/**'
       - '.gitignore'
-      - 'LICENSE.txt'
+      - 'LICENSE'
     branches: [main, master]
   workflow_dispatch:
 

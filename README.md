@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/deem-data/stratum/actions/workflows/test.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/deem-data/stratum/graph/badge.svg?token=QQDTC0RXUN)](https://codecov.io/gh/deem-data/stratum)
-[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE.txt)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
 **Stratum** is an experimental fork of [skrub](https://github.com/skrub-data/skrub) with a **Rust backend** for compute-heavy operations, while keeping the high-level Python API intact.
@@ -107,7 +107,7 @@ pip install ./dist/stratum-*.whl
 ---
 
 ## License
-BSD-3-Clause (inherited from skrub).
+Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 
 
