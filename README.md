@@ -5,79 +5,82 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
-**Stratum** is an experimental fork of [skrub](https://github.com/skrub-data/skrub) with a **Rust backend** for compute-heavy operations, while keeping the high-level Python API intact.
+**Stratum** is an ML system for efficiently executing **large-scale agentic pipeline search**. It integrates with ML agents by representing batches of agent-generated pipelines as lazily evaluated DAGs, applying logical and runtime optimizations, and executing them across heterogeneous backends, including a Rust runtime.
+Stratum builds on [skrub's](https://skrub-data.org/stable) operator abstraction.
 
 ---
 
-## Goals
+## Design Principles
 
-- Provide an **opt-in Rust backend** for performance-critical parts of skrub.
-- Preserve skrub’s **Python API**; developers can flip a flag to enable Rust.
-- Build cross-platform wheels (Windows / Linux / macOS) so users can install without a Rust toolchain.
+- Provide seamless and unrestricted support for **arbitrary ML libraries** without operator porting.
+- Enable **lazy evaluation** and provide operator semantics that enable logical rewrites and **cost-based** optimizations.
+- Implement a runtime with **efficient operator kernels** (in Rust), scheduling across CPUs, GPUs, and distributed backends, plus runtime optimizations such as **buffer pools, reuse of intermediates, and inter- and intra-operator parallelization**.
 
 ---
 
 ## Installation
 
-For now, you need to build from source.
+For now, you need to build stratum from source.
 
-Requirements:
+**Requirements:**
 - Python **3.10+**
+- [skrub](https://skrub-data.org/stable/)
 - [Rust toolchain](https://rustup.rs/) (nightly not required; stable is fine)
 - [maturin](https://www.maturin.rs/) (`pip install maturin`)
+
+From the repository root, install the extension in editable (development) mode:
+
+```bash
+maturin develop --release
+```
+
+For more details (including building wheels), see the **Developer Instructions** section below.
 
 ---
 
 ## Usage
 
-To enable the Rust backend and other related features, import stratum as skrub and enable the Rust backend:
+To leverage stratum, agent prompts or pipelines need minor changes.
+Prompts should be modified to generate code following [skrub DataOps](https://skrub-data.org/stable/reference/data_ops.html) syntax.
 
-Replace
-```Python
-import skrub
-from skrub import StringEncoder
-```
-with
-```Python
-import stratum as skrub
-from stratum import StringEncoder
-skrub.set_config(rust_backend=True)
-```
+Stratum can also significantly speed up human-written skrub code.
 
-#### Test Code
+The following flags enable different features of Stratum. These flags can be set via environment variables or directly in code:
 
-```Python
+```python
+import stratum
 
-import os
-import pandas as pd
-import stratum as skrub
-from stratum import StringEncoder
-skrub.set_config(rust_backend=True)
-
-#skrub.set_config(debug_timing=True, num_threads=0) # other rust flags
-s = pd.Series(["foo", "bar", None, "lorem ipsum dolor"])
-enc = StringEncoder(vectorizer='hashing', analyzer='char', ngram_range=(3,5), n_components=2)
-Z = enc.fit_transform(s)
-print(type(Z), Z.shape)
-assert Z.shape[0] == len(s)
+stratum.set_config(
+    rust_backend=True,
+    scheduler=True,
+    stats=True,
+    debug_timing=False,
+)
 ```
 ---
 
 ## Repository Layout
 
-```bash  
+```bash
 stratum/
-├─ pyproject.toml             # Python + Rust build config (maturin)
-├─ stratum/
-│ ├─ __init__.py              # Façade over skrub
-│ ├─ _config.py                # set_config/get_config + env sync
-│ ├─ _rust_backend.py         # Python <-> Rust shim (re-exports native fns)
-│ ├─ adapters/                # Public API (dispatch to Rust or fallback to skrub)
-│ │ └─ string_encoder.py      # RustyStringEncoder (subclass)
-│ └─ _rust_backend_native.*   # Compiled PyO3 extension (built)
-└─ _rust/                     # Rust crate (PyO3 extension)
-├─ Cargo.toml
-└─ src/lib.rs                 # Defines #[pymodule] fn _rust_backend_native(...)
+├─ pyproject.toml          # Project metadata + Python/Rust build config (maturin)
+├─ README.md
+├─ LICENSE
+├─ _rust/                  # Rust crate (PyO3 extension)
+│  ├─ Cargo.toml
+│  └─ src/lib.rs           # Defines #[pymodule] fn _rust_backend_native(...)
+└─ stratum/                # Python package
+   ├─ __init__.py          # Façade over skrub + automatic patching
+   ├─ _config.py           # set_config/get_config + runtime/env sync
+   ├─ _api.py              # High-level grid search / evaluate helpers
+   ├─ _rust_backend.py     # Python <-> Rust shim (re-exports native fns)
+   ├─ adapters/            # Public API (dispatch to Rust or fall back to skrub)
+   │  ├─ string_encoder.py # RustyStringEncoder
+   │  └─ one_hot_encoder.py # RustyOneHotEncoder
+   ├─ logical_optimizer/   # DAG representation + logical rewrites
+   ├─ runtime/             # Schedulers and runtime execution
+   ├─ patching/            # Hooks that patch upstream skrub
+   └─ tests/               # Test suite
 ```
 ---
 
@@ -95,8 +98,11 @@ maturin develop --release	# Optimized dev build
 This produces redistributable `.whl` files under `dist/`.
 
 ```bash
-maturin build --release -o dist --interpreter python3.10 --compatibility linux		# Linux/macOS
-maturin build --release -o dist		# Windows
+# Linux / macOS
+maturin build --release -o dist --interpreter python3.10 --compatibility linux
+
+# Windows
+maturin build --release -o dist
 ```
 Then install with:
 
