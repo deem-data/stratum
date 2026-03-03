@@ -5,8 +5,8 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
-**Stratum** is an ML system for efficiently executing **large-scale agentic pipeline search**. It integrates with ML agents by representing batches of agent-generated pipelines as lazily evaluated DAGs, applying logical and runtime optimizations, and executing them across heterogeneous backends, including a Rust runtime.
-Stratum builds on [skrub's](https://skrub-data.org/stable) operator abstraction.
+**Stratum** is an ML system for efficiently executing **large-scale agentic pipeline search**. It integrates with MLE agents by representing batches of agent-generated pipelines as lazily evaluated DAGs, applying logical and runtime optimizations, and executing them across heterogeneous backends, including a Rust-based runtime.
+Stratum builds on [skrub's](https://skrub-data.org/stable) operator abstraction and under active development.
 
 ---
 
