@@ -57,6 +57,28 @@ stratum.set_config(
     debug_timing=False,
 )
 ```
+### Example Code
+
+```python
+import stratum as skrub #drop-in replacement
+from sklearn.preprocessing import OneHotEncoder
+from skrub.datasets import fetch_employee_salaries
+from skrub import TableVectorizer, StringEncoder
+
+def main():
+    # Load dataset
+    dataset = fetch_employee_salaries()
+    employees, salaries = dataset.X, dataset.y
+    employees = employees.dropna()
+
+    skrub.set_config(rust_backend=True, debug_timing=True, scheduler=True, stats=True) #stratum's config
+    vectorizer = TableVectorizer(high_cardinality=StringEncoder(), low_cardinality=OneHotEncoder())
+    employees_enc = vectorizer.fit_transform(employees)
+    print(f"Encoded data shape: {employees_enc.shape}")
+
+if __name__ == "__main__":
+    main()
+```
 ---
 
 ## Repository Layout
