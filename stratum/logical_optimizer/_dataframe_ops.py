@@ -26,7 +26,10 @@ class DataSourceOp(Op):
         self.is_dataframe_op = True
 
     def simple_hash(self):
-        return stable_hash((self.file_path, self.format, self.read_args, self.read_kwargs))
+        if self.data is not None:
+            raise NotImplementedError("Hashing is not implemented for DataSourceOp with data yet")
+        else:
+            return stable_hash((self.file_path, self.format, self.read_args, self.read_kwargs))
 
     def process(self, mode: str, environment: dict):
         logger.debug(f"Using Polars: {FLAGS.force_polars}")
