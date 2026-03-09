@@ -1,13 +1,12 @@
-from numpy import True_
-from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque
 from ._cse import apply_cse
-from ._dataframe_ops import rewrite_dataframe_ops, add_splitting_op
+from ._dataframe_ops import add_splitting_op
 from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops
 from ._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
+from ._skrub_graph import build_graph
 from time import perf_counter
 import logging
 from stratum._config import FLAGS
@@ -38,7 +37,7 @@ def topological_traverse(nodes, parents, children):
 
 def apply_cse_on_skrub_ir(dag: DataOp):
     """ Apply CSE on a Skrub DataOp DAG and return the deduplicated DAG. (Deprecated versio of optimize function)"""
-    graph = _Graph().run(dag)
+    graph = build_graph(dag)
     nodes = graph["nodes"]
     parents = graph["parents"]
     children = graph["children"]
@@ -48,6 +47,7 @@ def apply_cse_on_skrub_ir(dag: DataOp):
     return dag
 
 class OptConfig():
+    # TODO we should move this class to the _config.py file
     def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
@@ -57,58 +57,83 @@ def _debug_show_graph(sink: Op, name: str):
     if FLAGS.DEBUG:
         show_graph(sink, name)
 
-def optimize(dag: DataOp, config: OptConfig = None):
+def optimize(dag_sink: DataOp, config: OptConfig = None):
     """ Entry point for the logical optimizer. Takes a Skrub DataOp DAG, applies logical optimizations 
-    and returns a topologically sorted list of Op nodes."""
+    and returns an Op sink node."""
     t0 = perf_counter()
     if config is None:
         config = OptConfig()
         
-    graph = _Graph().run(dag)
-    nodes = graph["nodes"]
-    parents = graph["parents"]
-    children = graph["children"]
-
+    t0_graph = perf_counter()
+    g = build_graph(dag_sink)
+    nodes = g["nodes"]
+    parents = g["parents"]
+    children = g["children"]
+    t1_graph = perf_counter()
+    logger.info(f"Graph construction took {t1_graph - t0_graph:.2f} seconds")
     order = topological_traverse(nodes, parents, children)
-    if config.cse:
-        apply_cse(dag, nodes, order, parents)
+    if FLAGS.cse:
+        t0_cse = perf_counter()
+        apply_cse(dag_sink, nodes, order, parents)
         # TODO cse should direcly return the new list of ops ordered so we dont have to iterate again
+        t1_cse = perf_counter()
+        logger.info(f"CSE took {t1_cse - t0_cse:.2f} seconds")
 
-    sink = convert_to_ops(dag)
+    t0_convert = perf_counter()
+    sink = convert_to_ops(dag_sink)
+    t1_convert = perf_counter()
+    logger.info(f"Conversion took {t1_convert - t0_convert:.2f} seconds")
+
+    t0_splitting = perf_counter()
     sink = add_splitting_op(sink)
-    _debug_show_graph(sink, "convertion")
+    t1_splitting = perf_counter()
+    logger.info(f"Splitting took {t1_splitting - t0_splitting:.2f} seconds")
 
+
+    _debug_show_graph(sink, "convertion")
+    t1_splitting = perf_counter()
+    logger.info(f"Splitting took {t1_splitting - t0_splitting:.2f} seconds")
     # Rewrites:
 
     # Parsing of dataframe ops
     if config.dataframe_ops:
+        t0_dataframe = perf_counter()
         sink = rewrite_dataframe_ops(sink)
         sink = group_dataframe_ops(sink)
         _debug_show_graph(sink, "dataframe_rewrite")
-
+        t1_dataframe = perf_counter()
+        logger.info(f"Dataframe rewrite took {t1_dataframe - t0_dataframe:.2f} seconds")
     # Unrolling of choices to a dag wit only a single choice op at the end
     if config.unroll_choices:
+        t0_choices = perf_counter()
         sink = choice_unrolling(sink)
+        _debug_show_graph(sink, "unrolled")
+        t1_choices = perf_counter()
+        logger.info(f"Choices unrolling took {t1_choices - t0_choices:.2f} seconds")
     
     # Final optimized DAG
-    _debug_show_graph(sink, "optimized")
-    output = [op for op in topological_iterator(sink)]
+    
     t1 = perf_counter()
-    logger.info("="*100 + f"\nOptimization took {t1 - t0:.2f} seconds\n" + "="*100)
-    return output
+    logger.info(f"Optimization took in total {t1 - t0:.2f} seconds")
+    return sink
 
 
 def convert_to_ops(dag: DataOp) -> Op:
     """ Convert a Skrub DataOp DAG to a stratum's logical IR (Op DAG)"""
-    graph = _Graph().run(dag)
-    nodes = graph["nodes"]
-    parents = graph["parents"]
-    children = graph["children"]
-
+    t0_convert = perf_counter()
+    g = build_graph(dag)
+    nodes = g["nodes"]
+    parents = g["parents"]
+    children = g["children"]
+    t1_convert = perf_counter()
+    logger.info(f"Conversion dag took {t1_convert - t0_convert:.2f} seconds")
     order = topological_traverse(nodes, parents, children)
     sink_id = order[-1]
+
     # make logical IR:
+    # we start by making unconnected ops
     ids_to_ops = {node: as_op(nodes[node]) for node in order}
+    # we then connect the ops to a graph
     for node in order:
         op = ids_to_ops[node]
         if isinstance(op, ImplOp) and isinstance(op.skrub_impl, SubsamplePreviews):
@@ -169,7 +194,9 @@ def choice_unrolling(sink: Op):
                 else:
                     assert sink is last_op, "Sink should be the last op in the dag"
                     # we reached the end of the dag
+                    logger.debug(f"Unrolling simple choice: {op}")
                     sink = unroll_simple_choice(sink, op, outcomes)
+                    logger.debug(f"New sink after unrolling: {sink}")
 
                 # if FLAGS.DEBUG:
                 #     show_graph(sink, f"choice-unrolled={i}")

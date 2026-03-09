@@ -1,18 +1,21 @@
-from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp
+from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp, VariableOp
 from pandas import DataFrame
 import pandas as pd
 import polars as pl
 from stratum.logical_optimizer._op_utils import topological_iterator
 from stratum._config import FLAGS
-
-POLARS = FLAGS.force_polars
+from stratum.runtime._hash_utils import stable_hash
+from skrub._data_ops._data_ops import DataOp
+import logging
+from numpy import sin, cos
+logger = logging.getLogger(__name__)
 
 class DataSourceOp(Op):
     def __init__(self, data: DataFrame = None, file_path: str = None, _format: str = None,
-                 read_args: tuple | list = None, read_kwargs: dict = None, is_X=False, is_y=False, outputs: list[Op] = None):
+                 read_args: tuple | list = None, read_kwargs: dict = None, is_X=False, is_y=False, outputs: list[Op] = None, inputs: list[Op] = None):
         if outputs is None:
             outputs = []
-        super().__init__(name="Frame" if data is not None else f"read_{_format}", is_X=is_X, is_y=is_y, outputs=outputs, inputs=None)
+        super().__init__(name="Frame" if data is not None else f"read_{_format}", is_X=is_X, is_y=is_y, outputs=outputs, inputs=inputs)
         if read_kwargs is not None:
             self.check_kwargs(read_kwargs)
         self.data = data
@@ -22,18 +25,26 @@ class DataSourceOp(Op):
         self.read_kwargs = read_kwargs
         self.is_dataframe_op = True
 
-    def process(self, mode: str, environment: dict):
+    def simple_hash(self):
         if self.data is not None:
-            if POLARS:
+            raise NotImplementedError("Hashing is not implemented for DataSourceOp with data yet")
+        else:
+            return stable_hash((self.file_path, self.format, self.read_args, self.read_kwargs))
+
+    def process(self, mode: str, environment: dict):
+        logger.debug(f"Using Polars: {FLAGS.force_polars}")
+        if self.data is not None:
+            if FLAGS.force_polars:
                 self.intermediate = pl.DataFrame(self.data)
             else:
                 self.intermediate = self.data
 
         else:
-            if POLARS:
-                self.intermediate = pl.read_csv(self.file_path, *self.read_args, **self.read_kwargs)
+            file_path = self.inputs[0].intermediate if self.file_path is DATA_OP_PLACEHOLDER else self.file_path
+            if FLAGS.force_polars:
+                self.intermediate = pl.read_csv(file_path, *self.read_args, **self.read_kwargs)
             else:
-                self.intermediate = pd.read_csv(self.file_path, *self.read_args, **self.read_kwargs)
+                self.intermediate = pd.read_csv(file_path, *self.read_args, **self.read_kwargs)
 
     def clone(self):
         raise ValueError(f"We should not clone DataSourceOp objects.")
@@ -50,12 +61,15 @@ class MetadataOp(Op):
         self.kwargs = kwargs
         self.is_dataframe_op = True
 
+    def simple_hash(self):
+        return stable_hash((self.func, self.args, self.kwargs))
+
     def process(self, mode: str, environment: dict):
         iter_ins = iter(self.inputs)
         _obj = next(iter_ins).intermediate
         _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
         _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
-        if POLARS:
+        if FLAGS.force_polars:
             if "columns" in _kwargs:
                 _args.append(_kwargs["columns"])
             self.intermediate = getattr(_obj, self.func)(*_args)
@@ -90,7 +104,7 @@ class ProjectionOp(Op):
     def process(self, mode: str, environment: dict):
         _obj, _args, _kwargs = self._extract_args_and_kwargs()
         if self.is_method:
-            if POLARS:
+            if FLAGS.force_polars:
                 raise ValueError(f"Unsupported method: {self.func}")
             else:
                 self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
@@ -98,14 +112,18 @@ class ProjectionOp(Op):
             self.intermediate = self.func(_obj, *_args, **_kwargs)
 
 class DropOp(ProjectionOp):
+    fields = ["args", "kwargs", "columns"]
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
 
+    def simple_hash(self):
+        return stable_hash((self.args, self.kwargs))
+
     def process(self, mode: str, environment: dict):
         _obj, _args, _kwargs = self._extract_args_and_kwargs()
 
-        if POLARS:
+        if FLAGS.force_polars:
             if "columns" in _kwargs:
                 _args.append(_kwargs["columns"])
             if "ignore_errors" in _kwargs:
@@ -131,15 +149,25 @@ class ApplyUDFOp(ProjectionOp):
             else:
                 n_cols = len(self.columns)
 
-        if POLARS:
+        if FLAGS.force_polars:
             if isinstance(_obj, pl.Series):
                 n_cols = 1
             if n_cols == 1:
-                self.intermediate = _obj.map_elements(*_args, **_kwargs)
+                if _args[0] == sin:
+                    logger.debug("Rewrite UDF sin to polars sin")
+                    self.intermediate = _obj.sin()
+                elif _args[0] == cos:
+                    logger.debug("Rewrite UDF cos to polars cos")
+                    self.intermediate = _obj.cos()
+                else:
+                    self.intermediate = _obj.map_elements(*_args, **_kwargs)
             else:
                 self.intermediate = _obj.map_rows(*_args, **_kwargs)
         else:
             self.intermediate = _obj.apply(*_args, **_kwargs)
+
+    def simple_hash(self):
+        return stable_hash((self.args, self.kwargs, "apply_udf"))
 
 class AssignOp(ProjectionOp):
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
@@ -148,26 +176,42 @@ class AssignOp(ProjectionOp):
 
     def process(self, mode: str, environment: dict):
         _obj, _args, _kwargs = self._extract_args_and_kwargs()
-        if POLARS:
-            self.intermediate = _obj.with_columns(*_args, **_kwargs)
+        if FLAGS.force_polars:
+            checked_kwargs = {}
+            for k, v in _kwargs.items():
+                if v is DATA_OP_PLACEHOLDER:
+                    raise NotImplementedError("Is not yet suppoerted, please report this issue")
+                elif isinstance(v, pd.Series) or isinstance(v, pd.DataFrame):
+                    logger.warning(f"Converting pandas object to polars object for column {k}")
+                    checked_kwargs[k] = pl.from_pandas(v)
+                else:
+                    checked_kwargs[k] = v
+            self.intermediate = _obj.with_columns(*_args, **checked_kwargs)
         else:
             self.intermediate = _obj.assign(*_args, **_kwargs)
+
+    def simple_hash(self):
+        return stable_hash((self.args, self.kwargs, "assign"))
 
 class DatetimeConversionOp(ProjectionOp):
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+        super().__init__(args=args, inputs=inputs, outputs=outputs, columns=columns)
+        self.strict = kwargs.get("errors", "raise") == "raise"
 
     def process(self, mode: str, environment: dict):
-        if POLARS:
-            self.intermediate = self.inputs[0].intermediate.str.to_datetime(*self.args, **self.kwargs)
+        if FLAGS.force_polars:
+            self.intermediate = self.inputs[0].intermediate.str.to_datetime(*self.args, strict=self.strict)
         else:
-            self.intermediate = pd.to_datetime(self.inputs[0].intermediate, *self.args, **self.kwargs)
+            self.intermediate = pd.to_datetime(self.inputs[0].intermediate, *self.args, errors="raise" if self.strict else "coerce")
+
+    def simple_hash(self):
+        return stable_hash((self.args, self.kwargs, "datetime_conversion"))
 
 class GetAttrProjectionOp(Op):
     fields = ["attr_name"]
 
-    POLARS_ATTR_NAME_MAP = {"dayofweek": "weekday"}
+    POLARS_ATTR_NAME_MAP = {"dayofweek": "weekday","dayofyear": "ordinal_day"}
 
     def __init__(self, attr_name: list[str] | str = None, inputs: list[Op] = None, outputs: list[Op] = None):
         if attr_name is None:
@@ -188,17 +232,24 @@ class GetAttrProjectionOp(Op):
 
     def process(self, mode: str, environment: dict):
         self.intermediate = self.inputs[0].intermediate
-        if POLARS:
+        tmp = self.intermediate
+        if FLAGS.force_polars:
             for attr in self.attr_name:
                 attr = self.POLARS_ATTR_NAME_MAP.get(attr, attr)
+
+                # TODO find better way to handle this
+                if attr == "is_month_end":
+                    self.intermediate = (self.intermediate.dt.month_end() == self.intermediate)
+                    return
+
                 # polars implements dt.day as a method, not an attribute
                 # use getattr to handle both attributes and methods
-                self.intermediate = getattr(self.intermediate, attr)
-            self.intermediate = self.intermediate()
+                tmp = getattr(tmp, attr)
+            self.intermediate = tmp()
         else:
             for attr in self.attr_name:
-                self.intermediate = self.intermediate.__getattribute__(attr)
-
+                tmp = getattr(tmp, attr)
+            self.intermediate = tmp
 class GroupedDataframeOp(Op):
     def __init__(self, ops: list[Op]):
         super().__init__(name="GROUPED_DATAFRAME", is_X=False, is_y=False)
@@ -209,6 +260,30 @@ class GroupedDataframeOp(Op):
         for op in self.ops:
             op.process(mode, environment)
         self.intermediate = self.ops[-1].intermediate
+
+class ConcatOp(Op):
+    fields = ["first", "others", "axis"] # Add more if needed
+
+    axis_map = {
+        0: "diagonal_relaxed",
+        1: "horizontal",
+    }
+    def __init__(self, first: Op, others: list[Op], axis: int):
+        super().__init__(name="CONCAT", is_X=False, is_y=False)
+        self.first = DATA_OP_PLACEHOLDER if isinstance(first, DataOp) else first
+        self.others = [DATA_OP_PLACEHOLDER if isinstance(other, DataOp) else other for other in others]
+        self.axis = DATA_OP_PLACEHOLDER if isinstance(axis, DataOp) else axis
+        self.is_dataframe_op = True
+
+    def process(self, mode: str, environment: dict):
+        input_iter = iter(self.inputs)
+        first = next(input_iter).intermediate if self.first is DATA_OP_PLACEHOLDER else self.first
+        others = [next(input_iter).intermediate if other is DATA_OP_PLACEHOLDER else other for other in self.others]
+        axis = next(input_iter).intermediate if self.axis is DATA_OP_PLACEHOLDER else self.axis
+        if FLAGS.force_polars:
+            self.intermediate = pl.concat([first, *others], how=self.axis_map[axis])
+        else:
+            self.intermediate = pd.concat([first, *others], axis=axis)
 
 
 def rewrite_fuse_get_item_ops(op: Op) -> Op:
@@ -249,6 +324,9 @@ class SplitOp(Op):
         else:
             raise ValueError(f"Unsupported dataframe type: {type(x)}")
 
+    def simple_hash(self):
+        return 1
+
 class SplitOutput(Op):
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, ):
         name = "X" if is_x else "y"
@@ -261,6 +339,9 @@ class SplitOutput(Op):
             self.intermediate = self.inputs[0].intermediate[0]
         else:
             self.intermediate = self.inputs[0].intermediate[1]
+
+    def simple_hash(self):
+        return 2 if self.is_x else 3
 
 def add_splitting_op(sink: Op) -> Op:
     x_op = None
@@ -330,8 +411,9 @@ def rewrite_dataframe_ops(sink: Op) -> Op:
                 op.is_dataframe_op = True
 
             # mark as dataframe op
-            elif isinstance(op, GetItemOp):
+            elif isinstance(op, GetItemOp) or isinstance(op, BaseEstimatorOp):
                 op.is_dataframe_op = True
+
 
         if new_op is not None:
             op.replace_input_of_outputs(new_op)
@@ -356,11 +438,33 @@ def make_datetime_conversion_op(new_op: DatetimeConversionOp, op: CallOp) -> Dat
 def make_read_op(new_op: DataSourceOp, op: CallOp) -> DataSourceOp:
     input_iter = iter(op.inputs)
     # assume all inputs are ValueOps
-    assert all(isinstance(arg, ValueOp) for arg in op.inputs), "All inputs must be ValueOps"
-    args = [next(input_iter).value if arg is DATA_OP_PLACEHOLDER else arg for arg in op.args]
-    kwargs = {k: next(input_iter).value if v is DATA_OP_PLACEHOLDER else v for k, v in op.kwargs.items()}
-    new_op = DataSourceOp(file_path=args[0], _format="csv", read_args=args[1:], read_kwargs=kwargs)
-    new_op.outputs = op.outputs
+    assert all(isinstance(arg, ValueOp) or isinstance(arg, VariableOp) for arg in op.inputs), "All inputs must be ValueOps or VariableOps"
+    inputs = []
+    args = []
+    for arg in op.args:
+        if arg is DATA_OP_PLACEHOLDER:
+            actual_input_op = next(input_iter)
+            if isinstance(actual_input_op, VariableOp):
+                args.append(DATA_OP_PLACEHOLDER)
+                inputs.append(actual_input_op)
+            else:
+                args.append(actual_input_op.value)
+        else:
+            args.append(arg)
+    kwargs = {}
+    for k, v in op.kwargs.items():
+        if v is DATA_OP_PLACEHOLDER:
+            actual_input_op = next(input_iter)
+            if isinstance(actual_input_op, VariableOp):
+                kwargs[k] = DATA_OP_PLACEHOLDER
+                inputs.append(actual_input_op)
+            else:
+                kwargs[k] = actual_input_op.value
+        else:
+            kwargs[k] = v
+    new_op = DataSourceOp(file_path=args[0], _format="csv", read_args=args[1:], read_kwargs=kwargs, inputs=inputs, outputs=op.outputs)
+    for in_ in inputs:
+        in_.replace_output(op, new_op)
     return new_op
 
 

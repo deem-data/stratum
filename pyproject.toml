@@ -25,10 +25,13 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
     "scikit-learn==1.8",
-    "skrub>=0.3",
+    "skrub==0.6.2",
+    "pandas==2.3.3",
     "polars",
     "graphviz",
     "pyarrow>=22.0.0",
+    "joblib",
+    "psutil",
 ]
 
 [project.optional-dependencies]

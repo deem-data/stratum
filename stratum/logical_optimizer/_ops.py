@@ -1,13 +1,18 @@
 from __future__ import annotations
+import sys
 from types import SimpleNamespace
 from typing import Callable
 
+from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
-from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, _wrap_estimator
-from pandas import DataFrame
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Concat, Var, _wrap_estimator
+from pandas import DataFrame, Series
 from polars import DataFrame as PlDataFrame, Series as PlSeries
+from stratum.runtime._hash_utils import stable_hash
+import logging
+logger = logging.getLogger(__name__)
 
 class PlaceHolder():
     def __init__(self, name: str):
@@ -27,17 +32,24 @@ class Op():
         self.name = name
         self.outputs = outputs if outputs is not None else []
         self.inputs = inputs if inputs is not None else []
+        self.additional_inputs = None
+        self.additional_outputs = None
         self.intermediate = None
         self.is_X = is_X
         self.is_y = is_y
         self.is_dataframe_op = False
         self.is_split_op = False
         self.was_cloned = False
+        self.parallel_group = None
+        self.cached_hash = None
 
     def to_str_helper(self):
         class_name = self.__class__.__name__
         is_df = " [df]" if self.is_dataframe_op else ""
         name = f"({self.name})" if self.name and len(self.name) > 0 else ""
+        # truncate name if it is too long
+        if len(name) > 50:
+            name = name[:50] + "..."
         return class_name, name, is_df
 
     def __str__(self):
@@ -103,6 +115,28 @@ class Op():
                 f" {type(kwargs).__name__!r} instead: {kwargs!r}"
             )
 
+    def simple_hash(self):
+        raise NotImplementedError(f"Simple_hash must be implemented in {self.__class__.__name__}")
+
+    def get_hash(self):
+        if self.cached_hash is not None:
+            return self.cached_hash
+        sub_dag_hash = [op.get_hash() for op in self.inputs]
+        sub_dag_hash.append(self.simple_hash())
+        self.cached_hash = stable_hash(sub_dag_hash)
+        return self.cached_hash
+
+
+    def get_intermediate_size(self):
+        if isinstance(self.intermediate, DataFrame):
+            return self.intermediate.memory_usage(deep=True).sum()
+        elif isinstance(self.intermediate, Series):
+            return self.intermediate.memory_usage(deep=True)
+        elif isinstance(self.intermediate, PlDataFrame) or isinstance(self.intermediate, PlSeries):
+            return self.intermediate.estimated_size()
+        else:
+            return sys.getsizeof(self.intermediate)
+
 def clone_value(value):
     if isinstance(value, dict):
         return {k:clone_value(v) for k,v in value.items()}
@@ -162,7 +196,22 @@ class ImplOp(Op):
             ns = self.replace_fields_with_values()
             self.intermediate = self.skrub_impl.compute(ns, mode, environment)
 
-class EstimatorOp(Op):
+class VariableOp(Op):
+    def __init__(self, name: str, value = None):
+        super().__init__(name=name)
+        self.name = name
+        if value is not None:
+            self.value = value
+        else:
+            self.value = "EMPTY_VARIABLE"
+
+    def clone(self):
+        return VariableOp(name=self.name)
+
+    def process(self, mode: str, environment: dict):
+        self.intermediate = environment[self.name]
+
+class BaseEstimatorOp(Op):
     fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs"]
     
     def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None):
@@ -171,18 +220,25 @@ class EstimatorOp(Op):
             kwargs = {}
         self.check_kwargs(kwargs)
         self.estimator = estimator
+        place_holders = {k: v for k, v in self.estimator.get_params().items() if isinstance(v, DataOp)}
+        self.estimator.set_params(**place_holders)
+        self.original_estimator = clone(self.estimator)
         self.y = DATA_OP_PLACEHOLDER if isinstance(y, DataOp) else y
         self.cols = DATA_OP_PLACEHOLDER if isinstance(cols, DataOp) else cols
         self.how = how
         self.allow_reject = allow_reject
         self.unsupervised = unsupervised
         self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
+        self.parallelism = 8
+
+    def simple_hash(self):
+        return stable_hash((self.estimator, self.y, self.cols, self.how, self.allow_reject, self.unsupervised, self.kwargs))
 
     def clone(self):
         params = self.estimator.get_params()
         estimator_new = clone(self.estimator)
         estimator_new.set_params(**params)
-        new_op = EstimatorOp(
+        new_op = self.__class__(
             estimator=estimator_new, 
             y=self.y, 
             cols=self.cols, 
@@ -193,35 +249,119 @@ class EstimatorOp(Op):
         )
         new_op.was_cloned = True
         return new_op
-    
-    def process(self, mode: str, environment: dict):
+
+    def extract_args_from_inputs(self, mode: str):
+        """
+        Extract all necessary data from an EstimatorOp to make it picklable for multiprocessing.
+        
+        Returns a tuple of picklable data that can be sent to worker processes.
+        """
         input_iter = iter(self.inputs)
         x = next(input_iter).intermediate
-        if isinstance(x, PlDataFrame):
-            x = x.to_pandas()
-        y = next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
-        if isinstance(y, PlSeries):
-            y = y.to_pandas()
+        assert x is not None, f"X is None for {self}"
+        y = None if mode == 'predict' else next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
+        estm = self.estimator if mode == "predict" else self.original_estimator
+        place_holders = {k: next(input_iter).intermediate for k, v in estm.get_params().items() if isinstance(v, DataOp)}
+        estm.set_params(**place_holders)
         cols = next(input_iter).intermediate if self.cols == DATA_OP_PLACEHOLDER else self.cols
+        return (
+            estm,
+            x,
+            y,
+            cols,
+            self.how,
+            self.allow_reject,
+            self.unsupervised,
+            self.kwargs,
+            mode,
+            self.parallelism
+        )
+    
+    def process(self, mode: str, environment: dict):
+        # we use a separate function to process the estimator to allow reuse for multiprocessing
+        task_data = self.extract_args_from_inputs(mode)
+        process_task = self.get_process_task()
+        self.intermediate, self.estimator = process_task(task_data)
+
+    def get_process_task(self):
+        raise NotImplementedError(f"get_process_task must be implemented in {self.__class__.__name__}")
+
+class EstimatorOp(BaseEstimatorOp):
+    def get_process_task(self):
+        return process_estimator_task
+
+class TransformerOp(BaseEstimatorOp):
+    def get_process_task(self):
+        return process_transformer_task
+
+class DummyConfigManager:
+    """A no-op context manager that does nothing."""
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        return False
+
+def estimator_parallel_config(n_jobs: int = None):
+    if n_jobs is not None:
+        logger.debug(f"Using threading backend with {n_jobs} jobs")
+        return parallel_config(backend='threading', n_jobs=n_jobs)
+    else:
+        return DummyConfigManager()
+
+def estm_supports_polars(estimator):
+    is_sklearn = estimator.__class__.__module__.startswith("sklearn.") or estimator.__class__.__module__.startswith("skrub.")
+    is_stratum = estimator.__class__.__module__.startswith("stratum.") and estimator.__class__.__name__.startswith("Rusty")
+    # other_frameworks = estimator.__class__.__module__.startswith("xgboost.")
+    return is_sklearn or is_stratum #or other_frameworks
+
+def check_estm_inputs(estimator, mode, x, y):
+    input_is_polars = type(x) == PlDataFrame
+    converted = False
+    if estimator.__class__.__module__.startswith("skrub."):
+        if estimator.__class__.__name__.startswith("ApplyTo"):
+            estimator = estimator.transformer
+    if input_is_polars and not estm_supports_polars(estimator):
+        converted = True
+        logger.debug(f"Estimator {estimator.__class__.__name__} does not support Polars DataFrame. Converting to Pandas DataFrame.")
+        x = x.to_pandas()
+        if y is not None and mode == "fit_transform":
+            y = y.to_pandas()
+    return converted, x, y
+
+def process_estimator_task(task_data):
+    """ Process a predictor (EstimatorOp) task in a worker process. """
+    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    _, x, y = check_estm_inputs(estimator, mode, x, y)
+    if mode == "fit_transform":
+        estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
+        y_arg = () if unsupervised else (y,)
+        estimator.fit(x, *y_arg, **kwargs)
+        result = estimator.predict(x, **kwargs)
+        # Return both result and fitted estimator (in case of multi-processing)
+        return result, estimator
+    elif mode == "predict":
+        result = estimator.predict(x, **kwargs)
+        return result, estimator
+    else:
+        raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
+
+def process_transformer_task(task_data):
+    """ Process a transformer (TransformerOp) task in a worker process. """
+    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    converted, x, y = check_estm_inputs(estimator, mode, x, y)
+    with estimator_parallel_config(parallelism):
         if mode == "fit_transform":
-            self.estimator = _wrap_estimator(self.estimator, cols, how=self.how, allow_reject=self.allow_reject, X=x)
-            y_arg = () if self.unsupervised else (y,)
-            if not hasattr(self.estimator, mode):
-                # Predictors
-                self.estimator.fit(x, *y_arg, **self.kwargs)
-                self.intermediate = self.estimator.predict(x, **self.kwargs)
-            else:
-                # Transformers
-                self.intermediate = self.estimator.fit_transform(x, *y_arg, **self.kwargs)
+            estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
+            y_arg = () if unsupervised else (y,)
+            result = estimator.fit_transform(x, *y_arg, **kwargs)
         elif mode == "predict":
-            if not hasattr(self.estimator, mode):
-                # Transformers
-                self.intermediate = self.estimator.transform(x, **self.kwargs)
-            else:
-                # Predictors
-                self.intermediate = self.estimator.predict(x, **self.kwargs)
+            result = estimator.transform(x, **kwargs)
         else:
-            raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
+            raise ValueError(f"Mode {mode} not supported for TransformerOp.")
+    if converted:
+        result = PlDataFrame(result)
+    return result, estimator
 
 
 class ChoiceOp(Op):
@@ -248,7 +388,11 @@ class ChoiceOp(Op):
             ) for combi in self.outcome_names]
 
     def update_name(self):
-        self.name = "  |  ".join(self.make_outcome_names())
+        opts = " | ".join(self.make_outcome_names())
+        max_len = 50
+        if len(opts) > max_len:
+            opts = opts[:max_len] + "..."
+        self.name = opts
 
     def clone(self):
         new_op = ChoiceOp(outcome_names=self.outcome_names, append_choice_name=False)
@@ -287,6 +431,8 @@ class MethodCallOp(Op):
     def process(self, mode: str, environment: dict):
         iter_ins = iter(self.inputs)
         _obj = next(iter_ins).intermediate
+        if isinstance(_obj, PlDataFrame) or isinstance(_obj, PlSeries):
+            _obj = _obj.to_pandas()
         _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
         _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
         self.intermediate = _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
@@ -294,7 +440,9 @@ class MethodCallOp(Op):
 class CallOp(Op):
     fields = ["func", "args", "kwargs"]
     
-    def __init__(self, name: str = "CallOp", func=None, args=None, kwargs=None):
+    def __init__(self, name=None, func=None, args=None, kwargs=None):
+        if name is None:
+            name = "CallOp" if func is None else func.__name__
         super().__init__(name=name)
         if kwargs is not None:
             self.check_kwargs(kwargs)
@@ -319,19 +467,30 @@ class GetAttrOp(Op):
         if self.is_dataframe_op:
             self.intermediate = self.inputs[0].intermediate
             for attr in self.attr_name:
-                self.intermediate = self.intermediate.__getattribute__(attr)
+                self.intermediate = getattr(self.intermediate, attr)
         else:
-            self.intermediate = self.inputs[0].intermediate.__getattribute__(self.attr_name)
+            self.intermediate = getattr(self.inputs[0].intermediate, self.attr_name)
 
 class GetItemOp(Op):
     fields = ["key"]
     
     def __init__(self, key=None):
-        super().__init__(name=str(key) if key is not None else '?')
-        self.key = key
+        self.key = DATA_OP_PLACEHOLDER if isinstance(key, DataOp) else key
+        name = key._skrub_impl.__class__.__name__ if isinstance(key, DataOp) else str(self.key)
+        super().__init__(name=name)
+
 
     def process(self, mode: str, environment: dict):
-        self.intermediate = self.inputs[0].intermediate[self.key]
+        key = self.key
+        if key is DATA_OP_PLACEHOLDER:
+            key = self.inputs[1].intermediate
+        self.intermediate = self.inputs[0].intermediate[key]
+
+    def simple_hash(self):
+        if isinstance(self.key, str) or isinstance(self.key, list):
+            return stable_hash(self.key)
+        else:
+            raise NotImplementedError(f"Hashing is nt implemented for key type: {type(self.key)}")
 
 class BinOp(Op):
     fields = ["op", "left", "right"]
@@ -343,7 +502,7 @@ class BinOp(Op):
         self.right = DATA_OP_PLACEHOLDER if isinstance(right, DataOp) else right
 
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, cv_id = None):
         i = 0
         if self.left is DATA_OP_PLACEHOLDER:
             left = self.inputs[i].intermediate
@@ -411,14 +570,20 @@ def as_op(data_op: DataOp):
     elif isinstance(impl, SkrubBinOp):
         return_op = BinOp(op=impl.op, left=impl.left, right=impl.right)
     elif isinstance(impl, Apply):
-        return_op = EstimatorOp(
+        estimator_class = EstimatorOp if hasattr(impl.estimator, "predict") else TransformerOp
+        return_op = estimator_class(
             y=impl.y, 
             estimator=impl.estimator, 
             cols=impl.cols, 
             how=impl.how, 
             allow_reject=impl.allow_reject, 
             unsupervised=impl.unsupervised, 
-            kwargs=impl.kwargs if hasattr(impl, "kwargs") else {})
+            kwargs= {})
+    elif isinstance(impl, Var):
+        return_op = VariableOp(name=impl.name, value=impl.value)
+    elif isinstance(impl, Concat):
+        from stratum.logical_optimizer._dataframe_ops import ConcatOp
+        return_op = ConcatOp(first=impl.first, others=impl.others, axis=impl.axis)
     else:
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
 

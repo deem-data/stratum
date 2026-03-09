@@ -2,9 +2,11 @@ from __future__ import annotations
 from collections import deque
 from typing import Iterator
 from graphviz import Digraph
-from stratum.logical_optimizer._ops import Op, ChoiceOp
+from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, Op, ChoiceOp
 from stratum._config import get_config
 import os
+
+bfs = False
 
 
 def replace_op_in_outputs(op: Op, replacement: Op):
@@ -110,18 +112,42 @@ def topological_iterator(sink: Op) -> Iterator[Op]:
         else:
             for in_op in op.inputs:
                 if in_op not in indegree:
-                    indegree[in_op] = 0 if not in_op.inputs else len(in_op.inputs)
+                    if in_op is DATA_OP_PLACEHOLDER:
+                        raise RuntimeError(f"Encountered DATA_OP_PLACEHOLDER as input of op {op}, which should not happen.")
+                    curr_indegree = len(in_op.inputs) + (0 if in_op.additional_inputs is None else len(in_op.additional_inputs))
+                    indegree[in_op] = curr_indegree
                     queue1.append(in_op)
 
     # now we can do topological traversal
-    while queue2:
-        op = queue2.popleft()
+    if bfs:
+        return topological_iterator_bfs(sink, queue2, indegree)
+    else:
+        return topological_iterator_dfs(sink, queue2, indegree)
+
+def topological_iterator_bfs(sink: Op, queue, indegree) -> Iterator[Op]:
+    while queue:
+        op = queue.popleft()
         yield op
-        for out_op in op.outputs:
+        op_outputs = op.outputs + (op.additional_outputs if op.additional_outputs is not None else [])
+        for out_op in op_outputs:
+            if out_op not in indegree:
+                raise RuntimeError(f"Encountered op {out_op} which should not exist in the DAG. Probably due to a buggy rewrite, which did not updated the its inputs / outputs correctly.")
             indegree[out_op] -= 1
             if indegree[out_op] == 0:
-                queue2.append(out_op)
+                queue.append(out_op)
 
+def topological_iterator_dfs(sink: Op, queue, indegree) -> Iterator[Op]:
+    stack = list(queue)
+    while stack:
+        op = stack.pop()
+        yield op
+        op_outputs = op.outputs + (op.additional_outputs if op.additional_outputs is not None else [])
+        for out_op in op_outputs:
+            if out_op not in indegree:
+                raise RuntimeError(f"Encountered op {out_op} which should not exist in the DAG. Probably due to a buggy rewrite, which did not updated the its inputs / outputs correctly.")
+            indegree[out_op] -= 1
+            if indegree[out_op] == 0:
+                stack.append(out_op)
 
 def show_graph(sink: Op, filename: str = 'plan'):  
     """Show the runtime plan of the DataOp DAG."""
@@ -134,6 +160,9 @@ def show_graph(sink: Op, filename: str = 'plan'):
             dot.node(str(id(current_op)), name)
             for outputs in current_op.outputs:
                 dot.edge(str(id(current_op)), str(id(outputs)))
+            if current_op.additional_outputs is not None:
+                for additional_output in current_op.additional_outputs:
+                    dot.edge(str(id(current_op)), str(id(additional_output)), color='blue')
         filename = "graphs/" + filename
         # make sure folder exists
         os.makedirs(os.path.dirname(filename), exist_ok=True)

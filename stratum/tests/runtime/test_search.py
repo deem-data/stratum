@@ -39,7 +39,7 @@ class SearchTest(RuntimeTest):
         search_stratum, preds = grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
 
         search = y.skb.make_grid_search(cv=cv, fitted=True,scoring="neg_mean_squared_error")
-        assert(np.allclose(search.results_["mean_test_score"], search_stratum.results_["scores"]))
+        assert(np.allclose(search.results_["mean_test_score"]*-1, search_stratum.results_["scores"]))
 
 
 
@@ -60,6 +60,17 @@ class SearchTest(RuntimeTest):
 
         try:
             with skrub.config(stats=20):
+                grid_search(end, return_predictions=True)
+            self.fail("Expected RuntimeError")
+        except RuntimeError as e:
+            self.assertEqual("X and y nodes not found in the DAG",str(e))
+
+    def test_search_with_no_y_parrel_scheduler(self):
+        start = skrub.as_data_op(True)
+        end = start.skb.apply_func(lambda a: a).skb.mark_as_X()
+
+        try:
+            with skrub.config(stats=20, scheduler_parallelism="threading"):
                 grid_search(end, return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
@@ -122,8 +133,8 @@ class SearchTest(RuntimeTest):
         out = stdout.getvalue()
         out = out.split("\n")
         self.assertIn("Heavy hitters", out[2])
-        self.assertIn("CallOp(<lambda>)", out[4])
-        assert(out[4].split(" ")[-1] == "10")
+        self.assertIn("CallOp(<lambda>)", out[5])
+        assert(out[5].split(" ")[-1] == "10")
 
 
     def test_fused_attr(self):
