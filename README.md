@@ -1,6 +1,7 @@
 # Stratum
 
-[![CI](https://github.com/deem-data/stratum/actions/workflows/test.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/test.yml)
+[![Python CI](https://github.com/deem-data/stratum/actions/workflows/python_tests.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/python_tests.yml)
+[![Rust CI](https://github.com/deem-data/stratum/actions/workflows/rust_tests.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/rust_tests.yml)
 [![codecov](https://codecov.io/gh/deem-data/stratum/graph/badge.svg?token=QQDTC0RXUN)](https://codecov.io/gh/deem-data/stratum)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
