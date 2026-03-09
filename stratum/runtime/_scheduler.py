@@ -16,15 +16,22 @@ from concurrent.futures import ThreadPoolExecutor
 import polars as pl
 from stratum._config import FLAGS
 import os
+from dataclasses import dataclass
 
 import logging
 
 from stratum.runtime._hash_utils import stable_hash
 logger = logging.getLogger(__name__)
 
-show_memory_usage = False
-stratum_gc = True
-stratum_malloc_trim = False
+
+@dataclass
+class _SchedulerFlags:
+    show_memory_usage: bool = False
+    stratum_gc: bool = True
+    stratum_malloc_trim: bool = False
+
+SchedulerFlags = _SchedulerFlags()
+
 
 _libc = None
 if sys.platform == "linux":
@@ -81,7 +88,7 @@ class Scheduler:
         self.t0 = t0 if t0 is not None else perf_counter()
 
     def run_gc(self):
-        if stratum_gc:
+        if SchedulerFlags.stratum_gc:
             freed_any = False
             kv = list(self.intermediate_dependencies.items())
             for k, v in kv:
@@ -91,7 +98,7 @@ class Scheduler:
                     del self.intermediate_dependencies[k]
                     freed_any = True
 
-            if freed_any and stratum_malloc_trim:
+            if freed_any and SchedulerFlags.stratum_malloc_trim:
                 gc.collect()
                 _malloc_trim()
 
@@ -101,7 +108,7 @@ class Scheduler:
         # default to scikit-learn's CV
         cv = check_cv(cv)
 
-        if show_memory_usage:
+        if SchedulerFlags.show_memory_usage:
             memory_usage = measure_memory_usage()
             logger.debug(f"Memory usage at start of grid search: {memory_usage}")
 
@@ -147,7 +154,7 @@ class Scheduler:
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
-        if stratum_gc:
+        if SchedulerFlags.stratum_gc:
             for in_ in op.inputs:
                 self.intermediate_dependencies[in_] -= 1
         logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
@@ -182,7 +189,7 @@ class Scheduler:
         self.run_gc()
         self.intermediate_dependencies[op] = len(op.outputs)
 
-        if show_memory_usage:
+        if SchedulerFlags.show_memory_usage:
             gc.collect()
             memory_usage = measure_memory_usage()
             logger.debug(f"[{(perf_counter() - self.t0):.2f}s] Memory usage after processing {op}: {memory_usage}")
@@ -222,6 +229,8 @@ class SequentialScheduler(Scheduler):
 
         train_index, test_index = train_test_split(range(len(split_op.inputs[0].intermediate)), test_size=test_size, random_state=seed)
         split_op.indices = train_index
+        for in_ in split_op.inputs:
+            self.intermediate_dependencies[in_] *= 2
         self.compute(self.pos_split_op)
         split_op.indices = test_index
         pred, _ = self.compute(self.pos_split_op, mode="predict")

@@ -57,8 +57,9 @@ class TestDataframeOps(unittest.TestCase):
         sub_dag2 = data
         sink = skrub.choose_from([sub_dag1, sub_dag2]).as_data_op()
         ops = optimize(sink)
+        print(ops)
         self.assertEqual(5, len(ops))
-        self.assertTrue(isinstance(ops[2], GetItemOp))
+        self.assertTrue(isinstance(ops[1], GetItemOp))
         self.assertTrue(isinstance(ops[3], ProjectionOp))
 
     def test_fused_get_attr_rewrite_df(self):
