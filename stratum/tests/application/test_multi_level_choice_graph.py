@@ -19,6 +19,7 @@ from stratum.logical_optimizer._optimize import optimize
 import polars as pl
 import logging
 logging.basicConfig(level=logging.DEBUG)
+from stratum.runtime._scheduler import SchedulerFlags
 class TargetEncoder(BaseEstimator, TransformerMixin):
     
     def fit(self, X, y=None):
@@ -128,6 +129,28 @@ def make_data(n: int = 1000, seed: int = 42):
     return df
 
 class TestMultiLevelChoiceGraph(unittest.TestCase):
+    expected_results = pl.DataFrame({
+        "id": [
+            "m:elastic, pre:2",
+            "m:elastic, pre:1",
+            "m:Ridge, pre:2",
+            "m:Ridge, pre:1",
+            "m:xgb, pre:2",
+            "m:lgbm, pre:2",
+            "m:lgbm, pre:1",
+            "m:xgb, pre:1"
+        ],
+        "scores": [
+            -0.000779,
+            -0.028774,
+            -0.021469,
+            -0.040625,
+            -0.156263,
+            -0.174555,
+            -0.172825,
+            -0.251869
+        ]
+    })
 
     def test_application(self):
         tmp_path = tempfile.mkdtemp()
@@ -137,31 +160,10 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
         scorer = make_scorer(r2_score)
         cv = KFold(n_splits=2, shuffle=True, random_state=42)
-        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, scheduler_parallelism="threading", stats=20):
+        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, scheduler_parallelism=None, stats=20):
             search = preds.skb.make_grid_search(fitted=True, cv = cv, scoring=scorer)
         print(search.results_)
-        expected_results = pl.DataFrame({
-            "id": [
-                "m:elastic, pre:2",
-                "m:elastic, pre:1",
-                "m:Ridge, pre:2",
-                "m:Ridge, pre:1",
-                "m:xgb, pre:2",
-                "m:lgbm, pre:2",
-                "m:lgbm, pre:1",
-                "m:xgb, pre:1"
-            ],
-            "scores": [
-                -0.000779,
-                -0.028774,
-                -0.021469,
-                -0.040625,
-                -0.156263,
-                -0.174555,
-                -0.172825,
-                -0.251869
-            ]
-        })
+
 
     def run_application(self, sched_par: str = None):
         tmp_path = tempfile.mkdtemp()
@@ -192,6 +194,7 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         )
 
     def test_application_threading(self):
+        SchedulerFlags.stratum_gc = False
         actual_results = self.run_application(sched_par="threading")
         # Convert to pandas for comparison
         # TODO: pre:2 is non-deterministic right now, so we need to filter it out
@@ -205,9 +208,10 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
             atol=1e-6,
             check_dtype=False
         )
-
+        SchedulerFlags.stratum_gc = True
     
     def test_application_process(self):
+        SchedulerFlags.stratum_gc = False
         actual_results = self.run_application(sched_par="process")
         # Convert to pandas for comparison
         # TODO: pre:2 is non-deterministic right now, so we need to filter it out
@@ -221,8 +225,10 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
             atol=1e-6,
             check_dtype=False
         )
+        SchedulerFlags.stratum_gc = True
 
     def test_application_auto(self):
+        SchedulerFlags.stratum_gc = False
         actual_results = self.run_application(sched_par="auto")
         # Convert to pandas for comparison
         # TODO: pre:2 is non-deterministic right now, so we need to filter it out
@@ -236,6 +242,6 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
             atol=1e-6,
             check_dtype=False
         )
-
+        SchedulerFlags.stratum_gc = True
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ dependencies = [
     "graphviz",
     "pyarrow>=22.0.0",
     "joblib",
+    "psutil",
 ]
 
 [project.optional-dependencies]
