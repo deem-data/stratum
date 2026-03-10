@@ -2,13 +2,44 @@
 import unittest
 import stratum as skrub
 from stratum.logical_optimizer._optimize import optimize, OptConfig, choice_unrolling
-from stratum.logical_optimizer._op_utils import show_graph, clone_sub_dag
+from stratum.logical_optimizer._op_utils import show_graph, clone_sub_dag, topological_iterator, FLAGS
 from stratum._config import config
 graph = False
 
 class TestOpUtils(unittest.TestCase):
     def setUp(self):
-        pass
+        t1 = skrub.as_data_op(1)
+        t2 = t1 + 5
+        t3 = t2 - 3
+        t4 = t1 + 2
+        t5 = t4 + t3
+        self.dag = t5
+
+    def test_iterator_bfs(self):
+        FLAGS.bfs = True
+        try:
+            ops = optimize(self.dag)
+        finally:
+            FLAGS.bfs = False
+        self.assertEqual(ops[0].value, 1)
+        self.assertEqual(ops[1].op.__name__,"add")
+        self.assertEqual(ops[1].right, 5)
+        self.assertEqual(ops[2].op.__name__, "add")
+        self.assertEqual(ops[2].right, 2)
+        self.assertEqual(ops[3].op.__name__, "sub")
+        self.assertEqual(ops[3].right, 3)
+
+    def test_iterator_dfs(self):
+        ops = optimize(self.dag)
+        self.assertEqual(ops[0].value, 1)
+        self.assertEqual(ops[1].op.__name__,"add")
+        self.assertEqual(ops[1].right, 2)
+        self.assertEqual(ops[2].op.__name__, "add")
+        self.assertEqual(ops[2].right, 5)
+        self.assertEqual(ops[3].op.__name__, "sub")
+        self.assertEqual(ops[3].right, 3)
+
+
 
     def run_clone_sub_dag(self, ops: list, clone_position: int, graph: bool = False, new_root_op = None, stop_at_op = None, run_assertions = True):
         clone_target = ops[clone_position]
