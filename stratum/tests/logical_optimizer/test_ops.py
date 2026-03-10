@@ -49,8 +49,9 @@ class TestOpCloning(unittest.TestCase):
         pred = pred.skb.apply_func(lambda x,a, b: x, 1, b=1)
         choice = skrub.choose_from([pred], name="choice").as_data_op()
         out = choice.empty
-        ops = optimize(out)
-
+        with skrub.config(fast_dataops_convert=False):
+            ops = optimize(out)
+        print(ops)
         try:
             ops[0].clone()
         except ValueError as e:

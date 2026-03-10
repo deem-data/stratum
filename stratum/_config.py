@@ -28,9 +28,10 @@ class _Flags:
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
     scheduler: bool =  False
     stats: int | None = None # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
-    open_graph: bool = True,
+    open_graph: bool = True
     DEBUG: bool = False
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
+    fast_dataops_convert: bool = True
 
 FLAGS = _Flags()
 
@@ -42,7 +43,8 @@ def set_config(rust_backend: bool | None = None,
            scheduler: bool | None = None,
            open_graph: bool | None = None,
            DEBUG: bool | None = None,
-           force_polars: bool | None = None) -> None:
+           force_polars: bool | None = None,
+           fast_dataops_convert: bool = True) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -102,6 +104,8 @@ def set_config(rust_backend: bool | None = None,
     if force_polars is not None:
         FLAGS.force_polars = bool(force_polars)
         os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
+    if fast_dataops_convert is not None:
+        FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
 
 
 def get_config() -> dict:
@@ -116,6 +120,7 @@ def get_config() -> dict:
         "open_graph": FLAGS.open_graph,
         "DEBUG" : FLAGS.DEBUG,
         "force_polars": FLAGS.force_polars,
+        "fast_dataops_convert": FLAGS.fast_dataops_convert,
     }
 
 @contextmanager

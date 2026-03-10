@@ -1,13 +1,13 @@
-from numpy import True_
 from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque
 from ._cse import apply_cse
-from ._dataframe_ops import rewrite_dataframe_ops, add_splitting_op
+from ._dataframe_ops import add_splitting_op
 from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops
 from ._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
+from stratum.utils._skrub_graph import build_graph
 from time import perf_counter
 import logging
 from stratum._config import FLAGS
@@ -63,12 +63,8 @@ def optimize(dag: DataOp, config: OptConfig = None):
     t0 = perf_counter()
     if config is None:
         config = OptConfig()
-        
-    graph = _Graph().run(dag)
-    nodes = graph["nodes"]
-    parents = graph["parents"]
-    children = graph["children"]
 
+    children, nodes, parents = get_dataops_graph(dag)
     order = topological_traverse(nodes, parents, children)
     if config.cse:
         apply_cse(dag, nodes, order, parents)
@@ -100,15 +96,14 @@ def optimize(dag: DataOp, config: OptConfig = None):
 
 def convert_to_ops(dag: DataOp) -> Op:
     """ Convert a Skrub DataOp DAG to a stratum's logical IR (Op DAG)"""
-    graph = _Graph().run(dag)
-    nodes = graph["nodes"]
-    parents = graph["parents"]
-    children = graph["children"]
-
+    children, nodes, parents = get_dataops_graph(dag)
     order = topological_traverse(nodes, parents, children)
     sink_id = order[-1]
+
     # make logical IR:
+    # we start by making unconnected ops
     ids_to_ops = {node: as_op(nodes[node]) for node in order}
+    # we then connect the ops to a graph
     for node in order:
         op = ids_to_ops[node]
         if isinstance(op, ImplOp) and isinstance(op.skrub_impl, SubsamplePreviews):
@@ -130,6 +125,22 @@ def convert_to_ops(dag: DataOp) -> Op:
             else:
                 op.inputs = [ids_to_ops[input] for input in children.get(node, [])]
     return ids_to_ops[sink_id]
+
+
+def get_dataops_graph(dag: DataOp) -> tuple[
+    dict[int, Any] | dict[int, list[int]], dict[int, Any] | dict[int, list[int]], dict[int, Any] | dict[
+        int, list[int]]]:
+    t0_convert = perf_counter()
+    if FLAGS.fast_dataops_convert:
+        g = build_graph(dag)
+    else:
+        g = _Graph().run(dag)
+    nodes = g["nodes"]
+    parents = g["parents"]
+    children = g["children"]
+    t1_convert = perf_counter()
+    logger.info(f"Conversion dag took {t1_convert - t0_convert:.2f} seconds")
+    return children, nodes, parents
 
 
 def convert_handle_choice(node, op, ids_to_ops, children):
