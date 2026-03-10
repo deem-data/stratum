@@ -49,7 +49,7 @@ class TestOpCloning(unittest.TestCase):
         pred = pred.skb.apply_func(lambda x,a, b: x, 1, b=1)
         choice = skrub.choose_from([pred], name="choice").as_data_op()
         out = choice.empty
-        with skrub.config(fast_dataops_convert=False):
+        with skrub.config(fast_dataops_convert=True):
             ops = optimize(out)
         print(ops)
         try:
