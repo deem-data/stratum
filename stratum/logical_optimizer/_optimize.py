@@ -127,9 +127,7 @@ def convert_to_ops(dag: DataOp) -> Op:
     return ids_to_ops[sink_id]
 
 
-def get_dataops_graph(dag: DataOp) -> tuple[
-    dict[int, Any] | dict[int, list[int]], dict[int, Any] | dict[int, list[int]], dict[int, Any] | dict[
-        int, list[int]]]:
+def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
     t0_convert = perf_counter()
     if FLAGS.fast_dataops_convert:
         g = build_graph(dag)
