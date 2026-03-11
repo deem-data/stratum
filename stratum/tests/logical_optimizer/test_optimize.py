@@ -1,3 +1,4 @@
+from stratum.logical_optimizer._op_utils import topological_iterator
 from stratum.logical_optimizer._optimize import OptConfig, optimize
 import stratum as skrub
 import pandas as pd
@@ -27,7 +28,7 @@ class MyTestCase(unittest.TestCase):
         X2 = X1.assign(
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
-        out = optimize(X2, OptConfig(cse=True))
+        out = list(topological_iterator(optimize(X2, OptConfig(cse=True))))
         self.assertTrue(out[0].outputs[0] is out[1])
         self.assertTrue(len(out[0].inputs) == 0)
         

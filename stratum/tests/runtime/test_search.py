@@ -39,7 +39,7 @@ class SearchTest(RuntimeTest):
         search_stratum, preds = grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
 
         search = y.skb.make_grid_search(cv=cv, fitted=True,scoring="neg_mean_squared_error")
-        assert(np.allclose(search.results_["mean_test_score"], search_stratum.results_["scores"]))
+        assert(np.allclose(search.results_["mean_test_score"]*-1, search_stratum.results_["scores"]))
 
 
 
@@ -122,8 +122,8 @@ class SearchTest(RuntimeTest):
         out = stdout.getvalue()
         out = out.split("\n")
         self.assertIn("Heavy hitters", out[2])
-        self.assertIn("CallOp(<lambda>)", out[4])
-        assert(out[4].split(" ")[-1] == "10")
+        self.assertIn("CallOp(<lambda>)", out[5])
+        assert(out[5].split(" ")[-1] == "10")
 
 
     def test_fused_attr(self):
