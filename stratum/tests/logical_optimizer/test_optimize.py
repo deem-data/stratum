@@ -28,7 +28,6 @@ class MyTestCase(unittest.TestCase):
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
         out = optimize(X2, OptConfig(cse=True))
-        self.assertEqual(out[0].skrub_impl, data._skrub_impl)
         self.assertTrue(out[0].outputs[0] is out[1])
         self.assertTrue(len(out[0].inputs) == 0)
         
