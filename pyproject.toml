@@ -47,6 +47,7 @@ dev = [
     "urllib3>=2.6.3",
     "pillow>=12.1.1",
     "nbconvert>=7.17.0",
+    "fonttools>=4.60.2"
 ]
 
 [project.urls]
