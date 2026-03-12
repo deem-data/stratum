@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Python 3.10 ABI for wide wheel compatibility on 3.10.x
-pyo3 = { version = ">=0.21,<0.24", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = ">=0.24.2", features = ["extension-module", "abi3-py310"] }
 numpy = { version = ">=0.21,<0.25" }
 ahash = "0.8.12"
 anyhow = "1.0.99"
