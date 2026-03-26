@@ -97,3 +97,7 @@ benchmarks/**/input/
 *.pdf
 *.ipynb
 examples/
+
+# code agents
+.cursor
+.claude
