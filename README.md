@@ -1,4 +1,9 @@
-# Stratum
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="doc/repository-card-dark.png">
+    <img src="doc/repository-card.png" alt="Stratum logo" width="50%">
+  </picture>
+</p>
 
 [![Python CI](https://github.com/deem-data/stratum/actions/workflows/python_tests.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/python_tests.yml)
 [![Rust CI](https://github.com/deem-data/stratum/actions/workflows/rust_tests.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/rust_tests.yml)
