@@ -3,10 +3,11 @@ from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque
 from ._cse import apply_cse
-from ._dataframe_ops import add_splitting_op
-from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops
+from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops,add_splitting_op
+from ._numeric_ops import to_numeric_op
 from ._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
+from ._algebraic_rewrites import algebraic_rewrites
 from stratum.utils._skrub_graph import build_graph
 from time import perf_counter
 import logging
@@ -45,10 +46,12 @@ def apply_cse_on_skrub_ir(dag: DataOp):
 
 class OptConfig():
     # TODO we should move this class to the _config.py file
-    def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True):
+    def __init__(self, cse: bool = True, unroll_choices: bool = True, dataframe_ops: bool = True, numeric_ops: bool = True, algebraic_rewrites: bool = True):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
+        self.numeric_ops = numeric_ops
+        self.algebraic_rewrites = algebraic_rewrites
 
 def _debug_show_graph(sink: Op, name: str):
     if FLAGS.DEBUG:
@@ -94,6 +97,15 @@ def optimize(dag_sink: DataOp, config: OptConfig = None):
         _debug_show_graph(sink, "dataframe_rewrite")
         t1_dataframe = perf_counter()
         logger.info(f"Dataframe rewrite took {t1_dataframe - t0_dataframe:.2f} seconds")
+
+    # Parsing of numeric ops
+    if config.numeric_ops:
+        t0_numeric = perf_counter()
+        sink = to_numeric_op(sink)
+        _debug_show_graph(sink, "to_numeric")
+        t1_numeric = perf_counter()
+        logger.info(f"To numeric conversion took {t1_numeric - t0_numeric:.2f} seconds")
+
     # Unrolling of choices to a dag wit only a single choice op at the end
     if config.unroll_choices:
         t0_choices = perf_counter()
@@ -103,6 +115,12 @@ def optimize(dag_sink: DataOp, config: OptConfig = None):
         logger.info(f"Choices unrolling took {t1_choices - t0_choices:.2f} seconds")
 
     # Final optimized DAG
+    if config.algebraic_rewrites:
+        t0_algebraic = perf_counter()
+        sink = algebraic_rewrites(sink)
+        _debug_show_graph(sink, "algebraic_rewrite")
+        t1_algebraic = perf_counter()
+        logger.info(f"Algebraic rewrite took {t1_algebraic - t0_algebraic:.2f} seconds")
 
     t1 = perf_counter()
     logger.info(f"Optimization took in total {t1 - t0:.2f} seconds")

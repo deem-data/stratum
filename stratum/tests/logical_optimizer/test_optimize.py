@@ -20,8 +20,8 @@ class MyTestCase(unittest.TestCase):
             ]
         })
 
-    def test_optimize(self):
-        data = skrub.var("data", self.df)
+    def test_optimize1(self):
+        data = skrub.var("data", self.df).skb.subsample(3)
         X = data[["x", "datetime"]].skb.mark_as_X()
 
         X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
@@ -31,6 +31,18 @@ class MyTestCase(unittest.TestCase):
         out = list(topological_iterator(optimize(X2, OptConfig(cse=True))))
         self.assertTrue(out[0].outputs[0] is out[1])
         self.assertTrue(len(out[0].inputs) == 0)
+
+    def test_optimize2(self):
+        data = skrub.var("data", self.df)
+        X = data[["x", "datetime"]].skb.mark_as_X()
+
+        X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
+        X2 = X1.assign(
+            year=X1["datetime"].dt.year,
+            month=X1["datetime"].dt.month)
+        config = OptConfig(cse=False, algebraic_rewrites=False, numeric_ops=False, dataframe_ops=False, unroll_choices=False)
+        out = list(topological_iterator(optimize(X2, config)))
+        self.assertEqual(len(out), 10)
         
     def test_more_ops(self):
         data = skrub.as_data_op(self.df)
