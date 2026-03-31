@@ -1,6 +1,6 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/repository-card-dark.png">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/stratum_logo_dark.png">
     <img src="docs/repository-card.png" alt="Stratum logo" width="50%">
   </picture>
 </p>

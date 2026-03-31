@@ -12,11 +12,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 DIR = os.path.dirname(__file__)
-ICON_PATH = os.path.join(DIR, "stratum_icon.png")
+ICON_PATH = os.path.join(DIR, "stratum_icon_high_resolution.png")
 
 CARD_OUTPUT = os.path.join(DIR, "repository-card.png")
-CARD_DARK_OUTPUT = os.path.join(DIR, "repository-card-dark.png")
+LOGO_DARK_OUTPUT = os.path.join(DIR, "stratum_logo_dark.png")
 LOGO_OUTPUT = os.path.join(DIR, "stratum_logo.png")
+LOGO_LARGE_OUTPUT = os.path.join(DIR, "stratum_logo_large.png")
+LOGO_DARK_LARGE_OUTPUT = os.path.join(DIR, "stratum_logo_dark_large.png")
 
 CARD_W, CARD_H = 1280, 640
 TEXT = "stratum"
@@ -76,7 +78,7 @@ def _draw_card(icon, font, text_w, text_h, text_y_off, *, bg, text_color):
     icon_y = (CARD_H - icon.height) // 2
     img.paste(icon, (start_x, icon_y), icon)
 
-    text_y = (CARD_H - text_h) // 2 - text_y_off
+    text_y = (CARD_H - text_h) // 2 - text_y_off - int(CARD_H * 0.02)
     draw.text((start_x + icon.width + GAP, text_y), TEXT,
               fill=text_color, font=font)
     return img
@@ -90,12 +92,25 @@ def make_card(icon, font, text_w, text_h, text_y_off):
     print(f"Saved {CARD_OUTPUT} ({CARD_W}x{CARD_H})")
 
 
-def make_card_dark(icon, font, text_w, text_h, text_y_off):
-    """Transparent card with white text for dark themes."""
-    img = _draw_card(icon, font, text_w, text_h, text_y_off,
-                     bg=None, text_color=TEXT_COLOR_DARK)
-    img.save(CARD_DARK_OUTPUT, "PNG")
-    print(f"Saved {CARD_DARK_OUTPUT} ({CARD_W}x{CARD_H})")
+def make_logo_dark(icon, font, text_w, text_h, text_y_off):
+    """Transparent logo with white text for dark themes, cropped tight."""
+    canvas_w = icon.width + GAP + text_w + 20
+    canvas_h = max(icon.height, text_h) + 20
+    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    icon_y = (canvas_h - icon.height) // 2
+    img.paste(icon, (0, icon_y), icon)
+
+    text_y = (canvas_h - text_h) // 2 - text_y_off - int(canvas_h * 0.05)
+    draw.text((icon.width + GAP, text_y), TEXT, fill=TEXT_COLOR_DARK, font=font)
+
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+
+    img.save(LOGO_DARK_OUTPUT, "PNG")
+    print(f"Saved {LOGO_DARK_OUTPUT} ({img.width}x{img.height})")
 
 
 def make_logo(icon, font, text_w, text_h, text_y_off):
@@ -108,7 +123,7 @@ def make_logo(icon, font, text_w, text_h, text_y_off):
     icon_y = (canvas_h - icon.height) // 2
     img.paste(icon, (0, icon_y), icon)
 
-    text_y = (canvas_h - text_h) // 2 - text_y_off
+    text_y = (canvas_h - text_h) // 2 - text_y_off - int(canvas_h * 0.05)
     draw.text((icon.width + GAP, text_y), TEXT, fill=TEXT_COLOR, font=font)
 
     img = _clean_light_pixels(img)
@@ -159,14 +174,59 @@ def _clean_light_pixels(img):
     return Image.fromarray(out.astype(np.uint8), "RGBA")
 
 
+def _make_logo_impl(icon, font, gap, text_w, text_h, text_y_off,
+                    *, text_color, output_path, clean_light=False):
+    """Shared implementation for all logo variants."""
+    canvas_w = icon.width + gap + text_w + 20
+    canvas_h = max(icon.height, text_h) + 20
+    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    icon_y = (canvas_h - icon.height) // 2
+    img.paste(icon, (0, icon_y), icon)
+
+    text_y = (canvas_h - text_h) // 2 - text_y_off - int(canvas_h * 0.05)
+    draw.text((icon.width + gap, text_y), TEXT, fill=text_color, font=font)
+
+    if clean_light:
+        img = _clean_light_pixels(img)
+
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+
+    img.save(output_path, "PNG")
+    print(f"Saved {output_path} ({img.width}x{img.height})")
+
+
+def load_icon_large():
+    """Load the source icon at full resolution."""
+    return Image.open(ICON_PATH).convert("RGBA")
+
+
 def main():
     icon = load_icon()
     font = load_font(FONT_SIZE, bold=True)
     text_w, text_h, text_y_off = measure_text(font)
 
     make_card(icon, font, text_w, text_h, text_y_off)
-    make_card_dark(icon, font, text_w, text_h, text_y_off)
+    make_logo_dark(icon, font, text_w, text_h, text_y_off)
     make_logo(icon, font, text_w, text_h, text_y_off)
+
+    # Large logos using full-resolution icon
+    icon_large = load_icon_large()
+    scale = icon_large.height / icon.height
+    font_size_large = int(FONT_SIZE * scale)
+    gap_large = int(GAP * scale)
+    font_large = load_font(font_size_large, bold=True)
+    tw_l, th_l, ty_off_l = measure_text(font_large)
+
+    _make_logo_impl(icon_large, font_large, gap_large, tw_l, th_l, ty_off_l,
+                    text_color=TEXT_COLOR, output_path=LOGO_LARGE_OUTPUT,
+                    clean_light=True)
+    _make_logo_impl(icon_large, font_large, gap_large, tw_l, th_l, ty_off_l,
+                    text_color=TEXT_COLOR_DARK, output_path=LOGO_DARK_LARGE_OUTPUT,
+                    clean_light=False)
 
 
 if __name__ == "__main__":
