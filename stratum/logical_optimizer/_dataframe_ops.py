@@ -188,6 +188,9 @@ class DatetimeConversionOp(ProjectionOp):
 class GetAttrProjectionOp(Op):
     fields = ["attr_name"]
 
+    # NOTE: Polars and Pandas differ in semantics for some datetime attributes:
+    #   - dayofweek: Pandas uses Monday=0, Polars weekday() uses Monday=1 (ISO 8601)
+    #   - dayofyear: Pandas is 1-indexed, Polars ordinal_day() is also 1-indexed (same)
     POLARS_ATTR_NAME_MAP = {"dayofweek": "weekday","dayofyear": "ordinal_day"}
 
     def __init__(self, attr_name: list[str] | str = None, inputs: list[Op] = None, outputs: list[Op] = None):
@@ -227,6 +230,7 @@ class GetAttrProjectionOp(Op):
             for attr in self.attr_name:
                 tmp = getattr(tmp, attr)
             self.intermediate = tmp
+
 class GroupedDataframeOp(Op):
     def __init__(self, ops: list[Op]):
         super().__init__(name="GROUPED_DATAFRAME", is_X=False, is_y=False)
