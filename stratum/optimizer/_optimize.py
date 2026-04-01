@@ -3,16 +3,15 @@ from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque
 from ._cse import apply_cse
-from stratum.optimizer.ir._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops,add_splitting_op
-from stratum.optimizer.ir._numeric_ops import to_numeric_op
-from stratum.optimizer.ir._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
+from .ir._dataframe_ops import extract_dataframe_op, add_splitting_op
+from .ir._numeric_ops import extract_numeric_op
+from .ir._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
-from ._algebraic_rewrites import algebraic_rewrites
+from ._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
 from stratum.utils._skrub_graph import build_graph
 from time import perf_counter
 import logging
 from stratum._config import FLAGS
-from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
 
 logger = logging.getLogger(__name__)
 EVAL_OP_ENABLED = False
@@ -65,85 +64,99 @@ class OptConfig():
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
 
-def _debug_show_graph(sink: Op, name: str):
+def _debug_show_graph(root: Op, name: str):
     if FLAGS.DEBUG:
-        show_graph(sink, name)
+        show_graph(root, name)
 
-def optimize(dag_sink: DataOp, config: OptConfig = None):
-    """ Entry point for the logical optimizer. Takes a Skrub DataOp DAG, applies logical optimizations 
-    and returns an Op sink node."""
+def optimize(dag_root: DataOp, config: OptConfig = None):
+    """ Entry point for the logical optimizer. Takes a Skrub DataOp DAG, applies logical optimizations
+    and returns an Op root node."""
     t0 = perf_counter()
     if config is None:
         config = OptConfig()
 
-    children, nodes, parents = get_dataops_graph(dag_sink)
+    children, nodes, parents = get_dataops_graph(dag_root)
     order = topological_traverse(nodes, parents, children)
+
+    # Apply CSE on skrub IR
     if FLAGS.cse:
-        t0_cse = perf_counter()
-        apply_cse(dag_sink, nodes, order, parents)
-        # TODO cse should direcly return the new list of ops ordered so we dont have to iterate again
-        t1_cse = perf_counter()
-        logger.info(f"CSE took {t1_cse - t0_cse:.2f} seconds")
+        run_cse_pass(dag_root, nodes, order, parents)
 
-    t0_convert = perf_counter()
-    sink = convert_to_ops(dag_sink)
-    t1_convert = perf_counter()
-    logger.info(f"Conversion took {t1_convert - t0_convert:.2f} seconds")
+    # Convert to Op DAG and add splitting op
+    root = time_pass("convertion", convert_to_ops, dag_root, debug_graph=False)
+    root = time_pass("splitting", add_splitting_op, root)
 
-    t0_splitting = perf_counter()
-    sink = add_splitting_op(sink)
-    t1_splitting = perf_counter()
-    logger.info(f"Splitting took {t1_splitting - t0_splitting:.2f} seconds")
-
-
-    _debug_show_graph(sink, "convertion")
-    t1_splitting = perf_counter()
-    logger.info(f"Splitting took {t1_splitting - t0_splitting:.2f} seconds")
-    # Rewrites:
-
-    # Parsing of dataframe ops
+    # Extracting of specialized operators from generic MethodCallOp / CallOp
     if config.dataframe_ops:
-        t0_dataframe = perf_counter()
-        sink = rewrite_dataframe_ops(sink)
-        sink = group_dataframe_ops(sink)
-        _debug_show_graph(sink, "dataframe_rewrite")
-        t1_dataframe = perf_counter()
-        logger.info(f"Dataframe rewrite took {t1_dataframe - t0_dataframe:.2f} seconds")
+        if config.numeric_ops:
+            # Fused extracting of frame and numeric ops
+            root = time_pass("frame_and_numeric_rewrite", extract_frame_and_numeric_operators, root)
+        else:
+            # Extracting of only dataframe ops
+            root = time_pass("dataframe_rewrite", extract_frame_operators, root)
+    elif config.numeric_ops:
+        # Extracting of only numeric ops
+        root = time_pass("to_numeric", extract_numeric_operators, root)
 
-    # Parsing of numeric ops
-    if config.numeric_ops:
-        t0_numeric = perf_counter()
-        sink = to_numeric_op(sink)
-        _debug_show_graph(sink, "to_numeric")
-        t1_numeric = perf_counter()
-        logger.info(f"To numeric conversion took {t1_numeric - t0_numeric:.2f} seconds")
-
-    # Unrolling of choices to a dag wit only a single choice op at the end
+    # Unrolling of choices to a dag with only a single ChoiceOp at the end
     if config.unroll_choices:
-        t0_choices = perf_counter()
-        sink = choice_unrolling(sink)
-        _debug_show_graph(sink, "unrolled")
-        t1_choices = perf_counter()
-        logger.info(f"Choices unrolling took {t1_choices - t0_choices:.2f} seconds")
+        root = time_pass("unrolled", choice_unrolling, root)
 
     # Final optimized DAG
     if config.algebraic_rewrites:
-        t0_algebraic = perf_counter()
-        sink = algebraic_rewrites(sink, config=config.algebraic_rewrite_config)
-        _debug_show_graph(sink, "algebraic_rewrite")
-        t1_algebraic = perf_counter()
-        logger.info(f"Algebraic rewrite took {t1_algebraic - t0_algebraic:.2f} seconds")
+        root = time_pass("algebraic_rewrite", lambda x: algebraic_rewrites(x, config.algebraic_rewrite_config), root)
 
     t1 = perf_counter()
     logger.info(f"Optimization took in total {t1 - t0:.2f} seconds")
-    return sink
+    return root
+
+
+def run_cse_pass(dag_root: DataOp, nodes: dict, order: list, parents: dict):
+    """ Apply CSE on a Skrub DataOp DAG and return the deduplicated DAG."""
+    t0_cse = perf_counter()
+    apply_cse(dag_root, nodes, order, parents)
+    # TODO cse should directly return the new list of ops ordered so we dont have to iterate again
+    t1_cse = perf_counter()
+    logger.info(f"CSE took {t1_cse - t0_cse:.2f} seconds")
+
+def extract_frame_operators(root):
+    """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
+    for op in topological_iterator(root):
+        root, _ = extract_dataframe_op(op, root)
+    return root
+
+def extract_numeric_operators(root):
+    """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
+    for op in topological_iterator(root):
+        root, _ = extract_numeric_op(op, root)
+    return root
+
+def extract_frame_and_numeric_operators(root):
+    """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
+    for op in topological_iterator(root):
+        root, matched = extract_dataframe_op(op, root)
+        if not matched:
+            root, _ = extract_numeric_op(op, root)
+    return root
+
+def time_pass(name, fn, fn_input, debug_graph: bool = True):
+    t0 = perf_counter()
+    if type(fn_input) is tuple:
+        out = fn(*fn_input)
+    else:
+        out = fn(fn_input)
+        if debug_graph:
+            _debug_show_graph(fn_input, name)
+    t1 = perf_counter()
+    logger.info(f"{name} took {t1 - t0:.2f} seconds")
+    return out
 
 
 def convert_to_ops(dag: DataOp) -> Op:
     """ Convert a Skrub DataOp DAG to a stratum's logical IR (Op DAG)"""
     children, nodes, parents = get_dataops_graph(dag)
     order = topological_traverse(nodes, parents, children)
-    sink_id = order[-1]
+    root_id = order[-1]
 
     # make logical IR:
     # we start by making unconnected ops
@@ -169,7 +182,7 @@ def convert_to_ops(dag: DataOp) -> Op:
                 convert_handle_choice(node, op, ids_to_ops, children)
             else:
                 op.inputs = [ids_to_ops[input] for input in children.get(node, [])]
-    return ids_to_ops[sink_id]
+    return ids_to_ops[root_id]
 
 
 def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
@@ -195,12 +208,12 @@ def convert_handle_choice(node, op, ids_to_ops, children):
             p.outputs = [op]
 
 
-def choice_unrolling(sink: Op):
+def choice_unrolling(root: Op):
     """ Rewrite for unrolling the dag after choice op into separate dags for each outcome."""
     contains_choice = True
     i = 0
     while contains_choice:
-        dag_iter = topological_iterator(sink)
+        dag_iter = topological_iterator(root)
         contains_choice = False
         for op in dag_iter:
             if op.is_choice():
@@ -221,40 +234,40 @@ def choice_unrolling(sink: Op):
                     unroll_nested_choice(last_op, op, outcomes)
                     contains_choice = True
                 else:
-                    assert sink is last_op, "Sink should be the last op in the dag"
+                    assert root is last_op, "Root should be the last op in the dag"
                     # we reached the end of the dag
                     logger.debug(f"Unrolling simple choice: {op}")
-                    sink = unroll_simple_choice(sink, op, outcomes)
-                    logger.debug(f"New sink after unrolling: {sink}")
+                    root = unroll_simple_choice(root, op, outcomes)
+                    logger.debug(f"New root after unrolling: {root}")
 
                 # if FLAGS.DEBUG:
-                #     show_graph(sink, f"choice-unrolled={i}")
+                #     show_graph(root, f"choice-unrolled={i}")
                 del op
                 break
-    return sink
+    return root
 
 
 
-def unroll_simple_choice(sink: Op, op: ChoiceOp, outcomes: list) -> Op:
+def unroll_simple_choice(root: Op, op: ChoiceOp, outcomes: list) -> Op:
     """ Unroll a simple choice op, which has no choice in the sub-dag."""
-    dag_sink = (SearchEvalOp(outcome_names=op.outcome_names, parent=[sink]) if EVAL_OP_ENABLED
+    dag_root = (SearchEvalOp(outcome_names=op.outcome_names, parent=[root]) if EVAL_OP_ENABLED
                           else ChoiceOp(outcome_names=op.outcome_names, append_choice_name=False))
     if not EVAL_OP_ENABLED:
-        dag_sink.inputs = [sink]
+        dag_root.inputs = [root]
 
     # clones sub-dag after choice op for all outcomes[1:]
     for outcome in outcomes[1:]:
         outcome.outputs = []
         leafs = clone_sub_dag(op, new_root_op=outcome)
         assert len(leafs) == 1
-        dag_sink.add_input(leafs[0])
-        leafs[0].add_output(dag_sink)
+        dag_root.add_input(leafs[0])
+        leafs[0].add_output(dag_root)
 
     # reuse sub-dag for the first outcome
     outcomes[0].outputs = []
     replace_op_in_outputs(op, replacement=outcomes[0])
-    sink.add_output(dag_sink)
-    return dag_sink
+    root.add_output(dag_root)
+    return dag_root
 
 
 def unroll_nested_choice(last_op: ChoiceOp, op: ChoiceOp, outcomes):

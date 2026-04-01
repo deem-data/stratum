@@ -80,7 +80,7 @@ class TestCSE(unittest.TestCase):
         out = list(topological_iterator(out))
         self.assertEqual(len(out), 4)
 
-    def test_disable_log_exp_rewrite(self):
+    def test_disable_log_exp_rewrite1(self):
         df = skrub.as_data_op(1)
         t1 = df.skb.apply_func(np.log)
         t2 = t1.skb.apply_func(np.exp)
@@ -92,4 +92,17 @@ class TestCSE(unittest.TestCase):
         out = optimize(t2, config=config)
         out = list(topological_iterator(out))
         self.assertEqual(len(out), 3)
+
+    def test_disable_log_exp_rewrite2(self):
+        df = skrub.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(exp_log=False),
+        )
+        out = optimize(t2, config=config)
+        out = list(topological_iterator(out))
+        self.assertEqual(len(out), 1)
 

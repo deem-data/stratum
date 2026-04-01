@@ -1,5 +1,4 @@
 from stratum.optimizer.ir._ops import CallOp, Op
-from stratum.optimizer._op_utils import topological_iterator
 import numpy as np
 from enum import Enum
 
@@ -23,7 +22,7 @@ class NumericOp(Op):
             self.func = func
             name = func.__name__
         super().__init__(name=name, inputs=inputs, outputs=outputs)
-        
+
         self.args = args
         self.kwargs = kwargs
 
@@ -43,24 +42,22 @@ def make_numeric_op(op: CallOp) -> NumericOp:
     new_op = NumericOp(func=op.func, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
     return new_op
 
-def to_numeric_op(sink: Op) -> Op:
-    """ Detect and convert the numeric ops in the dag to the stratum's NumericOps."""
-    for op in topological_iterator(sink):
-        new_op = None
-        if isinstance(op, CallOp):
-            if op.func is np.log:
-                new_op = make_numeric_op(op)
-            elif op.func is np.exp:
-                new_op = make_numeric_op(op)
-            # if op is some other function from np package, make a generic numeric op
-            elif op.func.__module__ == "numpy":
-                new_op = make_numeric_op(op)
+def extract_numeric_op(op: Op, root: Op) -> tuple[Op, bool]:
+    new_op = None
+    if isinstance(op, CallOp):
+        if op.func is np.log:
+            new_op = make_numeric_op(op)
+        elif op.func is np.exp:
+            new_op = make_numeric_op(op)
+        # if op is some other function from np package, make a generic numeric op
+        elif op.func.__module__ == "numpy":
+            new_op = make_numeric_op(op)
 
-
-
-        if new_op is not None:
-            op.replace_input_of_outputs(new_op)
-            op.replace_output_of_inputs(new_op)
-            if op is sink:
-                sink = new_op
-    return sink
+    if new_op is None:
+        return root, False
+    else:
+        op.replace_input_of_outputs(new_op)
+        op.replace_output_of_inputs(new_op)
+        if op is root:
+            root = new_op
+        return root, True

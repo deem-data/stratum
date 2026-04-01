@@ -51,9 +51,9 @@ def get_all_outputs(op: Op, stop_at_op: Op = None):
                     visited.add(out_)
                     queue.append(out_)
                     inputs_internal[out_] = [node]
-                    
+
     return list(visited), inputs_internal
-    
+
 
 def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
     """Clones a sub-dag of the given Op. Excluding the given Op, but including all its internal outputs.
@@ -100,14 +100,14 @@ def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
     return sub_dag_leaves
 
 
-def topological_iterator(sink: Op) -> Iterator[Op]:
+def topological_iterator(root: Op) -> Iterator[Op]:
     """
     Iterate over the Op DAG in topological order.
     """
 
     # first we need to bfs for finding all sources in the dag
-    queue1 = deque([sink])
-    indegree = {sink: 0 if not sink.inputs else len(sink.inputs)}
+    queue1 = deque([root])
+    indegree = {root: 0 if not root.inputs else len(root.inputs)}
     queue2 = deque()
     while queue1:
         op = queue1.popleft()
@@ -153,11 +153,11 @@ def topological_iterator_dfs(queue, indegree) -> Iterator[Op]:
             if indegree[out_op] == 0:
                 stack.append(out_op)
 
-def show_graph(sink: Op, filename: str = 'plan'):  
+def show_graph(root: Op, filename: str = 'plan'):
     """Show the runtime plan of the DataOp DAG."""
     if get_config()["open_graph"]:
         dot = Digraph(comment=filename)
-        for current_op in topological_iterator(sink):
+        for current_op in topological_iterator(root):
             current_op.update_name()
             name = str(current_op) if not isinstance(current_op, ChoiceOp) else current_op.name
             name = name.replace("<","'").replace(">","'") if name is not None else "None"
@@ -168,3 +168,30 @@ def show_graph(sink: Op, filename: str = 'plan'):
         # make sure folder exists
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         dot.render(filename, view=True,cleanup=True)
+
+
+def rewrite_pass(match_fn, action_fn):
+    """Create a rewrite that does one full DAG pass.
+
+    Parameters
+    ----------
+    match_fn : (Op) -> tuple | None
+        Called on every op in topological order. Returns a tuple of
+        matched ops (passed to action_fn) or None if the pattern
+        doesn't match.
+    action_fn : (*matched_ops, root: Op) -> Op
+        Called when match_fn returns a match. Receives the matched ops
+        and the current root. Must return the (possibly updated) root.
+
+    Returns
+    -------
+    Callable[[Op], Op]
+        A rewrite function: root -> updated_root
+    """
+    def run(root):
+        for op in topological_iterator(root):
+            matched = match_fn(op)
+            if matched is not None:
+                root = action_fn(*matched, root)
+        return root
+    return run

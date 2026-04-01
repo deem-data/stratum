@@ -116,9 +116,9 @@ class TestOpUtils(unittest.TestCase):
         t6 = skrub.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
-        sink = out[-1]
+        root = out[-1]
         if graph:
-            show_graph(sink, filename='original')
+            show_graph(root, filename='original')
         out[1].outputs = []
         clone_sub_dag(out[2], new_root_op=out[1], stop_at_op=out[5])
         out[0].outputs = []
@@ -135,7 +135,7 @@ class TestOpUtils(unittest.TestCase):
             l2_names[i] += l1_names[0]
 
         if graph:
-            show_graph(sink, filename='cloned')
+            show_graph(root, filename='cloned')
 
 
     def test_choice_unrolling(self):
@@ -147,11 +147,10 @@ class TestOpUtils(unittest.TestCase):
         t6 = skrub.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
-        sink = out[-1]
-        out = choice_unrolling(sink)
+        root = out[-1]
+        out = choice_unrolling(root)
         with config(open_graph=False):
             show_graph(out, filename='choice_unrolling')
 
-        
 
 

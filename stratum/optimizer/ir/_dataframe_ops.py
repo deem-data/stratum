@@ -318,10 +318,10 @@ class SplitOutput(Op):
         else:
             self.intermediate = self.inputs[0].intermediate[1]
 
-def add_splitting_op(sink: Op) -> Op:
+def add_splitting_op(root: Op) -> Op:
     x_op = None
     y_op = None
-    for op in topological_iterator(sink):
+    for op in topological_iterator(root):
         if op.is_X:
             x_op = op
         if op.is_y:
@@ -338,63 +338,63 @@ def add_splitting_op(sink: Op) -> Op:
             x_op.outputs = [split_op]
             y_op.outputs = [split_op]
             break
-    return sink
+    return root
 
-def rewrite_dataframe_ops(sink: Op) -> Op:
-    """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
-    for op in topological_iterator(sink):
-        new_op = None
-        # DataSource detection (directly passed dataframe)
-        if len(op.inputs) == 0:
-            if isinstance(op, ValueOp) and isinstance(op.value, DataFrame):
-                new_op = DataSourceOp(data=op.value)
-                new_op.outputs = op.outputs
+def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
+    new_op = None
+    # DataSource detection (directly passed dataframe)
+    if len(op.inputs) == 0:
+        if isinstance(op, ValueOp) and isinstance(op.value, DataFrame):
+            new_op = DataSourceOp(data=op.value)
+            new_op.outputs = op.outputs
 
-        # DataSource detection (read operation)
-        elif not op.inputs[0].is_dataframe_op:
-            if isinstance(op, CallOp):
-                if op.func is pd.read_csv:
-                    new_op = make_read_op(new_op, op)
+    # DataSource detection (read operation)
+    elif not op.inputs[0].is_dataframe_op:
+        if isinstance(op, CallOp):
+            if op.func is pd.read_csv:
+                new_op = make_read_op(new_op, op)
 
-        # input is a dataframe op
-        else:
-            if isinstance(op, CallOp):
-                # Datetime conversion detection
-                if op.func is pd.to_datetime:
-                    new_op = make_datetime_conversion_op(new_op, op)
+    # input is a dataframe op
+    else:
+        if isinstance(op, CallOp):
+            # Datetime conversion detection
+            if op.func is pd.to_datetime:
+                new_op = make_datetime_conversion_op(new_op, op)
 
-            elif isinstance(op, MethodCallOp):
-                if op.method_name in ["rename"]:
-                    new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-                    op.replace_output_of_inputs(new_op)
-                elif op.method_name == "drop":
-                    new_op = DropOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-                    op.replace_output_of_inputs(new_op)
-                elif op.method_name == "apply":
-                    new_op = ApplyUDFOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-                    op.replace_output_of_inputs(new_op)
-                elif op.method_name in ["assign"]:
-                    new_op = AssignOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-                    op.replace_output_of_inputs(new_op)
+        elif isinstance(op, MethodCallOp):
+            if op.method_name in ["rename"]:
+                new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs,
+                                    outputs=op.outputs)
+                op.replace_output_of_inputs(new_op)
+            elif op.method_name == "drop":
+                new_op = DropOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                op.replace_output_of_inputs(new_op)
+            elif op.method_name == "apply":
+                new_op = ApplyUDFOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                op.replace_output_of_inputs(new_op)
+            elif op.method_name in ["assign"]:
+                new_op = AssignOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                op.replace_output_of_inputs(new_op)
 
-            # GetAttr Fusing and conversion to GetAttrDataframeOp
-            elif isinstance(op, GetAttrOp) and op.inputs[0].is_dataframe_op:
-                new_op = make_frame_get_attr(new_op, op)
+        # GetAttr Fusing and conversion to GetAttrDataframeOp
+        elif isinstance(op, GetAttrOp) and op.inputs[0].is_dataframe_op:
+            new_op = make_frame_get_attr(new_op, op)
 
-            # Projection: BinOp detection
-            elif isinstance(op, BinOp) and op.inputs[0].is_dataframe_op:
-                op.is_dataframe_op = True
+        # Projection: BinOp detection
+        elif isinstance(op, BinOp) and op.inputs[0].is_dataframe_op:
+            op.is_dataframe_op = True
 
-            # mark as dataframe op
-            elif isinstance(op, GetItemOp) or isinstance(op, BaseEstimatorOp):
-                op.is_dataframe_op = True
+        # mark as dataframe op
+        elif isinstance(op, GetItemOp) or isinstance(op, BaseEstimatorOp):
+            op.is_dataframe_op = True
 
-        if new_op is not None:
-            op.replace_input_of_outputs(new_op)
-            if sink is op:
-                sink = new_op
-
-    return sink
+    if new_op is None:
+        return root, False
+    else:
+        op.replace_input_of_outputs(new_op)
+        if root is op:
+            root = new_op
+    return root, True
 
 
 def make_datetime_conversion_op(new_op: DatetimeConversionOp, op: CallOp) -> DatetimeConversionOp:
@@ -467,5 +467,5 @@ def make_frame_get_attr(new_op: GetAttrProjectionOp, op: GetAttrOp) -> GetAttrPr
     return new_op
 
 
-def group_dataframe_ops(sink: Op) -> Op:
-    return sink
+def group_dataframe_ops(root: Op) -> Op:
+    return root

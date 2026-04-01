@@ -73,8 +73,8 @@ class TestDataframeOps(unittest.TestCase):
         data = skrub.as_data_op(self.df)["x"]
         sub_dag1 = data.apply(lambda x, a: x + a, a=skrub.as_data_op(1))
         sub_dag2 = data
-        sink = skrub.choose_from([sub_dag1, sub_dag2]).as_data_op()
-        ops = optimize(sink)
+        root = skrub.choose_from([sub_dag1, sub_dag2]).as_data_op()
+        ops = optimize(root)
         self.assertEqual(5, len(ops))
         self.assertTrue(isinstance(ops[1], GetItemOp))
         self.assertTrue(isinstance(ops[3], ProjectionOp))
