@@ -9,13 +9,13 @@ import polars as pl
 import stratum as skrub
 from skrub._data_ops._data_ops import DataOp
 from stratum._config import FLAGS
-from stratum.logical_optimizer._dataframe_ops import (
+from stratum.optimizer.ir._dataframe_ops import (
     ApplyUDFOp, AssignOp, ConcatOp, DataSourceOp, DatetimeConversionOp,
     DropOp, GetAttrProjectionOp, GroupedDataframeOp, MetadataOp, ProjectionOp,
     SplitOp, rewrite_fuse_get_item_ops,)
-from stratum.logical_optimizer._op_utils import topological_iterator
-from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, GetItemOp, MethodCallOp, Op
-from stratum.logical_optimizer._optimize import OptConfig, optimize as optimize_
+from stratum.optimizer._op_utils import topological_iterator
+from stratum.optimizer.ir._ops import DATA_OP_PLACEHOLDER, GetItemOp, MethodCallOp, Op
+from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 
 
 def optimize(dag, conf=None):

@@ -5,7 +5,7 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.linear_model import Ridge, LinearRegression, LogisticRegression
 from sklearn.svm import LinearSVC
 
-from stratum.logical_optimizer import apply_cse_on_skrub_ir
+from stratum.optimizer import apply_cse_on_skrub_ir
 from stratum.api.gridsearch import grid_search
 
 import stratum as skrub

@@ -1,7 +1,5 @@
-from stratum.logical_optimizer._ops import CallOp, Op, ValueOp
-from pandas import DataFrame
-from stratum.logical_optimizer._dataframe_ops import DataSourceOp
-from stratum.logical_optimizer._op_utils import topological_iterator
+from stratum.optimizer.ir._ops import CallOp, Op
+from stratum.optimizer._op_utils import topological_iterator
 import numpy as np
 from enum import Enum
 

@@ -3,7 +3,7 @@ import pandas as pd
 import stratum as skrub
 import numpy as np
 from sklearn.dummy import DummyRegressor
-from stratum.logical_optimizer._numeric_ops import  NumericOp
+from stratum.optimizer.ir._numeric_ops import  NumericOp
 
 class TestNumericOps(unittest.TestCase):
     def setUp(self):

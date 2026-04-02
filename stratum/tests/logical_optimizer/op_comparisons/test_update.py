@@ -4,7 +4,7 @@ from sklearn.dummy import DummyRegressor
 from sklearn.preprocessing import StandardScaler
 
 import stratum as skrub
-from stratum.logical_optimizer._op_comparison import update_data_op
+from stratum.optimizer._op_comparison import update_data_op
 import pandas as pd
 
 # dummy function

@@ -5,7 +5,7 @@ import skrub
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 
-from stratum.logical_optimizer import apply_cse_on_skrub_ir
+from stratum.optimizer import apply_cse_on_skrub_ir
 from stratum.api.gridsearch import grid_search
 from time import time
 

@@ -3,16 +3,16 @@ from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque
 from ._cse import apply_cse
-from ._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops,add_splitting_op
-from ._numeric_ops import to_numeric_op
-from ._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
+from stratum.optimizer.ir._dataframe_ops import rewrite_dataframe_ops, group_dataframe_ops,add_splitting_op
+from stratum.optimizer.ir._numeric_ops import to_numeric_op
+from stratum.optimizer.ir._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
 from ._algebraic_rewrites import algebraic_rewrites
 from stratum.utils._skrub_graph import build_graph
 from time import perf_counter
 import logging
 from stratum._config import FLAGS
-from stratum.logical_optimizer._algebraic_rewrites import AlgebraicRewritesConfig
+from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
 
 logger = logging.getLogger(__name__)
 EVAL_OP_ENABLED = False

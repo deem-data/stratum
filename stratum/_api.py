@@ -2,7 +2,7 @@ import pandas as pd
 from skrub import DataOp
 
 from stratum._config import FLAGS
-from stratum.logical_optimizer._optimize import optimize
+from stratum.optimizer._optimize import optimize
 from stratum.runtime._scheduler import SequentialScheduler
 from time import perf_counter
 

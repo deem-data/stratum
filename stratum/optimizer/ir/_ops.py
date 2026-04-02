@@ -543,7 +543,7 @@ def as_op(data_op: DataOp):
     elif isinstance(impl, Var):
         return_op = VariableOp(name=impl.name, value=impl.value)
     elif isinstance(impl, Concat):
-        from stratum.logical_optimizer._dataframe_ops import ConcatOp
+        from stratum.optimizer.ir._dataframe_ops import ConcatOp
         return_op = ConcatOp(first=impl.first, others=impl.others, axis=impl.axis)
     else:
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
