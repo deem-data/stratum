@@ -91,24 +91,26 @@ if __name__ == "__main__":
 
 ```bash
 stratum/
-├─ pyproject.toml          # Project metadata + Python/Rust build config (maturin)
+├─ pyproject.toml           # Project metadata + Python/Rust build config (maturin)
 ├─ README.md
 ├─ LICENSE
-├─ _rust/                  # Rust crate (PyO3 extension)
+├─ _rust/                   # Rust crate (PyO3 extension)
 │  ├─ Cargo.toml
-│  └─ src/lib.rs           # Defines #[pymodule] fn _rust_backend_native(...)
-└─ stratum/                # Python package
-   ├─ __init__.py          # Façade over skrub + automatic patching
-   ├─ _config.py           # set_config/get_config + runtime/env sync
-   ├─ _api.py              # High-level grid search / evaluate helpers
-   ├─ _rust_backend.py     # Python <-> Rust shim (re-exports native fns)
-   ├─ adapters/            # Public API (dispatch to Rust or fall back to skrub)
-   │  ├─ string_encoder.py # RustyStringEncoder
+│  └─ src/lib.rs            # Defines #[pymodule] fn _rust_backend_native(...)
+└─ stratum/                 # Python package
+   ├─ __init__.py           # Façade over skrub + automatic patching
+   ├─ _config.py            # set_config/get_config + runtime/env sync
+   ├─ _api.py               # High-level grid search / evaluate helpers
+   ├─ _rust_backend.py      # Python <-> Rust shim (re-exports native fns)
+   ├─ adapters/             # Public API (dispatch to Rust or fall back to skrub)
+   │  ├─ string_encoder.py  # RustyStringEncoder
    │  └─ one_hot_encoder.py # RustyOneHotEncoder
-   ├─ logical_optimizer/   # DAG representation + logical rewrites
-   ├─ runtime/             # Schedulers and runtime execution
-   ├─ patching/            # Hooks that patch upstream skrub
-   └─ tests/               # Test suite
+   ├─ optimizer/
+   │  ├─ ir/                # DAG representation 
+   │  └─ _optimize.py       # logical rewrites
+   ├─ runtime/              # Schedulers and runtime execution
+   ├─ patching/             # Hooks that patch upstream skrub
+   └─ tests/                # Test suite
 ```
 ---
 

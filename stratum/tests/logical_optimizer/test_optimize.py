@@ -1,5 +1,5 @@
-from stratum.logical_optimizer._op_utils import topological_iterator
-from stratum.logical_optimizer._optimize import OptConfig, optimize
+from stratum.optimizer._op_utils import topological_iterator
+from stratum.optimizer._optimize import OptConfig, optimize
 import stratum as skrub
 import pandas as pd
 import unittest

@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from stratum.logical_optimizer._numeric_ops import NumericOp
-from stratum.logical_optimizer._op_utils import topological_iterator
-from stratum.logical_optimizer._numeric_ops import NumericOpType
+from stratum.optimizer.ir._numeric_ops import NumericOp
+from stratum.optimizer._op_utils import topological_iterator
+from stratum.optimizer.ir._numeric_ops import NumericOpType
 
 RewriteFn = Callable[[NumericOp, Any], Any]
 

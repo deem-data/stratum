@@ -10,15 +10,15 @@ from sklearn.dummy import DummyRegressor
 from sklearn.preprocessing import StandardScaler
 from skrub._data_ops._data_ops import DataOp
 
-from stratum.logical_optimizer._op_utils import topological_iterator
-from stratum.logical_optimizer._ops import (
+from stratum.optimizer._op_utils import topological_iterator
+from stratum.optimizer.ir._ops import (
     DATA_OP_PLACEHOLDER, BinOp, CallOp, DummyConfigManager, GetAttrOp,
     GetItemOp, ImplOp, MethodCallOp, Op, PlaceHolder, SearchEvalOp, ValueOp,
     VariableOp, check_estm_inputs, estimator_parallel_config,
     estm_supports_polars, process_estimator_task, process_transformer_task,
     remove_datops_from_args,
 )
-from stratum.logical_optimizer._optimize import optimize as optimize_
+from stratum.optimizer._optimize import optimize as optimize_
 
 
 def _inp(val):

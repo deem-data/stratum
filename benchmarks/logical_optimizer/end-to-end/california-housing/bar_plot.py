@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-base_path = "benchmarks/logical_optimizer/end-to-end/california-housing/"
+base_path = "benchmarks/optimizer/end-to-end/california-housing/"
 data = pd.read_csv(base_path + "california_housing_pipelines_benchmark.csv", sep=";")
 data["time"] = data["time"].apply(np.round, decimals=2)
 

@@ -1,8 +1,8 @@
-from stratum.logical_optimizer._ops import DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp, VariableOp
+from stratum.optimizer.ir._ops import DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp, VariableOp
 from pandas import DataFrame
 import pandas as pd
 import polars as pl
-from stratum.logical_optimizer._op_utils import topological_iterator
+from stratum.optimizer._op_utils import topological_iterator
 from stratum._config import FLAGS
 from skrub._data_ops._data_ops import DataOp
 import logging

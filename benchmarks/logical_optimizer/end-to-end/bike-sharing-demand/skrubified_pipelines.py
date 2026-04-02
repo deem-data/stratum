@@ -9,7 +9,7 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_log_error, make_scorer
 import time
 
-from stratum.logical_optimizer import apply_cse_on_skrub_ir
+from stratum.optimizer import apply_cse_on_skrub_ir
 
 t0 = time.time()
 

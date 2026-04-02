@@ -1,7 +1,7 @@
 from skrub._data_ops._evaluation import _Graph
-from stratum.logical_optimizer import apply_cse_on_skrub_ir
-from stratum.logical_optimizer._cse import CSETable
-from stratum.logical_optimizer._optimize import topological_traverse
+from stratum.optimizer import apply_cse_on_skrub_ir
+from stratum.optimizer._cse import CSETable
+from stratum.optimizer._optimize import topological_traverse
 import unittest
 import stratum as skrub
 import pandas as pd

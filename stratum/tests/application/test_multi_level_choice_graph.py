@@ -13,7 +13,7 @@ from lightgbm import LGBMRegressor
 from xgboost import XGBRegressor
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import make_scorer, mean_squared_error, r2_score
-from stratum.logical_optimizer._optimize import optimize
+from stratum.optimizer._optimize import optimize
 
 
 class TargetEncoder(BaseEstimator, TransformerMixin):

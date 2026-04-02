@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-base_path = "benchmarks/logical_optimizer/end-to-end/"
+base_path = "benchmarks/optimizer/end-to-end/"
 
 data = pd.read_csv(base_path + 'bench_cse_tfidf_gridsearch.csv')
 data["total"] = data["total"].apply(np.round, decimals=2)
