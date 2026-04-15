@@ -28,7 +28,6 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
         print("\n" + "=" * 80)
         print(f"Heavy hitters (sorted by time spent in DataOp evaluation):\n")
         print(table.head(FLAGS.stats).to_string(index=False))
-        table.head(FLAGS.stats).to_csv("heavy_hitters.csv", index=False)
         print("=" * 80 + "\n")
 
     return (sched,preds) if return_predictions else sched
