@@ -96,7 +96,6 @@ benchmarks/**/input/
 *.csv
 *.pdf
 *.ipynb
-examples/
 
 # coding agents
 .cursor

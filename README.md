@@ -68,19 +68,23 @@ stratum.set_config(
 ```python
 import stratum as skrub #drop-in replacement
 from sklearn.preprocessing import OneHotEncoder
-from skrub.datasets import fetch_employee_salaries
-from skrub import TableVectorizer, StringEncoder
+from sklearn.linear_model import LinearRegression
 
 def main():
-    # Load dataset
-    dataset = fetch_employee_salaries()
-    employees, salaries = dataset.X, dataset.y
-    employees = employees.dropna()
+    dataset = skrub.datasets.fetch_employee_salaries()
+    df = skrub.as_data_op(dataset.employee_salaries).skb.subsample()
+    df_clean = df.dropna()
+    y = df_clean["current_annual_salary"].skb.mark_as_y()
+    X = df_clean.drop(columns=["current_annual_salary"]).skb.mark_as_X()
 
-    skrub.set_config(rust_backend=True, debug_timing=True, scheduler=True, stats=True) #stratum's config
-    vectorizer = TableVectorizer(high_cardinality=StringEncoder(), low_cardinality=OneHotEncoder())
-    employees_enc = vectorizer.fit_transform(employees)
-    print(f"Encoded data shape: {employees_enc.shape}")
+    skrub.set_config(rust_backend=True, debug_timing=True, scheduler=True, stats=20)
+    tv = skrub.TableVectorizer(high_cardinality=skrub.StringEncoder(), low_cardinality=OneHotEncoder())
+    X_enc = X.skb.apply(tv)
+    print(f"Encoded data shape: {X_enc.shape.skb.preview()}")
+
+    pred = X_enc.skb.apply(LinearRegression(), y=y)
+    search = pred.skb.make_grid_search(cv=3, fitted=True, scoring="r2", refit=False)
+    print(search.results_)
 
 if __name__ == "__main__":
     main()
