@@ -29,11 +29,12 @@ dependencies = [
     "polars",
     "graphviz",
     "pyarrow>=22.0.0",
+    "pygments>=2.20.0",
 ]
 
 [project.optional-dependencies]
 test = [
-    "pytest",
+    "pytest>=9.0.3",
     "pytest-cov",
     "coverage[toml]",
     "lightgbm>=4.6.0",
@@ -45,9 +46,10 @@ dev = [
     "jupyter",
     "tornado>=6.5.5",
     "urllib3>=2.6.3",
-    "pillow>=12.1.1",
+    "pillow>=12.2.0",
     "nbconvert>=7.17.0",
-    "fonttools>=4.60.2"
+    "fonttools>=4.60.2",
+    "requests>=2.33.1",
 ]
 
 [project.urls]
