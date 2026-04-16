@@ -8,6 +8,8 @@ from .ir._numeric_ops import extract_numeric_op
 from .ir._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
 from ._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
+from ._linearization import linearize_dag
+from ._input_release_planning import compute_pinned_ops, plan_input_releases
 from stratum.utils._skrub_graph import build_graph
 from time import perf_counter
 import logging
@@ -106,9 +108,18 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     if config.algebraic_rewrites:
         root = time_pass("algebraic_rewrite", lambda x: algebraic_rewrites(x, config.algebraic_rewrite_config), root)
 
+    # Final passes: linearization and buffer release planning
+    linearized_dag, split_pos, flagged_ops = time_pass("linearization",linearize_dag,root)
+
+    def release_planning(linearized_dag_, split_pos_, flagged_ops_):
+        pinned_ops = compute_pinned_ops(linearized_dag_, split_pos_, flagged_ops_)
+        plan_input_releases(linearized_dag_, pinned_ops)
+
+    time_pass("release planning", release_planning,(linearized_dag, split_pos, flagged_ops))
+
     t1 = perf_counter()
     logger.info(f"Optimization took in total {t1 - t0:.2f} seconds")
-    return root
+    return linearized_dag, split_pos, flagged_ops
 
 
 def run_cse_pass(dag_root: DataOp, nodes: dict, order: list, parents: dict):

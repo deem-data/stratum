@@ -28,7 +28,7 @@ class MyTestCase(unittest.TestCase):
         X2 = X1.assign(
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
-        out = list(topological_iterator(optimize(X2, OptConfig(cse=True))))
+        out, *_ = optimize(X2, OptConfig(cse=True))
         self.assertTrue(out[0].outputs[0] is out[1])
         self.assertTrue(len(out[0].inputs) == 0)
 
@@ -41,7 +41,7 @@ class MyTestCase(unittest.TestCase):
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
         config = OptConfig(cse=False, algebraic_rewrites=False, numeric_ops=False, dataframe_ops=False, unroll_choices=False)
-        out = list(topological_iterator(optimize(X2, config)))
+        out, *_ = optimize(X2, config)
         self.assertEqual(len(out), 10)
         
     def test_more_ops(self):
@@ -51,7 +51,7 @@ class MyTestCase(unittest.TestCase):
         X2 = X1.assign(
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
-        out = optimize(X2, OptConfig(cse=True))
+        out, *_ = optimize(X2, OptConfig(cse=True))
 
 
 

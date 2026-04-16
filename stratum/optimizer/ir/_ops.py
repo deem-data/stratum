@@ -25,17 +25,27 @@ class PlaceHolder():
 # unique identifier for arguments, which need to be replaced with Op references later
 DATA_OP_PLACEHOLDER = PlaceHolder("DATA_OP_PLACEHOLDER")
 
+
+def _resolve_args(args, input_iter):
+    """Replace DATA_OP_PLACEHOLDERs in an args sequence with values from input_iter."""
+    return [next(input_iter) if a is DATA_OP_PLACEHOLDER else a for a in args]
+
+
+def _resolve_kwargs(kwargs, input_iter):
+    """Replace DATA_OP_PLACEHOLDERs in a kwargs dict with values from input_iter."""
+    return {k: next(input_iter) if v is DATA_OP_PLACEHOLDER else v for k, v in kwargs.items()}
+
 class Op():
     def __init__(self, inputs=None,outputs=None, name=None, is_X=False, is_y=False):
         self.name = name
         self.outputs = outputs if outputs is not None else []
         self.inputs = inputs if inputs is not None else []
-        self.intermediate = None
         self.is_X = is_X
         self.is_y = is_y
         self.is_dataframe_op = False
         self.is_split_op = False
         self.was_cloned = False
+        self.release_after: list[Op] = []
 
     def to_str_helper(self):
         class_name = self.__class__.__name__
@@ -99,7 +109,14 @@ class Op():
         new_op.was_cloned = True
         return new_op
 
-    def process(self, mode: str, environment: dict):
+    def resolve_inputs(self, buffers):
+        return [buffers.get(in_op) for in_op in self.inputs]
+
+    def release_inputs(self, buffers):
+        for in_op in self.release_after:
+            buffers.release(in_op)
+
+    def process(self, mode: str, environment: dict, inputs: list):
         raise NotImplementedError(f"Processing of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
 
     def check_kwargs(self, kwargs):
@@ -131,14 +148,14 @@ class ImplOp(Op):
         new_op.was_cloned = True
         return new_op
 
-    def replace_fields_with_values(self):
+    def replace_fields_with_values(self, inputs):
         """Replace DataOp fields in implementation with their computed values."""
-        parent_iter = iter(self.inputs)
+        input_iter = iter(inputs)
 
         def replace_dataop(value):
             """Recursively replace DataOp instances with their actual values."""
             if isinstance(value, DataOp):
-                return next(parent_iter).intermediate
+                return next(input_iter)
             elif isinstance(value, (list, tuple)):
                 new_seq = [replace_dataop(item) for item in value]
                 return type(value)(new_seq)
@@ -149,24 +166,23 @@ class ImplOp(Op):
 
         return SimpleNamespace(**{field: replace_dataop(getattr(self.skrub_impl, field)) for field in self.skrub_impl._fields})
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         if hasattr(self.skrub_impl, "eval"):
             # DataOp with eval method have a fused implementation of the generator and the compute method
             # we need to iterate over the generator and replace the requested fields with correct inputs
             last_yield = None
             gen = self.skrub_impl.eval(mode=mode, environment=environment)
-            parent_iter = iter(self.inputs)
+            input_iter = iter(inputs)
             while True:
                 try:
                     last_yield = gen.send(last_yield)
                 except StopIteration as e:
-                    self.intermediate = e.value
-                    break
+                    return e.value
                 if isinstance(last_yield, DataOp):
-                    last_yield = next(parent_iter).intermediate
+                    last_yield = next(input_iter)
         else:
-            ns = self.replace_fields_with_values()
-            self.intermediate = self.skrub_impl.compute(ns, mode, environment)
+            ns = self.replace_fields_with_values(inputs)
+            return self.skrub_impl.compute(ns, mode, environment)
 
 class VariableOp(Op):
     def __init__(self, name: str, value = None):
@@ -180,8 +196,8 @@ class VariableOp(Op):
     def clone(self):
         return VariableOp(name=self.name)
 
-    def process(self, mode: str, environment: dict):
-        self.intermediate = environment[self.name]
+    def process(self, mode: str, environment: dict, inputs: list):
+        return environment[self.name]
 
 class BaseEstimatorOp(Op):
     fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs"]
@@ -219,20 +235,20 @@ class BaseEstimatorOp(Op):
         new_op.was_cloned = True
         return new_op
 
-    def extract_args_from_inputs(self, mode: str):
+    def extract_args_from_inputs(self, mode: str, inputs: list):
         """
         Extract all necessary data from an EstimatorOp to make it picklable for multiprocessing.
 
         Returns a tuple of picklable data that can be sent to worker processes.
         """
-        input_iter = iter(self.inputs)
-        x = next(input_iter).intermediate
+        input_iter = iter(inputs)
+        x = next(input_iter)
         assert x is not None, f"X is None for {self}"
-        y = None if mode == 'predict' else next(input_iter).intermediate if self.y == DATA_OP_PLACEHOLDER else self.y
+        y = None if mode == 'predict' else next(input_iter) if self.y == DATA_OP_PLACEHOLDER else self.y
         estm = self.estimator if mode == "predict" else self.original_estimator
-        place_holders = {k: next(input_iter).intermediate for k, v in estm.get_params().items() if isinstance(v, DataOp)}
+        place_holders = {k: next(input_iter) for k, v in estm.get_params().items() if isinstance(v, DataOp)}
         estm.set_params(**place_holders)
-        cols = next(input_iter).intermediate if self.cols == DATA_OP_PLACEHOLDER else self.cols
+        cols = next(input_iter) if self.cols == DATA_OP_PLACEHOLDER else self.cols
         return (
             estm,
             x,
@@ -246,11 +262,12 @@ class BaseEstimatorOp(Op):
             self.parallelism
         )
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         # we use a separate function to process the estimator to allow reuse for multiprocessing
-        task_data = self.extract_args_from_inputs(mode)
+        task_data = self.extract_args_from_inputs(mode, inputs)
         process_task = self.get_process_task()
-        self.intermediate, self.estimator = process_task(task_data)
+        result, self.estimator = process_task(task_data)
+        return result
 
     def get_process_task(self):
         raise NotImplementedError(f"get_process_task must be implemented in {self.__class__.__name__}")
@@ -369,9 +386,9 @@ class ChoiceOp(Op):
         new_op.was_cloned = True
         return new_op
 
-    def process(self, mode: str, environment: dict):
-        results = [{"id" : name, "vals" : self.inputs[i].intermediate} for i, name in enumerate(self.make_outcome_names())]
-        self.intermediate = results[0] if len(results) == 1 else results
+    def process(self, mode: str, environment: dict, inputs: list):
+        results = [{"id" : name, "vals" : inputs[i]} for i, name in enumerate(self.make_outcome_names())]
+        return results[0] if len(results) == 1 else results
 
 class ValueOp(Op):
     fields = ["value"]
@@ -383,8 +400,8 @@ class ValueOp(Op):
     def clone(self):
         raise ValueError(f"We should not clone ValueOp objects.")
 
-    def process(self, mode: str, environment: dict):
-        self.intermediate = self.value
+    def process(self, mode: str, environment: dict, inputs: list):
+        return self.value
 
 class MethodCallOp(Op):
     fields = ["method_name", "args", "kwargs"]
@@ -397,12 +414,12 @@ class MethodCallOp(Op):
         self.args = remove_datops_from_args(args) if args is not None else args
         self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
 
-    def process(self, mode: str, environment: dict):
-        iter_ins = iter(self.inputs)
-        _obj = next(iter_ins).intermediate
-        _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
-        _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
-        self.intermediate = _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
+    def process(self, mode: str, environment: dict, inputs: list):
+        input_iter = iter(inputs)
+        _obj = next(input_iter)
+        _args = _resolve_args(self.args, input_iter)
+        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
+        return _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
 
 class CallOp(Op):
     fields = ["func", "args", "kwargs"]
@@ -417,11 +434,11 @@ class CallOp(Op):
         self.args = remove_datops_from_args(args) if args is not None else args
         self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
 
-    def process(self, mode: str, environment: dict):
-        iter_ins = iter(self.inputs)
-        _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
-        _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
-        self.intermediate = self.func(*_args, **_kwargs)
+    def process(self, mode: str, environment: dict, inputs: list):
+        input_iter = iter(inputs)
+        _args = _resolve_args(self.args, input_iter)
+        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
+        return self.func(*_args, **_kwargs)
 
 class GetAttrOp(Op):
     fields = ["attr_name"]
@@ -430,13 +447,14 @@ class GetAttrOp(Op):
         super().__init__(name=attr_name if attr_name else '?')
         self.attr_name = attr_name
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         if self.is_dataframe_op:
-            self.intermediate = self.inputs[0].intermediate
+            result = inputs[0]
             for attr in self.attr_name:
-                self.intermediate = getattr(self.intermediate, attr)
+                result = getattr(result, attr)
+            return result
         else:
-            self.intermediate = getattr(self.inputs[0].intermediate, self.attr_name)
+            return getattr(inputs[0], self.attr_name)
 
 class GetItemOp(Op):
     fields = ["key"]
@@ -447,11 +465,11 @@ class GetItemOp(Op):
         super().__init__(name=name)
 
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         key = self.key
         if key is DATA_OP_PLACEHOLDER:
-            key = self.inputs[1].intermediate
-        self.intermediate = self.inputs[0].intermediate[key]
+            key = inputs[1]
+        return inputs[0][key]
 
 class BinOp(Op):
     fields = ["op", "left", "right"]
@@ -463,19 +481,19 @@ class BinOp(Op):
         self.right = DATA_OP_PLACEHOLDER if isinstance(right, DataOp) else right
 
 
-    def process(self, mode: str, environment: dict, cv_id = None):
+    def process(self, mode: str, environment: dict, inputs: list):
         i = 0
         if self.left is DATA_OP_PLACEHOLDER:
-            left = self.inputs[i].intermediate
+            left = inputs[i]
             i += 1
         else:
             left = self.left
         if self.right is DATA_OP_PLACEHOLDER:
-            right = self.inputs[i].intermediate
+            right = inputs[i]
             i += 1
         else:
             right = self.right
-        self.intermediate = self.op(left, right)
+        return self.op(left, right)
 
 class SearchEvalOp(Op):    
     def __init__(self, outcome_names: list[str], parent: Op = None):

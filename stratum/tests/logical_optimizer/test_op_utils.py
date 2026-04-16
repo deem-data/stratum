@@ -1,13 +1,14 @@
 #from curses import flash
 import unittest
 import stratum as skrub
-from stratum.optimizer._optimize import optimize as optimize_, OptConfig, choice_unrolling
+from stratum.optimizer._optimize import optimize as optimize_, OptConfig, choice_unrolling, convert_to_ops
 from stratum.optimizer._op_utils import show_graph, clone_sub_dag, topological_iterator, FLAGS
 from stratum._config import config
 graph = False
 
 def optimize(dag, conf=None):
-    return list(topological_iterator(optimize_(dag, conf)))
+    linearized_dag, *_ = optimize_(dag, conf)
+    return linearized_dag
 
 class TestOpUtils(unittest.TestCase):
     def setUp(self):
@@ -21,7 +22,8 @@ class TestOpUtils(unittest.TestCase):
     def test_iterator_bfs(self):
         FLAGS.bfs = True
         try:
-            ops = optimize(self.dag)
+            root = convert_to_ops(self.dag)
+            ops = list(topological_iterator(root))
         finally:
             FLAGS.bfs = False
         self.assertEqual(ops[0].value, 1)
@@ -152,5 +154,6 @@ class TestOpUtils(unittest.TestCase):
         with config(open_graph=False):
             show_graph(out, filename='choice_unrolling')
 
+        
 
 
