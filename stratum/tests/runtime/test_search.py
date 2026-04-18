@@ -48,7 +48,7 @@ class SearchTest(RuntimeTest):
         end = start.skb.apply_func(lambda a: a).skb.mark_as_y()
 
         try:
-            with skrub.config(stats=20):
+            with skrub.config(stats=True):
                 grid_search(end, return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
@@ -59,7 +59,7 @@ class SearchTest(RuntimeTest):
         end = start.skb.apply_func(lambda a: a).skb.mark_as_X()
 
         try:
-            with skrub.config(stats=20):
+            with skrub.config(stats=True):
                 grid_search(end, return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
@@ -117,7 +117,7 @@ class SearchTest(RuntimeTest):
         X2 = X.skb.apply_func(lambda a: (a, time.sleep(0.01))[0])
         pred = X2.skb.apply(DummyRegressor(), y=y)
         # capture stdout
-        with redirect_stdout(StringIO()) as stdout, skrub.config(stats=20):
+        with redirect_stdout(StringIO()) as stdout, skrub.config(stats=True, stats_top_k=20):
             grid_search(pred, return_predictions=False)
         out = stdout.getvalue()
         out = out.split("\n")

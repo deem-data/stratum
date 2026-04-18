@@ -6,10 +6,13 @@ from stratum.optimizer._optimize import optimize
 from stratum.runtime._scheduler import SequentialScheduler
 from time import perf_counter
 
+#TODO: Rename this file
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, env=None):
     """Perform grid search with cross-validation on a DataOp DAG."""
     t0 = perf_counter()
-    show_stats = FLAGS.stats is not None
+    #FIXME: Measure operator execution only if stats is enabled
+    show_stats = FLAGS.stats
+    stats_top_k = FLAGS.stats_top_k
     env_extra = env if env else {}
     env = dag.skb.get_data()
     for k, v in env_extra.items():
@@ -27,7 +30,7 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
         table = table.reset_index().sort_values(by="Time", ascending=False)
         print("\n" + "=" * 80)
         print(f"Heavy hitters (sorted by time spent in DataOp evaluation):\n")
-        print(table.head(FLAGS.stats).to_string(index=False))
+        print(table.head(stats_top_k).to_string(index=False))
         print("=" * 80 + "\n")
 
     return (sched,preds) if return_predictions else sched

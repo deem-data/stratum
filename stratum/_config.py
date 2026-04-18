@@ -2,8 +2,6 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
-import logging
-logger = logging.getLogger(__name__)
 
 def _env_bool(name, default=False):
     val = os.getenv(name)
@@ -36,7 +34,8 @@ class _Flags:
     debug_timing: bool = _env_bool("SKRUB_RUST_DEBUG_TIMING", False)
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
     scheduler: bool =  False
-    stats: int | None = None # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
+    stats: bool = False # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
+    stats_top_k: int = 20
     open_graph: bool = False,
     cse: bool = True,
     DEBUG: bool = False
@@ -49,7 +48,8 @@ def set_config(rust_backend: bool | None = None,
            num_threads: int | None = None,
            debug_timing: bool | None = None,
            allow_patch: bool | None = None,
-           stats: int | None = None,
+           stats: bool | None = None,
+           stats_top_k: int | None = None,
            scheduler: bool | None = None,
            open_graph: bool | None = None,
            DEBUG: bool | None = None,
@@ -77,6 +77,9 @@ def set_config(rust_backend: bool | None = None,
         stratum_stats: bool, default false
             Enable/disable stratum statistics. This will print the heavy hitters of a DataOp DAG execution.
 
+        stats_top_k: int >= 0, default 20
+            Set the number of heavy hitters to print when stats is enabled.
+
         open_graph: bool, default true
             Open the graph after optimization.
 
@@ -103,10 +106,11 @@ def set_config(rust_backend: bool | None = None,
     if scheduler is not None:
         FLAGS.scheduler = bool(scheduler)
     if stats is not None:
-        if isinstance(stats, bool):
-            logger.warning("stats flag is a boolean, expected an integer. Ignoring stats flag.")
-            stats = None
-        FLAGS.stats = int(stats) if stats >= 0 else None
+        FLAGS.stats = bool(stats)
+    if stats_top_k is not None:
+        if not (isinstance(stats_top_k, int) and stats_top_k >= 0):
+            raise ValueError("stats_top_k must be an int >= 0")
+        FLAGS.stats_top_k = int(stats_top_k)
     if open_graph is not None:
         FLAGS.open_graph = bool(open_graph)
     if DEBUG is not None:
@@ -130,6 +134,7 @@ def get_config() -> dict:
         "allow_patch": FLAGS.allow_patch,
         "scheduler": FLAGS.scheduler,
         "stats": FLAGS.stats,
+        "stats_top_k": FLAGS.stats_top_k,
         "open_graph": FLAGS.open_graph,
         "DEBUG" : FLAGS.DEBUG,
         "force_polars": FLAGS.force_polars,
