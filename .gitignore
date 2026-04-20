@@ -53,6 +53,7 @@ coverage.xml
 
 # VS Code
 .vscode
+*.cursor/
 
 # Ignore fetched datasets
 skrub/datasets/data/*

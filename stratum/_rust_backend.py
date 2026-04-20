@@ -3,6 +3,8 @@ import os
 import time
 from . _config import get_config
 
+T0 = time.perf_counter()
+
 # Set the rust backend related config knobs
 def __getattr__(name):
     rc = get_config()
@@ -47,7 +49,7 @@ def start_timing():
 def print_timing(msg, start_time):
     if start_time is not None and __getattr__("DEBUG_TIMING"):
         end_time = time.perf_counter()
-        print(f"[python] {msg}: {(end_time - start_time):8.3f}s")
+        print(f"[python] [{(end_time- T0) * 1000:.1f}] {msg}: {(end_time - start_time) * 1000:.1f}ms")
 
 
 # pandas or polars series -> list (best-effort, minimal overhead)
@@ -69,9 +71,11 @@ hashing_tfidf_fit = getattr(native, "hashing_tfidf_csr", None) if native else No
 hashing_tfidf_transform = getattr(native, "hashing_tfidf_csr_with_idf", None) if native else None
 tfidf_fit = getattr(native, "tfidf_fit_csr", None) if native else None
 tfidf_transform = getattr(native, "tfidf_transform_csr", None) if native else None
-fd_fit= getattr(native, "fd_fit_from_csr", None) if native else None
-fd_transform= getattr(native, "fd_transform_from_csr", None) if native else None
+fd_fit = getattr(native, "fd_fit_from_csr", None) if native else None
+fd_transform = getattr(native, "fd_transform_from_csr", None) if native else None
 truncated_svd_fit = getattr(native, "truncated_svd_fit_from_csr", None) if native else None
 truncated_svd_transform = getattr(native, "truncated_svd_transform_from_csr", None) if native else None
 ohe_transform = getattr(native, "ohe_transform_csr", None) if native else None
 csr_to_dense = getattr(native, "csr_to_dense", None) if native else None
+standard_scale_fit = getattr(native, "standard_scale_fit", None) if native else None
+standard_scale_transform = getattr(native, "standard_scale_transform", None) if native else None
