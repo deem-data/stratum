@@ -12,7 +12,7 @@ from stratum._config import FLAGS
 from stratum.optimizer.ir._dataframe_ops import (
     ApplyUDFOp, AssignOp, ConcatOp, DataSourceOp, DatetimeConversionOp,
     DropOp, GetAttrProjectionOp, GroupedDataframeOp, MetadataOp, ProjectionOp,
-    SplitOp, rewrite_fuse_get_item_ops,)
+    SplitOp)
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.ir._ops import DATA_OP_PLACEHOLDER, GetItemOp, MethodCallOp, Op
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
@@ -352,10 +352,6 @@ class TestSplitOp(unittest.TestCase):
         with self.assertRaises(ValueError):
             op.process("fit_transform", {})
 
-
-class TestRewriteFuseGetItemOps(unittest.TestCase):
-    def test_noop(self):
-        self.assertIsNone(rewrite_fuse_get_item_ops(Op()))
 
 
 class TestMakeReadOpWithVariable(unittest.TestCase):

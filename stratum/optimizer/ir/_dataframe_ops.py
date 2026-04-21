@@ -93,13 +93,17 @@ class ProjectionOp(Op):
 
     def process(self, mode: str, environment: dict):
         _obj, _args, _kwargs = self._extract_args_and_kwargs()
+        # self.func is a string
         if self.is_method:
             if FLAGS.force_polars:
                 raise ValueError(f"Unsupported method: {self.func}")
             else:
                 self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
-        else:
+        # self.func is a function
+        elif callable(self.func):
             self.intermediate = self.func(_obj, *_args, **_kwargs)
+        else:
+            raise TypeError(f"`func` must be callable when `is_method=False`, got {type(self.func)}")
 
 class DropOp(ProjectionOp):
     fields = ["args", "kwargs", "columns"]
@@ -267,26 +271,6 @@ class ConcatOp(Op):
         else:
             self.intermediate = pd.concat([first, *others], axis=axis)
 
-
-def rewrite_fuse_get_item_ops(op: Op) -> Op:
-    pass
-    # obj = op.inputs[0]
-    # fuse GetItem and Projection
-    # if isinstance(obj, GetItemOp) and not obj.is_X and not obj.is_y:
-    #     op.inputs[0] = op.inputs[0].inputs[0]
-    #     new_op = ProjectionOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs, columns=obj.key, is_X=op.is_X, is_y=op.is_y)
-    #     # remove GetItem --> Projection connection
-    #     obj.outputs.remove(op)
-    #     # check if GetItem has other outputs, if not remove op
-    #     if len(obj.outputs) == 0:
-    #         obj.replace_output_of_inputs(new_op)
-    #     else:
-    #         # append new_op to all GetItem's inputs
-    #         for in_ in obj.inputs:
-    #             in_.add_output(new_op)
-    #     # set the output of all new op's inputs correctly
-    #     for in_ in new_op.inputs[1:]:
-    #         in_.replace_output(op, new_op)
 
 class SplitOp(Op):
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
