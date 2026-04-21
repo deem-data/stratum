@@ -1,3 +1,4 @@
+from typing import Callable
 from stratum.optimizer.ir._ops import DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp, VariableOp
 from pandas import DataFrame
 import pandas as pd
@@ -68,7 +69,7 @@ class MetadataOp(Op):
 class ProjectionOp(Op):
     fields = ["func", "is_method", "args", "kwargs", "columns"]
     
-    def __init__(self, func="", is_method: bool = True, args: tuple | list = None, kwargs: dict = None,
+    def __init__(self, func: str | Callable ="", is_method: bool = True, args: tuple | list = None, kwargs: dict = None,
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(name=func.upper() if is_method else f"{func.__name__.upper()}", inputs=inputs, outputs=outputs)
         if kwargs is not None:

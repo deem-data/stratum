@@ -96,9 +96,6 @@ def define_pipeline(file_path):
     }
     preds = {name: X_vec.skb.apply(m, y=y) for name, m in models.items()}
     return skrub.choose_from(preds, name="models").as_data_op()
-    # model = skrub.choose_from(models, name="models").as_data_op()
-    # preds = X_vec.skb.apply(model, y=y)
-    return preds
 
 def make_data(n: int = 1000):
     df = pd.DataFrame({

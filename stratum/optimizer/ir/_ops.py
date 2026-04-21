@@ -343,8 +343,7 @@ class ChoiceOp(Op):
             outcome_names = [[(choice_name, f"Opt{i}")] for i in range(n_outcomes)]
         elif append_choice_name:
             outcome_names = [[(choice_name, name)] for name in outcome_names]
-        else:
-            outcome_names = outcome_names
+
         super().__init__(inputs=inputs)
         self.outcome_names = outcome_names
         self.update_name()
