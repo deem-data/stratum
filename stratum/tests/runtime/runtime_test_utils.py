@@ -4,7 +4,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from skrub._data_ops._data_ops import DataOp
 from stratum._api import evaluate
-import stratum as skrub
+import stratum as st
 from sklearn.dummy import DummyRegressor
 
 
@@ -32,7 +32,7 @@ def datetime_pipeline2(x: DataOp, y: DataOp) -> DataOp:
 def simple_pipeline() -> DataOp:
     data = {"x": np.linspace(0, 10, 100), "y": np.linspace(0, 10, 100) % 10}
     data = pd.DataFrame(data)
-    data = skrub.as_data_op(data)
+    data = st.as_data_op(data)
     x = data[["x"]].skb.mark_as_X()
     y = data["y"].skb.mark_as_y()
     x = x + 33

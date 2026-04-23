@@ -1,6 +1,6 @@
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer._optimize import OptConfig, optimize
-import stratum as skrub
+import stratum as st
 import pandas as pd
 import unittest
 
@@ -21,7 +21,7 @@ class MyTestCase(unittest.TestCase):
         })
 
     def test_optimize1(self):
-        data = skrub.var("data", self.df).skb.subsample(3)
+        data = st.var("data", self.df).skb.subsample(3)
         X = data[["x", "datetime"]].skb.mark_as_X()
 
         X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
@@ -33,7 +33,7 @@ class MyTestCase(unittest.TestCase):
         self.assertTrue(len(out[0].inputs) == 0)
 
     def test_optimize2(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
 
         X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
@@ -45,7 +45,7 @@ class MyTestCase(unittest.TestCase):
         self.assertEqual(len(out), 10)
         
     def test_more_ops(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
         X2 = X1.assign(

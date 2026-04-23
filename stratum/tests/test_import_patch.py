@@ -1,6 +1,6 @@
 import sys
 import pandas as pd
-import stratum as skrub
+import stratum as st
 from sklearn.preprocessing import OneHotEncoder
 from skrub import TableVectorizer, StringEncoder
 
@@ -18,7 +18,7 @@ def test_tablevectorizer_stringencoder(capfd):
         'B': ['02/02/2024', '23/02/2024', '12/03/2024', '13/03/2024'],
         'C': ['1.5', 'N/A', '12.2', 'N/A'],
     })
-    with skrub.config(rust_backend=True, debug_timing=True):
+    with st.config(rust_backend=True, debug_timing=True):
         vectorizer = TableVectorizer(low_cardinality=StringEncoder())
         _ = vectorizer.fit_transform(df)
         # Assert if the fitted transformers is RustyStringEncoder
@@ -32,7 +32,7 @@ def test_tablevectorizer_onehotencoder(capfd):
         'B': ['02/02/2024', '23/02/2024', '12/03/2024', '13/03/2024'],
         'C': ['1.5', 'N/A', '12.2', 'N/A'],
     })
-    with skrub.config(rust_backend=True, debug_timing=True):
+    with st.config(rust_backend=True, debug_timing=True):
         vectorizer = TableVectorizer(low_cardinality=OneHotEncoder())
         _ = vectorizer.fit_transform(df)
         # Assert if the fitted transformers is RustyStringEncoder

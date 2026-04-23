@@ -10,7 +10,7 @@ import time
 import unittest
 import pandas as pd
 import numpy as np
-import stratum as skrub
+import stratum as st
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -27,13 +27,13 @@ class InputCheckEstimator(BaseEstimator):
 
 class SearchTest(RuntimeTest):
     def test_search(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
 
         y1 = datetime_pipeline1(X, y)
         y2 = datetime_pipeline2(X, y)
-        y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
+        y = st.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
 
         cv = KFold(n_splits=3, shuffle=True, random_state=42)
         search_stratum, preds = grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
@@ -44,22 +44,22 @@ class SearchTest(RuntimeTest):
 
 
     def test_search_with_no_X(self):
-        start = skrub.as_data_op(True)
+        start = st.as_data_op(True)
         end = start.skb.apply_func(lambda a: a).skb.mark_as_y()
 
         try:
-            with skrub.config(stats=True):
+            with st.config(stats=True):
                 grid_search(end, return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
             self.assertEqual("X and y nodes not found in the DAG",str(e))
 
     def test_search_with_no_y(self):
-        start = skrub.as_data_op(True)
+        start = st.as_data_op(True)
         end = start.skb.apply_func(lambda a: a).skb.mark_as_X()
 
         try:
-            with skrub.config(stats=True):
+            with st.config(stats=True):
                 grid_search(end, return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
@@ -67,39 +67,39 @@ class SearchTest(RuntimeTest):
 
 
     def test_search_choice_not_at_the_end1(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
-        X = X + skrub.choose_from([0,1]).as_data_op()
+        X = X + st.choose_from([0,1]).as_data_op()
         pred = X.skb.apply(DummyRegressor(), y=y)
         grid_search(pred)
 
     def test_search_choice_not_at_the_end2(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
         X1 = X.assign(x_a= X["x"] + 1)
         X2 = X.assign(x_b = X["x"] - 1)
-        X = 4 + skrub.choose_from([X1,X2]).as_data_op()
+        X = 4 + st.choose_from([X1,X2]).as_data_op()
         pred = X.skb.apply(DummyRegressor(), y=y)
         with config(scheduler=True):
             pred.skb.make_grid_search()
 
     def test_search_choice_not_at_the_end3(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
         X1 = X.assign(x_a= X["x"] + 1)
         X2 = X.assign(x_b = X["x"] - 1)
-        X = 4 + skrub.choose_from([X1,X2]).as_data_op()
+        X = 4 + st.choose_from([X1,X2]).as_data_op()
         pred = X.skb.apply(InputCheckEstimator(), y=y)
         grid_search(pred)
 
     def test_search_error_during_dataop_processing(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
-        y = y.skb.apply_func(lambda a, m: (a, print(m))[0] if m != 'predict' else int("grr"), skrub.eval_mode())
+        y = y.skb.apply_func(lambda a, m: (a, print(m))[0] if m != 'predict' else int("grr"), st.eval_mode())
         pred = X.skb.apply(DummyRegressor(), y=y)
         try:
             grid_search(pred)
@@ -110,14 +110,14 @@ class SearchTest(RuntimeTest):
 
 
     def test_search_with_stats(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
 
         X2 = X.skb.apply_func(lambda a: (a, time.sleep(0.01))[0])
         pred = X2.skb.apply(DummyRegressor(), y=y)
         # capture stdout
-        with redirect_stdout(StringIO()) as stdout, skrub.config(stats=True, stats_top_k=20):
+        with redirect_stdout(StringIO()) as stdout, st.config(stats=True, stats_top_k=20):
             grid_search(pred, return_predictions=False)
         out = stdout.getvalue()
         out = out.split("\n")
@@ -127,7 +127,7 @@ class SearchTest(RuntimeTest):
 
 
     def test_fused_attr(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
         date = X["datetime"].skb.apply_func(pd.to_datetime, format="%Y-%m-%d %H:%M:%S")

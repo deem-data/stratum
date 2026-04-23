@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import polars as pl
-import stratum as skrub
+import stratum as st
 from skrub._data_ops._data_ops import DataOp
 from stratum._config import FLAGS
 from stratum.optimizer.ir._dataframe_ops import (
@@ -42,7 +42,7 @@ class TestDataframeOps(unittest.TestCase):
         })
 
     def test_data_source_rewrite_df(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         ops = optimize(data)
         assert len(ops) == 1
         assert isinstance(ops[0], DataSourceOp)
@@ -50,38 +50,38 @@ class TestDataframeOps(unittest.TestCase):
     def test_data_source_rewrite_read(self):
         tmp_file = tempfile.mktemp(suffix=".csv")
         self.df.to_csv(tmp_file, index=False)
-        data = skrub.as_data_op(tmp_file).skb.apply_func(pd.read_csv)
+        data = st.as_data_op(tmp_file).skb.apply_func(pd.read_csv)
         ops = optimize(data, OptConfig(dataframe_ops=True))
         assert len(ops) == 1
         assert isinstance(ops[0], DataSourceOp)
         os.remove(tmp_file)
 
     def test_projection_rewrite_df(self):
-        data = skrub.as_data_op(self.df).drop("y", axis=1)
+        data = st.as_data_op(self.df).drop("y", axis=1)
         ops = optimize(data)
         assert len(ops) == 2
         assert isinstance(ops[1], ProjectionOp)
 
     @unittest.skip("Skipping this test for now")
     def test_projection_fused_get_item_rewrite_df1(self):
-        data = skrub.as_data_op(self.df)["x"].apply(lambda x: x + 1)
+        data = st.as_data_op(self.df)["x"].apply(lambda x: x + 1)
         ops = optimize(data)
         assert len(ops) == 2
         assert isinstance(ops[1], ProjectionOp)
 
     def test_projection_fused_get_item_rewrite_df2(self):
-        data = skrub.as_data_op(self.df)["x"]
-        sub_dag1 = data.apply(lambda x, a: x + a, a=skrub.as_data_op(1))
+        data = st.as_data_op(self.df)["x"]
+        sub_dag1 = data.apply(lambda x, a: x + a, a=st.as_data_op(1))
         sub_dag2 = data
-        root = skrub.choose_from([sub_dag1, sub_dag2]).as_data_op()
+        root = st.choose_from([sub_dag1, sub_dag2]).as_data_op()
         ops = optimize(root)
         self.assertEqual(5, len(ops))
         self.assertTrue(isinstance(ops[1], GetItemOp))
         self.assertTrue(isinstance(ops[3], ProjectionOp))
 
     def test_fused_get_attr_rewrite_df(self):
-        data = skrub.as_data_op(self.df)[["datetime"]].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S')
-        data = data.assign(year= data["datetime"].dt.year, month= data["datetime"].dt.month)
+        data = st.as_data_op(self.df)[["datetime"]].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S')
+        data = data.assign(year=data["datetime"].dt.year, month= data["datetime"].dt.month)
         data = data.copy()
         ops = optimize(data)
         self.assertEqual(8,len(ops))
@@ -360,9 +360,9 @@ class TestMakeReadOpWithVariable(unittest.TestCase):
         pd.DataFrame({"col": [1, 2]}).to_csv(tmp, index=False)
         tmp.close()
         try:
-            var = skrub.var("path")
+            var = st.var("path")
             data = var.skb.apply_func(pd.read_csv)
-            with skrub.config(fast_dataops_convert=True):
+            with st.config(fast_dataops_convert=True):
                 ops = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], DataSourceOp)
             # Verify it can actually process
@@ -377,9 +377,9 @@ class TestMakeReadOpWithVariable(unittest.TestCase):
         pd.DataFrame({"col": [1, 2]}).to_csv(tmp, index=False)
         tmp.close()
         try:
-            path = skrub.var("path")
-            data = skrub.as_data_op(tmp.name).skb.apply_func(pd.read_csv, sep=path)
-            with skrub.config(fast_dataops_convert=True):
+            path = st.var("path")
+            data = st.as_data_op(tmp.name).skb.apply_func(pd.read_csv, sep=path)
+            with st.config(fast_dataops_convert=True):
                 ops = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], DataSourceOp)
         finally:

@@ -1,11 +1,11 @@
 import unittest
-import stratum as skrub
+import stratum as st
 from stratum.tests.runtime.runtime_test_utils import simple_pipeline
 
 class SplitOpTest(unittest.TestCase):
     def test_train_test_split(self):
         pipeline = simple_pipeline()
-        with skrub.config(scheduler=True):
+        with st.config(scheduler=True):
             search = pipeline.skb.make_grid_search()
             print(search.results_)
 

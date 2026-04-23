@@ -1,6 +1,6 @@
 #from curses import flash
 import unittest
-import stratum as skrub
+import stratum as st
 from stratum.optimizer._optimize import optimize as optimize_, OptConfig, choice_unrolling
 from stratum.optimizer._op_utils import show_graph, clone_sub_dag, topological_iterator, FLAGS
 from stratum._config import config
@@ -11,7 +11,7 @@ def optimize(dag, conf=None):
 
 class TestOpUtils(unittest.TestCase):
     def setUp(self):
-        t1 = skrub.as_data_op(1)
+        t1 = st.as_data_op(1)
         t2 = t1 + 5
         t3 = t2 - 3
         t4 = t1 + 2
@@ -47,10 +47,9 @@ class TestOpUtils(unittest.TestCase):
     def run_clone_sub_dag(self, ops: list, clone_position: int, graph: bool = False, new_root_op = None, stop_at_op = None, run_assertions = True):
         clone_target = ops[clone_position]
         num_clone_target_children_original = len(clone_target.outputs)
-        leaf = ops[-1]
         if graph:
             show_graph(ops, filename='original')
-        leafs = clone_sub_dag(clone_target, new_root_op=new_root_op, stop_at_op=stop_at_op)
+        clone_sub_dag(clone_target, new_root_op=new_root_op, stop_at_op=stop_at_op)
         if graph:
             show_graph(ops, filename='cloned')
         if run_assertions:
@@ -59,15 +58,15 @@ class TestOpUtils(unittest.TestCase):
 
 
     def test_clone_sub_dag1(self):
-        t1 = skrub.as_data_op(1)
+        t1 = st.as_data_op(1)
         t2 = t1 + 5
         t3 = t2 - 3
         out = optimize(t3)
         self.run_clone_sub_dag(out, 0, graph=graph)
 
     def test_clone_sub_dag2(self):
-        t1 = skrub.as_data_op(1)
-        t2 = skrub.as_data_op(2.5)
+        t1 = st.as_data_op(1)
+        t2 = st.as_data_op(2.5)
         t3 = t1 / 5
         t4 = t3 + t2
         t5 = t4 - 3
@@ -75,8 +74,8 @@ class TestOpUtils(unittest.TestCase):
         self.run_clone_sub_dag(out, 0, graph=graph)
 
     def test_clone_sub_dag3(self):
-        t1 = skrub.as_data_op(1)
-        t2 = skrub.as_data_op(2.5)
+        t1 = st.as_data_op(1)
+        t2 = st.as_data_op(2.5)
         t3 = t1 + 5
         t4 = t3 + t2
         t5 = t4 - 3
@@ -86,34 +85,34 @@ class TestOpUtils(unittest.TestCase):
         self.run_clone_sub_dag(out, -4, graph=graph)
 
     def test_clone_sub_dag4(self):
-        t1 = skrub.as_data_op(1)
-        t2 = skrub.as_data_op(2.5)
-        t3 = skrub.choose_from([t1, t2]).as_data_op()
+        t1 = st.as_data_op(1)
+        t2 = st.as_data_op(2.5)
+        t3 = st.choose_from([t1, t2]).as_data_op()
         t4 = t3 + 5
         t5 = t3 - 3
-        t6 = skrub.choose_from([t4, t5]).as_data_op()
+        t6 = st.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7,OptConfig(cse=True, unroll_choices=False))
         self.run_clone_sub_dag(out, 2, graph=graph)
 
     def test_clone_sub_dag5(self):
-        t1 = skrub.as_data_op(1)
-        t2 = skrub.as_data_op(2.5)
-        t3 = skrub.choose_from([t1, t2]).as_data_op()
+        t1 = st.as_data_op(1)
+        t2 = st.as_data_op(2.5)
+        t3 = st.choose_from([t1, t2]).as_data_op()
         t4 = t3 + 5
         t5 = t3 - 3
-        t6 = skrub.choose_from([t4, t5]).as_data_op()
+        t6 = st.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7)
 
 
     def test_choice_unrolling_w_clone_sub_dag(self):
-        t1 = skrub.as_data_op(1)
-        t2 = skrub.as_data_op(2.5)
-        t3 = skrub.choose_from([t1, t2]).as_data_op()
+        t1 = st.as_data_op(1)
+        t2 = st.as_data_op(2.5)
+        t3 = st.choose_from([t1, t2]).as_data_op()
         t4 = t3 + 5
         t5 = t3 - 3
-        t6 = skrub.choose_from([t4, t5]).as_data_op()
+        t6 = st.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
         root = out[-1]
@@ -139,12 +138,12 @@ class TestOpUtils(unittest.TestCase):
 
 
     def test_choice_unrolling(self):
-        t1 = skrub.as_data_op(1)
-        t2 = skrub.as_data_op(2.5)
-        t3 = skrub.choose_from([t1, t2]).as_data_op()
+        t1 = st.as_data_op(1)
+        t2 = st.as_data_op(2.5)
+        t3 = st.choose_from([t1, t2]).as_data_op()
         t4 = t3 + 5
         t5 = t3 - 3
-        t6 = skrub.choose_from([t4, t5]).as_data_op()
+        t6 = st.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
         out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
         root = out[-1]

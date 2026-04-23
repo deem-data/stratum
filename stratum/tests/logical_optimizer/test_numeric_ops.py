@@ -1,6 +1,6 @@
 import unittest
 import pandas as pd
-import stratum as skrub
+import stratum as st
 import numpy as np
 from sklearn.dummy import DummyRegressor
 from stratum.optimizer.ir._numeric_ops import  NumericOp
@@ -13,7 +13,7 @@ class TestNumericOps(unittest.TestCase):
         })
 
     def test_to_numeric_op1(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         X = data[["x"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
         t1 = X.skb.apply_func(np.log)
@@ -21,7 +21,7 @@ class TestNumericOps(unittest.TestCase):
         y_exp = y.skb.apply_func(np.exp)
         pred = t2.skb.apply(DummyRegressor(), y=y_exp)
 
-        with skrub.config(scheduler=True):
+        with st.config(scheduler=True):
             pred.skb.make_grid_search(cv=3)
 
     def test_unsupported_numeric_op(self):

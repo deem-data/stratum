@@ -3,10 +3,10 @@ import pandas as pd
 import pytest
 import numpy as np
 
-import stratum as skrub
+import stratum as st
 from stratum import StringEncoder
 from stratum.adapters.string_encoder import RustyStringEncoder, _rust_supported_subset, _clean_strings
-skrub.set_config(rust_backend=True, debug_timing=True, num_threads=8)
+st.set_config(rust_backend=True, debug_timing=True, num_threads=8)
 
 def capture_std_out(capfd):
     # Capture timing output

@@ -211,7 +211,6 @@ def convert_handle_choice(node, op, ids_to_ops, children):
 def choice_unrolling(root: Op):
     """ Rewrite for unrolling the dag after choice op into separate dags for each outcome."""
     contains_choice = True
-    i = 0
     while contains_choice:
         dag_iter = topological_iterator(root)
         contains_choice = False
@@ -240,8 +239,6 @@ def choice_unrolling(root: Op):
                     root = unroll_simple_choice(root, op, outcomes)
                     logger.debug(f"New root after unrolling: {root}")
 
-                # if FLAGS.DEBUG:
-                #     show_graph(root, f"choice-unrolled={i}")
                 del op
                 break
     return root

@@ -55,6 +55,11 @@ class EvaluateTest(RuntimeTest):
         t9 = skrub.choose_from([t7, t8]).as_data_op()
         t10 = t9 + 1
         out = evaluate(t10, seed=self.seed, test_size=self.test_size)
+        self.assertEqual(len(out), 4)
+        self.assertEqual(out[0]["vals"], 13)
+        self.assertEqual(out[1]["vals"], 3)
+        self.assertEqual(out[2]["vals"], 3.5)
+        self.assertEqual(out[3]["vals"], 16)
 
 
     def test_evaluate(self):

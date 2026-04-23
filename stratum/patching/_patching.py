@@ -125,11 +125,6 @@ def _symbol_OVERRIDES_ITEMS():
     # Helper to avoid global lookup in hot loops
     return _SYMBOL_OVERRIDES.items()
 
-
-# Expose mapping under a private name for debugging/tests
-_SYMBOL_OVERRIDES = _SYMBOL_OVERRIDES
-
-
 def patch_skrub() -> None:
     """Patch upstream `skrub` in-place so its internals use Stratum adapters.
 

@@ -3,7 +3,7 @@ from stratum.optimizer import apply_cse_on_skrub_ir
 from stratum.optimizer._cse import CSETable
 from stratum.optimizer._optimize import topological_traverse
 import unittest
-import stratum as skrub
+import stratum as st
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
@@ -24,8 +24,8 @@ class TestCSE(unittest.TestCase):
         })
 
     def test_cse_table(self):
-        t1 = skrub.as_data_op(1)
-        t2 = skrub.as_data_op(2)
+        t1 = st.as_data_op(1)
+        t2 = st.as_data_op(2)
         t3 = t1 + t2
         t4 = t1 + t2
 
@@ -45,7 +45,7 @@ class TestCSE(unittest.TestCase):
         
 
     def test_cse(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
 
@@ -57,23 +57,22 @@ class TestCSE(unittest.TestCase):
         t2 = X.skb.apply_func(pre_process)
         y2 = t2.skb.apply(RandomForestRegressor(random_state=123), y=y)
 
-        y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
+        y = st.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
         y = apply_cse_on_skrub_ir(y)
 
     def test_cse2(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
-        y = data["y"].skb.mark_as_y()
 
         # pipeline 1
         X1A = X.assign(datetime=X["datetime"].apply(lambda a: a).apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
         X1B = X1A.assign(
             year=X1A["datetime"].dt.year,
             month=X1A["datetime"].dt.month)
-        X1B = apply_cse_on_skrub_ir(X1B)
+        apply_cse_on_skrub_ir(X1B)
 
     def test_cse4(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
 
@@ -86,10 +85,10 @@ class TestCSE(unittest.TestCase):
             hour=X1A["datetime"].dt.hour)
         X1B = X1B.drop(["datetime"], axis=1)
         y1 = X1B.skb.apply(RandomForestRegressor(random_state=42), y=y)
-        y = apply_cse_on_skrub_ir(y1)
+        apply_cse_on_skrub_ir(y1)
 
     def test_cse5(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
 
@@ -111,11 +110,11 @@ class TestCSE(unittest.TestCase):
             hour=X2["datetime"].dt.hour)
         X2B = X2B.drop(["datetime"], axis=1)
         y2 = X2B.skb.apply(RandomForestRegressor(random_state=123), y=y)
-        y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
-        y = apply_cse_on_skrub_ir(y)
+        y = st.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
+        apply_cse_on_skrub_ir(y)
 
     def test_cse6(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
 
@@ -135,11 +134,11 @@ class TestCSE(unittest.TestCase):
             hour=X2["datetime"].dt.hour)
         X2B = X2B.drop(["datetime"], axis=1)
         y2 = X2B.skb.apply(RandomForestRegressor(random_state=123), y=y)
-        y = skrub.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
-        y = apply_cse_on_skrub_ir(y)
+        y = st.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
+        apply_cse_on_skrub_ir(y)
 
     def test_cse7(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
 
         X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
@@ -147,13 +146,11 @@ class TestCSE(unittest.TestCase):
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
 
-        # X2A.skb.draw_graph().open()
-        out = apply_cse_on_skrub_ir(X2A)
-        # out.skb.draw_graph().open()
+        apply_cse_on_skrub_ir(X2A)
 
 
     def test_cse8(self):
-        data = skrub.var("data", self.df)
+        data = st.var("data", self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
 
         X1 = X.assign(datetime=X["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
@@ -165,11 +162,9 @@ class TestCSE(unittest.TestCase):
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month,
             dayofweek = X1["datetime"].dt.weekday)
-        out = skrub.choose_from({"pipeline 1": X2A, "pipeline 2": X2B}).as_data_op()
+        out = st.choose_from({"pipeline 1": X2A, "pipeline 2": X2B}).as_data_op()
 
-        # out.skb.draw_graph().open()
-        out = apply_cse_on_skrub_ir(out)
-        # out.skb.draw_graph().open()
+        apply_cse_on_skrub_ir(out)
 
 if __name__ == "__main__":
     unittest.main()

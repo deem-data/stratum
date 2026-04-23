@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 import polars as pl
-import stratum as skrub
+import stratum as st
 from sklearn.dummy import DummyRegressor
 from sklearn.preprocessing import StandardScaler
 from skrub._data_ops._data_ops import DataOp
@@ -47,12 +47,12 @@ class TestOpCloning(unittest.TestCase):
             SearchEvalOp([]).clone()
 
     def test_clone_ops(self):
-        data = skrub.as_data_op(self.df)
+        data = st.as_data_op(self.df)
         data_op = data.apply(lambda x: x + 1)
         pred = data_op.skb.apply(DummyRegressor(), y=data["y"])
         pred = pred.skb.apply_func(lambda x, a, b: x, 1, b=1)
-        choice = skrub.choose_from([pred], name="choice").as_data_op()
-        with skrub.config(fast_dataops_convert=True):
+        choice = st.choose_from([pred], name="choice").as_data_op()
+        with st.config(fast_dataops_convert=True):
             ops = list(topological_iterator(optimize_(choice.empty)))
 
         with self.assertRaises(ValueError):

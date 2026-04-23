@@ -4,7 +4,7 @@ import unittest
 import uuid
 
 from skrub import TableVectorizer
-import stratum as skrub
+import stratum as st
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
@@ -18,7 +18,6 @@ from stratum.optimizer._optimize import optimize
 
 class TargetEncoder(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
-        print("fit target encoder")
         self.global_mean_ = y.mean()
         tmp = pd.concat([X, y], axis=1)
         self.cols = X.columns
@@ -28,7 +27,6 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        print("transform target encoder")
         X_out = X.copy()
         for col in self.cols:
             X_out[col] = X_out[col].map(self.means[col]).fillna(self.global_mean_)
@@ -43,7 +41,7 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
 
 
 def define_pipeline(file_path):
-    df = skrub.as_data_op(file_path).skb.apply_func(pd.read_csv)
+    df = st.as_data_op(file_path).skb.apply_func(pd.read_csv)
     df = df.rename(columns={"Town/City": "Town"}, inplace=False)
     y = df["Price"].skb.mark_as_y()
     X = df.drop("Price", axis=1).skb.mark_as_X()
@@ -72,10 +70,10 @@ def define_pipeline(file_path):
 
         def is_numeric_column(col):
             return col.dtype != "object"
-        cat_selector = skrub.selectors.filter(is_string_column)
+        cat_selector = st.selectors.filter(is_string_column)
         X_cat = X.skb.select(cat_selector)
-        X_cat_enc = X_cat.skb.apply(skrub.StringEncoder())
-        num_selector = skrub.selectors.filter(is_numeric_column)
+        X_cat_enc = X_cat.skb.apply(st.StringEncoder())
+        num_selector = st.selectors.filter(is_numeric_column)
 
         X_te = X[["District", "County", "Town"]].skb.apply(TargetEncoder(), y=y)
         X_te = X_te.rename(columns={"District": "district_te", "County": "county_te", "Town": "town_te"})
@@ -87,7 +85,7 @@ def define_pipeline(file_path):
     def df2(X):
         return X.skb.apply(TableVectorizer())
 
-    X_vec = skrub.choose_from({"1": df1(X,y), "2": df2(X)}, name = "data engineering").as_data_op()
+    X_vec = st.choose_from({"1": df1(X, y), "2": df2(X)}, name ="data engineering").as_data_op()
     models = {
         "Ridge": Ridge(random_state=42),
         "XGBoost": XGBRegressor(random_state=42),
@@ -95,7 +93,7 @@ def define_pipeline(file_path):
         "ElasticNet": ElasticNet(random_state=42),
     }
     preds = {name: X_vec.skb.apply(m, y=y) for name, m in models.items()}
-    return skrub.choose_from(preds, name="models").as_data_op()
+    return st.choose_from(preds, name="models").as_data_op()
 
 def make_data(n: int = 1000):
     df = pd.DataFrame({
@@ -126,10 +124,10 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
     def test_application(self):
         tmp_path = tempfile.mkdtemp()
         df = make_data()
-        print(df.dtypes)
         df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
         scorer = make_scorer(r2_score)
-        with skrub.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False):
+        with st.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False):
             search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
-            print(search.results_)
+            self.assertIsNotNone(search.results_)
+            self.assertGreater(len(search.results_), 0)
