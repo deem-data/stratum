@@ -29,8 +29,8 @@ class MyTestCase(unittest.TestCase):
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
         out = list(topological_iterator(optimize(X2, OptConfig(cse=True))))
-        self.assertTrue(out[0].outputs[0] is out[1])
-        self.assertTrue(len(out[0].inputs) == 0)
+        self.assertIs(out[0].outputs[0], out[1])
+        self.assertEqual(len(out[0].inputs), 0)
 
     def test_optimize2(self):
         data = st.var("data", self.df)
@@ -51,7 +51,7 @@ class MyTestCase(unittest.TestCase):
         X2 = X1.assign(
             year=X1["datetime"].dt.year,
             month=X1["datetime"].dt.month)
-        out = optimize(X2, OptConfig(cse=True))
+        optimize(X2, OptConfig(cse=True))
 
 
 

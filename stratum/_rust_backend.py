@@ -36,7 +36,6 @@ try:
 except Exception as e:
     native = False
     HAVE_RUST = False
-    _import_error = e
 
 # Utility methods for timing
 def start_timing():

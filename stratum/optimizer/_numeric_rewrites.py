@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass
 from stratum.optimizer.ir._ops import Op

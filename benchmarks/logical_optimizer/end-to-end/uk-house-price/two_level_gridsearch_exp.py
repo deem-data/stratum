@@ -1,4 +1,4 @@
-from sklearn.metrics import make_scorer, mean_squared_error, r2_score
+from sklearn.metrics import make_scorer, r2_score
 from sklearn.model_selection import KFold, ShuffleSplit
 import pandas as pd
 from xgboost import XGBRegressor

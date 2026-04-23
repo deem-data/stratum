@@ -103,7 +103,7 @@ class TestOpUtils(unittest.TestCase):
         t5 = t3 - 3
         t6 = st.choose_from([t4, t5]).as_data_op()
         t7 = t6 + 5
-        out = optimize(t7)
+        optimize(t7)
 
 
     def test_choice_unrolling_w_clone_sub_dag(self):

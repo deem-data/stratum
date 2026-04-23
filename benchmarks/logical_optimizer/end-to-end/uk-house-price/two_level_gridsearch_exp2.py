@@ -1,5 +1,4 @@
 import cProfile
-from joblib import parallel_backend
 from sklearn.metrics import r2_score, make_scorer
 
 import stratum as skrub
@@ -14,7 +13,6 @@ from sklearn.linear_model import ElasticNet,  Ridge
 from time import perf_counter
 import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-import pstats
 
 pr = cProfile.Profile()
 

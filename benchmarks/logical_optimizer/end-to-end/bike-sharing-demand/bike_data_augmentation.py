@@ -249,7 +249,7 @@ if __name__ == "__main__":
     
     # Basic augmentation (double the dataset)
     output_file = Path(__file__).parent / "input" / "train_augmented_2x.csv"
-    augmented_data = augment_bike_data(
+    augment_bike_data(
         input_file, 
         output_file, 
         augmentation_factor=2,
@@ -258,7 +258,7 @@ if __name__ == "__main__":
     
     # Triple the dataset
     output_file_3x = Path(__file__).parent / "input" / "train_augmented_3x.csv"
-    augmented_data_3x = augment_bike_data(
+    augment_bike_data(
         input_file, 
         output_file_3x, 
         augmentation_factor=3,
@@ -267,7 +267,7 @@ if __name__ == "__main__":
     
     # Stratified augmentation (maintains target distribution)
     output_file_stratified = Path(__file__).parent / "input" / "train_augmented_stratified.csv"
-    stratified_data = create_stratified_augmentation(
+    create_stratified_augmentation(
         input_file,
         output_file_stratified,
         target_col='count',

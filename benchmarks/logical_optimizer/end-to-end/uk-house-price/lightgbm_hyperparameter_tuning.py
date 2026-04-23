@@ -1,5 +1,4 @@
 import cProfile
-from joblib import parallel_backend
 from sklearn.metrics import make_scorer, r2_score
 
 import stratum as skrub
@@ -8,10 +7,7 @@ from sklearn.model_selection import KFold
 import pandas as pd
 from lightgbm import LGBMRegressor
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-
 from time import perf_counter
-import numpy as np
-import pstats
 
 pr = cProfile.Profile()
 test=True

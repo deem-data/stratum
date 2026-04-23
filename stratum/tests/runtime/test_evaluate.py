@@ -28,9 +28,10 @@ class EvaluateTest(RuntimeTest):
         t3 = skrub.choose_from([t1, t2]).as_data_op()
         t4 = t3 + 5
         t5 = t4 - 3
-        out = evaluate(t5, seed=self.seed, test_size=self.test_size)
+        evaluate(t5, seed=self.seed, test_size=self.test_size)
 
 
+    @unittest.skip("FIXME")
     def test_evaluate_with_choice2(self):
         t1 = skrub.as_data_op(1)
         t2 = skrub.as_data_op(2.5)
@@ -42,8 +43,8 @@ class EvaluateTest(RuntimeTest):
         t8 = (t6 + 5) * 3
         t9 = skrub.choose_from([t7, t8]).as_data_op()
         t10 = t9 + 1
-        # FIXME
-        # out = evaluate(t10, seed=self.seed, test_size=self.test_size)
+        
+        evaluate(t10, seed=self.seed, test_size=self.test_size)
 
     def test_evaluate_with_choice3(self):
         t1 = skrub.as_data_op(1)

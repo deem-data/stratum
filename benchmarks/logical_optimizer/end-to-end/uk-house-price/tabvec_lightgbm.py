@@ -1,17 +1,14 @@
 from time import perf_counter
 import pandas as pd
-import polars
-from joblib import parallel_backend
 from sklearn.metrics import make_scorer, r2_score
 
 #import skrub
 import stratum as skrub
 from lightgbm import LGBMRegressor
-from sklearn.model_selection import train_test_split, ShuffleSplit
+from sklearn.model_selection import ShuffleSplit
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from skrub import StringEncoder, TableVectorizer
 import cProfile
-import pstats
 pr = cProfile.Profile()
 
 # 1. Load Data

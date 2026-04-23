@@ -58,7 +58,7 @@ class TestCSE(unittest.TestCase):
         y2 = t2.skb.apply(RandomForestRegressor(random_state=123), y=y)
 
         y = st.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
-        y = apply_cse_on_skrub_ir(y)
+        apply_cse_on_skrub_ir(y)
 
     def test_cse2(self):
         data = st.var("data", self.df)

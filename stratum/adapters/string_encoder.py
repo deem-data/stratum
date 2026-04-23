@@ -1,6 +1,5 @@
 from __future__ import annotations
 import numpy as np
-from scipy.sparse import csr_matrix
 
 from skrub import StringEncoder as _SE  # base class from vanilla skrub
 from .. import _rust_backend as rb

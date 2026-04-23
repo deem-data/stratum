@@ -1,7 +1,6 @@
 import pandas as pd
 import skrub
 import numpy as np
-from lightgbm import LGBMRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import make_scorer, r2_score
 from sklearn.model_selection import ShuffleSplit

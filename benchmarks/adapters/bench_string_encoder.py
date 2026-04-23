@@ -7,8 +7,7 @@ import gc
 import time
 import numpy as np
 import pandas as pd
-import stratum as skrub
-from stratum import StringEncoder
+from stratum import StringEncoder,set_config
 
 # Create a synthetic test column
 def make_series (n_rows, seed, vocab_size, avg_words, words_len_range=(3, 10)) -> pd.Series:
@@ -53,18 +52,18 @@ def main():
     )
 
     # Warm-up small runs to load code paths, JIT caches inside SciPy, etc.
-    skrub.set_config(rust_backend=False) #sklearn backend
+    set_config(rust_backend=False) #sklearn backend
     X_small = X.iloc[: min(2048, len(X))]
     _ = enc.fit_transform(X_small)
     gc.collect()
-    skrub.set_config(rust_backend=True) #rust backend
+    set_config(rust_backend=True) #rust backend
     X_small = X.iloc[: min(2048, len(X))]
     _ = enc.fit_transform(X_small)
     gc.collect()
 
     # Main benchmark: Run on the entire dataset
     print("\nStarting main benchmark")
-    skrub.set_config(rust_backend=False) #sklearn
+    set_config(rust_backend=False) #sklearn
     t0 = time.perf_counter()
     X_enc = enc.fit_transform(X)
     print(f"Shape = {X_enc.shape}")
@@ -72,7 +71,7 @@ def main():
     exec_time = t1 - t0
     print(f"skrub - Execution time = {exec_time:8.3f}s\n")
 
-    skrub.set_config(rust_backend=True, debug_timing=False, num_threads=0) #rust
+    set_config(rust_backend=True, debug_timing=False, num_threads=0) #rust
     t0 = time.perf_counter()
     X_enc = enc.fit_transform(X)
     print(f"Shape = {X_enc.shape}")
