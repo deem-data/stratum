@@ -38,6 +38,7 @@ except Exception as e:
     HAVE_RUST = False
 
 # Utility methods for timing
+#FIXME: Use INFO logging to be consistent with other files
 def start_timing():
     if __getattr__("DEBUG_TIMING"):
         return time.perf_counter()

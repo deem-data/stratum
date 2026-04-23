@@ -29,7 +29,7 @@ Stratum builds on [skrub's](https://skrub-data.org/stable) operator abstraction 
 For now, you need to build stratum from source.
 
 **Requirements:**
-- Python **3.10+**
+- Python **3.12+**
 - [skrub](https://skrub-data.org/stable/)
 - [Rust toolchain](https://rustup.rs/) (nightly not required; stable is fine)
 - [maturin](https://www.maturin.rs/) (`pip install maturin`)

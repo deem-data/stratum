@@ -74,6 +74,9 @@ def set_config(rust_backend: bool | None = None,
             Allows disabling runtime backend swapping in sensitive contexts. This is a soft
             kill-switch for disabling all non-sklearn backends, even if their flags are set.
 
+        scheduler: bool, default false
+            Enable/disable stratum's scheduler instead of skrub's make_grid_search.
+
         stratum_stats: bool, default false
             Enable/disable stratum statistics. This will print the heavy hitters of a DataOp DAG execution.
 
@@ -103,6 +106,7 @@ def set_config(rust_backend: bool | None = None,
     if allow_patch is not None:
         FLAGS.allow_patch = bool(allow_patch)
         os.environ["SKRUB_RUST_ALLOW_MONKEYPATCH"] = "1" if FLAGS.allow_patch else "0"
+    #TODO: Select between multiple schedulers in the future.
     if scheduler is not None:
         FLAGS.scheduler = bool(scheduler)
     if stats is not None:
@@ -116,11 +120,13 @@ def set_config(rust_backend: bool | None = None,
     if DEBUG is not None:
         FLAGS.DEBUG = bool(DEBUG)
         os.environ["STRATUM_DEBUG"] = "1" if FLAGS.DEBUG else "0"
+    #FIXME: This is a temporary flag. Remove once we have the operator selector.
     if force_polars is not None:
         FLAGS.force_polars = bool(force_polars)
         os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
     if cse is not None:
         FLAGS.cse = bool(cse)
+    #FIXME: This should be the default. No need to set it. Remove.
     if fast_dataops_convert is not None:
         FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
 

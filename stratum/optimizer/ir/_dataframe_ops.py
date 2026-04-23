@@ -5,8 +5,10 @@ import pandas as pd
 import polars as pl
 from stratum.optimizer._op_utils import topological_iterator
 from stratum._config import FLAGS
+from stratum.utils._utils import start_time, log_time
 from skrub._data_ops._data_ops import DataOp
 import logging
+from time import perf_counter
 from numpy import sin, cos
 logger = logging.getLogger(__name__)
 
@@ -304,6 +306,7 @@ class SplitOutput(Op):
             self.intermediate = self.inputs[0].intermediate[1]
 
 def add_splitting_op(root: Op) -> Op:
+    start = start_time()
     x_op = None
     y_op = None
     for op in topological_iterator(root):
@@ -323,6 +326,7 @@ def add_splitting_op(root: Op) -> Op:
             x_op.outputs = [split_op]
             y_op.outputs = [split_op]
             break
+    log_time("splitting took", start)
     return root
 
 def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
