@@ -17,8 +17,8 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
     env = dag.skb.get_data()
     for k, v in env_extra.items():
         env[k] = v
-    dag = optimize(dag)
-    sched = SequentialScheduler(dag, show_stats, env=env, t0=t0)
+    linearized_dag, split_pos, flagged_ops = optimize(dag)
+    sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, show_stats, env=env, t0=t0)
 
     preds = sched.grid_search(cv, scoring, return_predictions)
 
@@ -37,5 +37,5 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
 
 def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2, cse: bool = False):
     """Evaluate a DataOp DAG with train/test split."""
-    ops_ordered = optimize(dag)
-    return SequentialScheduler(ops_ordered).evaluate(seed, test_size)
+    linearized_dag, split_pos, flagged_ops = optimize(dag)
+    return SequentialScheduler(linearized_dag, split_pos, flagged_ops).evaluate(seed, test_size)

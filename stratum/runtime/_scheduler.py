@@ -1,11 +1,11 @@
+from __future__ import annotations
 from time import perf_counter
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split, check_cv
 from sklearn.metrics._scorer import _Scorer, get_scorer
-from skrub._data_ops._data_ops import EvalMode
 from stratum.optimizer.ir._dataframe_ops import SplitOp
-from stratum.optimizer._op_utils import topological_iterator
-from stratum.optimizer.ir._ops import ImplOp, Op
+from stratum.optimizer.ir._ops import Op
+from stratum.runtime._buffer_pool import BufferPool
 import polars as pl
 
 import logging
@@ -24,64 +24,72 @@ def get_scoring_func(scoring):
         scoring_func = mean_squared_error
     return scoring_func, greater_is_better
 
+
 class Scheduler:
-    """Scheduler for executing DataOpDAGs in topological order."""
-    
-    def __init__(self, print_heavy_hitters=False, env=None, t0 = None):
-        """Initialize scheduler with a data operations DAG."""
+    """Scheduler for executing pre-planned Op DAGs in linearized order."""
+
+    def __init__(self, print_heavy_hitters=False, env=None, t0=None):
         self.mode = "fit_transform"
         self.env = env if env else {}
-        self.flagged_for_recomputation = []
-        self.pos_split_op = None
+        self.linearized_dag = None
+        self.recompute_ops: list[Op] = []
+        self.pos_split_op: int | None = None
         self.timings = [] if print_heavy_hitters else None
         self.results_ = None
         self.cv_id = -1
+        self.pool = BufferPool()
         self.t0 = t0 if t0 is not None else perf_counter()
+        self._pinned_ops: set[Op] = set()
 
-    def evaluate(self, seed: int = 42, test_size = 0.2):
+    def _finish(self):
+        """End of execution. Remove all buffers."""
+        self.pool.remove_all()
+        logger.debug(f"Scheduler finished: {self.pool.total_removed} buffers removed total")
+
+
+    def evaluate(self, seed: int = 42, test_size=0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
         try:
             split_op = self.compute_xy()
         except RuntimeError as e:
             if "X and y nodes not found in the DAG" in str(e):
                 logger.warning("X and y nodes not found in the DAG, returning the last node")
-                return self.ops_ordered[-1].intermediate
+                return self.pool.pin(self.linearized_dag[-1])
             else:
                 raise e
 
-        train_index, test_index = train_test_split(range(len(split_op.inputs[0].intermediate)), test_size=test_size, random_state=seed)
+        x_data = self.pool.pin(split_op.inputs[0])
+        train_index, test_index = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
         split_op.indices = train_index
         self.compute(self.pos_split_op)
         split_op.indices = test_index
         pred = self.compute(self.pos_split_op, mode="predict")
         return pred["vals"][0]
 
-
     def grid_search(self, cv=None, scoring=None, return_predictions=False):
         """Perform grid search with cross-validation on the logical DAG."""
-        # default to scikit-learn's CV
         cv = check_cv(cv)
 
-        # start with computing till we reach the split op
         logger.debug("\n" + "="*100 + "\n" + "Starting grid search" + "\n" + "="*100 + "\n")
         split_op = self.compute_xy()
+
         results, predictions = [], []
 
         logger.debug("\n" + "="*100 + "\n" + "XY computed" + "\n" + "="*100 + "\n")
         results = self.cross_validate(split_op, cv, scoring, predictions, results, return_predictions)
         self.results_ = results
+        self._finish()
         return predictions if return_predictions else None
 
     def cross_validate(self, split_op, cv, scoring, predictions: list, results: list, return_predictions: bool):
         """Perform cross-validation on the logical DAG."""
         scoring_func, greater_is_better = get_scoring_func(scoring)
 
-        # TODO we can parallelize over the folds
-        for i, (train_index, test_index) in enumerate(cv.split(split_op.inputs[0].intermediate)):
+        x_data = self.pool.pin(split_op.inputs[0])
+        for i, (train_index, test_index) in enumerate(cv.split(x_data)):
             self.cv_id = i
             logger.debug(f"CV Fold Nr. {i + 1}")
 
-            # fit and predict the pipeline
             split_op.indices = train_index
             self.compute(self.pos_split_op)
             logger.debug("\n" + "="*100 + "\n" + "Training done for fold " + str(i+1) + "\n" + "="*100 + "\n")
@@ -91,7 +99,6 @@ class Scheduler:
             if return_predictions:
                 predictions.append(df)
 
-            # scoring
             df = df.with_columns(df["vals"].map_elements(lambda pred: scoring_func(y_test, pl.Series(pred))).alias("scores"))
             df = df.drop("vals")
             results.append(df)
@@ -106,7 +113,25 @@ class Scheduler:
 
         try:
             t0 = perf_counter() if self.timings is not None else 0
-            op.process(mode=self.mode, environment=self.env)
+
+            # 1. pin all inputs
+            inputs = [self.pool.pin(in_op) for in_op in op.inputs]
+
+            # 2. process operator
+            result = op.process(mode=self.mode, environment=self.env, inputs=inputs)
+
+            # 3. unpin inputs
+            for in_op in op.inputs:
+                self.pool.unpin(in_op)
+
+            # 4. remove unnecessary intermediates from buffer pool
+            for in_op in op.remove_after:
+                self.pool.remove(in_op)
+
+            # 5. add output to the buffer pool
+            self.pool.put(op, result)
+            logger.debug(f"[{perf_counter() - self.t0:.2f}s] Pool size: {self.pool.active_count}")
+
             if self.timings is not None:
                 duration = perf_counter() - t0
                 self.timings.append((str(op), duration))
@@ -125,59 +150,58 @@ class Scheduler:
         else:
             return pl.DataFrame({"vals": [pred], "id": ["default"]})
 
-    def _flag_op_for_recomputation_if_needed(self, op: Op):
-        """Helper method to flag an op for recomputation if it's an ImplOp with EvalMode."""
-        if isinstance(op, ImplOp) and isinstance(op.skrub_impl, EvalMode):
-            self.flagged_for_recomputation.append(op)
 
 class SequentialScheduler(Scheduler):
-    def __init__(self, dag_sink: Op, print_heavy_hitters=False, env=None, t0 = None):
+    def __init__(self, linearized_dag, split_pos, recompute_ops,
+                 print_heavy_hitters=False, env=None, t0=None):
         super().__init__(print_heavy_hitters, env=env, t0=t0)
-        self.ops_ordered = [op for op in topological_iterator(dag_sink)]
+        self.linearized_dag = linearized_dag
+        self.pos_split_op = split_pos
+        self.recompute_ops = recompute_ops
 
-    def evaluate(self, seed: int = 42, test_size = 0.2):
+    def evaluate(self, seed: int = 42, test_size=0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
+
         try:
             split_op = self.compute_xy()
         except RuntimeError as e:
             if "X and y nodes not found in the DAG" in str(e):
                 logger.warning("X and y nodes not found in the DAG, returning the last node")
-                return self.ops_ordered[-1].intermediate
+                return self.pool.pin(self.linearized_dag[-1])
             else:
                 raise e
 
-        train_index, test_index = train_test_split(range(len(split_op.inputs[0].intermediate)), test_size=test_size, random_state=seed)
+        x_data = self.pool.pin(split_op.inputs[0])
+        train_index, test_index = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
         split_op.indices = train_index
         self.compute(self.pos_split_op)
         split_op.indices = test_index
         pred, _ = self.compute(self.pos_split_op, mode="predict")
+        self._finish()
         return pred["vals"][0]
-
 
     def compute(self, start_pos: int, mode="fit_transform"):
         """Compute the pipeline from start_pos onwards with given inputs."""
-        ops_to_compute = self.ops_ordered[start_pos:]
-        if len(self.flagged_for_recomputation) != 0:
-            ops_to_compute = self.flagged_for_recomputation + ops_to_compute
+        ops_to_compute = self.linearized_dag[start_pos:]
+        if len(self.recompute_ops) != 0:
+            ops_to_compute = self.recompute_ops + ops_to_compute
         self.mode = mode
 
         y_true = None
         for node in ops_to_compute:
             self.process_op(node)
             if mode == "predict" and isinstance(node, SplitOp):
-                y_true = node.intermediate[1]
+                y_true = self.pool.pin(node)[1]
 
         if mode == "predict":
-            pred = self.ops_ordered[-1].intermediate
+            pred = self.pool.pin(self.linearized_dag[-1])
             return self._format_predict_result(pred), y_true
         return None
 
     def compute_xy(self) -> SplitOp:
-        """Compute nodes until X and y nodes are found and store them."""
-        for i, op in enumerate(self.ops_ordered):
+        """Compute nodes until the split op is reached."""
+        for i, op in enumerate(self.linearized_dag):
             if op.is_split_op:
-                self.pos_split_op = i
                 return op
             self.process_op(op)
-            self._flag_op_for_recomputation_if_needed(op)
         raise RuntimeError("X and y nodes not found in the DAG")

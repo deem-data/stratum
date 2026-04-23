@@ -26,13 +26,13 @@ class NumericOp(Op):
         self.args = args
         self.kwargs = kwargs
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         if self.type == NumericOpType.GENERIC:
-            self.intermediate = self.func(self.inputs[0].intermediate, *self.args, **self.kwargs)
+            return self.func(inputs[0], *self.args, **self.kwargs)
         elif self.type == NumericOpType.LOG:
-            self.intermediate = np.log(self.inputs[0].intermediate)
+            return np.log(inputs[0])
         elif self.type == NumericOpType.EXP:
-            self.intermediate = np.exp(self.inputs[0].intermediate)
+            return np.exp(inputs[0])
         else:
             raise ValueError(f"Unsupported numeric operation type: {self.type}")
 

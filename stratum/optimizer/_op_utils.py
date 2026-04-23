@@ -51,9 +51,9 @@ def get_all_outputs(op: Op, stop_at_op: Op = None):
                     visited.add(out_)
                     queue.append(out_)
                     inputs_internal[out_] = [node]
-
+                    
     return list(visited), inputs_internal
-
+    
 
 def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
     """Clones a sub-dag of the given Op. Excluding the given Op, but including all its internal outputs.
@@ -104,7 +104,16 @@ def topological_iterator(root: Op) -> Iterator[Op]:
     """
     Iterate over the Op DAG in topological order.
     """
+    indegree, queue2 = compute_graph_node_indegree(root)
 
+    # now we can do topological traversal
+    if FLAGS.bfs:
+        return topological_iterator_bfs(queue2, indegree)
+    else:
+        return topological_iterator_dfs(queue2, indegree)
+
+
+def compute_graph_node_indegree(root: Op) -> tuple[deque[Op], dict[Op, int]]:
     # first we need to bfs for finding all sources in the dag
     queue1 = deque([root])
     indegree = {root: 0 if not root.inputs else len(root.inputs)}
@@ -117,16 +126,13 @@ def topological_iterator(root: Op) -> Iterator[Op]:
             for in_op in op.inputs:
                 if in_op not in indegree:
                     if in_op is DATA_OP_PLACEHOLDER:
-                        raise RuntimeError(f"Encountered DATA_OP_PLACEHOLDER as input of op {op}, which should not happen.")
+                        raise RuntimeError(
+                            f"Encountered DATA_OP_PLACEHOLDER as input of op {op}, which should not happen.")
                     curr_indegree = len(in_op.inputs)
                     indegree[in_op] = curr_indegree
                     queue1.append(in_op)
+    return indegree, queue2
 
-    # now we can do topological traversal
-    if FLAGS.bfs:
-        return topological_iterator_bfs(queue2, indegree)
-    else:
-        return topological_iterator_dfs(queue2, indegree)
 
 def topological_iterator_bfs(queue, indegree) -> Iterator[Op]:
     while queue:
@@ -168,7 +174,7 @@ def show_graph(root: Op, filename: str = 'plan'):
         # make sure folder exists
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         dot.render(filename, view=True,cleanup=True)
-
+        
 
 def rewrite_pass(match_fn, action_fn):
     """Create a rewrite that does one full DAG pass.

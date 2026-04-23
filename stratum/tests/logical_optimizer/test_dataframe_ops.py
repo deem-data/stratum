@@ -13,13 +13,14 @@ from stratum.optimizer.ir._dataframe_ops import (
     ApplyUDFOp, AssignOp, ConcatOp, DataSourceOp, DatetimeConversionOp,
     DropOp, GetAttrProjectionOp, GroupedDataframeOp, MetadataOp, ProjectionOp,
     SplitOp)
-from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.ir._ops import DATA_OP_PLACEHOLDER, GetItemOp, MethodCallOp, Op
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
+from stratum.runtime._buffer_pool import BufferPool
 
 
 def optimize(dag, conf=None):
-    return list(topological_iterator(optimize_(dag, conf)))
+    linearized_dag, *_ = optimize_(dag, conf)
+    return linearized_dag
 
 
 def _inp(val):
@@ -27,6 +28,11 @@ def _inp(val):
     op.intermediate = val
     op.is_dataframe_op = True
     return op
+
+
+def _inputs_for(op):
+    """Extract intermediate values from op.inputs."""
+    return [in_op.intermediate for in_op in op.inputs]
 
 
 class TestDataframeOps(unittest.TestCase):
@@ -104,8 +110,8 @@ class TestDataSourceOpPolars(unittest.TestCase):
     def test_process_data_polars(self):
         df = pd.DataFrame({"a": [1, 2]})
         op = DataSourceOp(data=df)
-        op.process("fit_transform", {})
-        self.assertIsInstance(op.intermediate, pl.DataFrame)
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertIsInstance(result, pl.DataFrame)
 
     def test_process_read_csv_polars(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w")
@@ -113,8 +119,8 @@ class TestDataSourceOpPolars(unittest.TestCase):
         tmp.close()
         try:
             op = DataSourceOp(file_path=tmp.name, _format="csv", read_args=(), read_kwargs={})
-            op.process("fit_transform", {})
-            self.assertIsInstance(op.intermediate, pl.DataFrame)
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertIsInstance(result, pl.DataFrame)
         finally:
             os.remove(tmp.name)
 
@@ -131,16 +137,16 @@ class TestMetadataOpPolars(unittest.TestCase):
         df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
         op = MetadataOp(func="rename", args=(), kwargs={"columns": {"a": "x"}})
         op.inputs = [_inp(df)]
-        op.process("fit_transform", {})
-        self.assertIn("x", op.intermediate.columns)
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertIn("x", result.columns)
 
 
 class TestProjectionOp(unittest.TestCase):
     def test_process_non_method(self):
         op = ProjectionOp(func=lambda df, v: df * v, is_method=False, args=(DATA_OP_PLACEHOLDER, 2), kwargs={})
         op.inputs = [_inp(pd.DataFrame({"a": [1, 2]}))]
-        op.process("fit_transform", {})
-        self.assertEqual(op.intermediate["a"].tolist(), [2, 4])
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertEqual(result["a"].tolist(), [2, 4])
 
     def test_process_polars_method_raises(self):
         orig = FLAGS.force_polars
@@ -149,7 +155,7 @@ class TestProjectionOp(unittest.TestCase):
             op = ProjectionOp(func="drop", is_method=True, args=(), kwargs={})
             op.inputs = [_inp(pl.DataFrame({"a": [1]}))]
             with self.assertRaises(ValueError):
-                op.process("fit_transform", {})
+                op.process("fit_transform", {}, _inputs_for(op))
         finally:
             FLAGS.force_polars = orig
 
@@ -166,8 +172,8 @@ class TestDropOpPolars(unittest.TestCase):
         df = pl.DataFrame({"a": [1], "b": [2], "c": [3]})
         op = DropOp(args=(), kwargs={"columns": ["b"]})
         op.inputs = [_inp(df)]
-        op.process("fit_transform", {})
-        self.assertNotIn("b", op.intermediate.columns)
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertNotIn("b", result.columns)
 
 
 class TestApplyUDFOp(unittest.TestCase):
@@ -175,15 +181,15 @@ class TestApplyUDFOp(unittest.TestCase):
         df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
         op = ApplyUDFOp(args=(lambda x: x * 10,), kwargs={}, columns="a")
         op.inputs = [_inp(df)]
-        op.process("fit_transform", {})
-        self.assertEqual(op.intermediate.tolist(), [10, 20])
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertEqual(result.tolist(), [10, 20])
 
     def test_multi_column(self):
         df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
         op = ApplyUDFOp(args=(lambda x: x * 2,), kwargs={}, columns=["a", "b"])
         op.inputs = [_inp(df)]
-        op.process("fit_transform", {})
-        self.assertEqual(op.intermediate["a"].tolist(), [2, 4])
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertEqual(result["a"].tolist(), [2, 4])
 
     def test_polars_sin_rewrite(self):
         orig = FLAGS.force_polars
@@ -192,8 +198,8 @@ class TestApplyUDFOp(unittest.TestCase):
             series = pl.Series("a", [0.0, np.pi / 2])
             op = ApplyUDFOp(args=(np.sin,), kwargs={})
             op.inputs = [_inp(series)]
-            op.process("fit_transform", {})
-            self.assertAlmostEqual(op.intermediate[1], 1.0, places=5)
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertAlmostEqual(result[1], 1.0, places=5)
         finally:
             FLAGS.force_polars = orig
 
@@ -204,8 +210,8 @@ class TestApplyUDFOp(unittest.TestCase):
             series = pl.Series("a", [0.0])
             op = ApplyUDFOp(args=(np.cos,), kwargs={})
             op.inputs = [_inp(series)]
-            op.process("fit_transform", {})
-            self.assertAlmostEqual(op.intermediate[0], 1.0, places=5)
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertAlmostEqual(result[0], 1.0, places=5)
         finally:
             FLAGS.force_polars = orig
 
@@ -216,8 +222,8 @@ class TestApplyUDFOp(unittest.TestCase):
             df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
             op = ApplyUDFOp(args=(lambda row: (row[0] + row[1],),), kwargs={}, columns=["a", "b"])
             op.inputs = [_inp(df)]
-            op.process("fit_transform", {})
-            self.assertIsNotNone(op.intermediate)
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertIsNotNone(result)
         finally:
             FLAGS.force_polars = orig
 
@@ -234,22 +240,22 @@ class TestAssignOpPolars(unittest.TestCase):
         df = pl.DataFrame({"a": [1, 2]})
         op = AssignOp(args=(), kwargs={"b": pl.Series([10, 20])})
         op.inputs = [_inp(df)]
-        op.process("fit_transform", {})
-        self.assertIn("b", op.intermediate.columns)
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertIn("b", result.columns)
 
     def test_assign_polars_pandas_conversion(self):
         df = pl.DataFrame({"a": [1, 2]})
         op = AssignOp(args=(), kwargs={"b": pd.Series([10, 20])})
         op.inputs = [_inp(df)]
-        op.process("fit_transform", {})
-        self.assertIn("b", op.intermediate.columns)
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertIn("b", result.columns)
 
     def test_assign_polars_placeholder_raises(self):
         df = pl.DataFrame({"a": [1, 2]})
         op = AssignOp(args=(), kwargs={"b": DATA_OP_PLACEHOLDER})
         op.inputs = [_inp(df), _inp(DATA_OP_PLACEHOLDER)]
         with self.assertRaises(NotImplementedError):
-            op.process("fit_transform", {})
+            op.process("fit_transform", {}, _inputs_for(op))
 
 
 class TestDatetimeConversionOpPolars(unittest.TestCase):
@@ -260,8 +266,8 @@ class TestDatetimeConversionOpPolars(unittest.TestCase):
             s = pl.Series("dt", ["2025-01-01", "2025-06-15"])
             op = DatetimeConversionOp(args=(), kwargs={})
             op.inputs = [_inp(s)]
-            op.process("fit_transform", {})
-            self.assertEqual(op.intermediate.dtype, pl.Datetime)
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertEqual(result.dtype, pl.Datetime)
         finally:
             FLAGS.force_polars = orig
 
@@ -281,8 +287,8 @@ class TestGetAttrProjectionOp(unittest.TestCase):
         try:
             s = pl.Series("dt", pd.to_datetime(["2025-01-15", "2025-06-20"]))
             op = GetAttrProjectionOp(attr_name=["dt", "year"], inputs=[_inp(s)], outputs=[])
-            op.process("fit_transform", {})
-            self.assertEqual(op.intermediate.to_list(), [2025, 2025])
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertEqual(result.to_list(), [2025, 2025])
         finally:
             FLAGS.force_polars = orig
 
@@ -292,8 +298,8 @@ class TestGetAttrProjectionOp(unittest.TestCase):
         try:
             s = pl.Series("dt", pd.to_datetime(["2025-01-06"]))  # Monday
             op = GetAttrProjectionOp(attr_name=["dt", "dayofweek"], inputs=[_inp(s)], outputs=[])
-            op.process("fit_transform", {})
-            self.assertEqual(op.intermediate.to_list(), [1])  # polars: Monday=1
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertEqual(result.to_list(), [1])  # polars: Monday=1
         finally:
             FLAGS.force_polars = orig
 
@@ -303,21 +309,17 @@ class TestGetAttrProjectionOp(unittest.TestCase):
         try:
             s = pl.Series("dt", pd.to_datetime(["2025-01-31", "2025-01-15"]))
             op = GetAttrProjectionOp(attr_name=["dt", "is_month_end"], inputs=[_inp(s)], outputs=[])
-            op.process("fit_transform", {})
-            self.assertEqual(op.intermediate.to_list(), [True, False])
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertEqual(result.to_list(), [True, False])
         finally:
             FLAGS.force_polars = orig
 
 
 class TestGroupedDataframeOp(unittest.TestCase):
     def test_process(self):
-        inner1 = Op()
-        inner1.process = lambda m, e: setattr(inner1, 'intermediate', 10)
-        inner2 = Op()
-        inner2.process = lambda m, e: setattr(inner2, 'intermediate', 20)
-        op = GroupedDataframeOp(ops=[inner1, inner2])
-        op.process("fit_transform", {})
-        self.assertEqual(op.intermediate, 20)
+        op = GroupedDataframeOp(ops=[Op(), Op()])
+        with self.assertRaises(NotImplementedError):
+            op.process("fit_transform", {}, _inputs_for(op))
 
 
 class TestConcatOpPolars(unittest.TestCase):
@@ -331,8 +333,8 @@ class TestConcatOpPolars(unittest.TestCase):
             mock_dataop2 = MagicMock(spec=DataOp)
             op = ConcatOp(first=mock_dataop1, others=[mock_dataop2], axis=0)
             op.inputs = [_inp(df1), _inp(df2)]
-            op.process("fit_transform", {})
-            self.assertEqual(len(op.intermediate), 4)
+            result = op.process("fit_transform", {}, _inputs_for(op))
+            self.assertEqual(len(result), 4)
         finally:
             FLAGS.force_polars = orig
 
@@ -343,14 +345,14 @@ class TestSplitOp(unittest.TestCase):
         y = pl.DataFrame({"b": [1, 2, 3]})
         op = SplitOp(inputs=[_inp(x), _inp(y)])
         op.indices = [0, 2]
-        op.process("fit_transform", {})
-        self.assertEqual(len(op.intermediate[0]), 2)
+        result = op.process("fit_transform", {}, _inputs_for(op))
+        self.assertEqual(len(result[0]), 2)
 
     def test_unsupported_type(self):
         op = SplitOp(inputs=[_inp("not_a_df"), _inp("not_a_df")])
         op.indices = [0]
         with self.assertRaises(ValueError):
-            op.process("fit_transform", {})
+            op.process("fit_transform", {}, _inputs_for(op))
 
 
 
@@ -365,10 +367,14 @@ class TestMakeReadOpWithVariable(unittest.TestCase):
             with st.config(fast_dataops_convert=True):
                 ops = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], DataSourceOp)
-            # Verify it can actually process
-            ops[0].process("fit_transform", {"path": tmp.name})
-            ops[1].process("fit_transform", {})
-            self.assertIsInstance(ops[1].intermediate, pd.DataFrame)
+            # Verify it can actually process using resolve_inputs
+            pool = BufferPool()
+            inputs0 = [pool.pin(key) for key in ops[0].inputs]
+            result0 = ops[0].process("fit_transform", {"path": tmp.name}, inputs0)
+            pool.put(ops[0], result0)
+            inputs1 = [pool.pin(key) for key in ops[1].inputs]
+            result1 = ops[1].process("fit_transform", {}, inputs1)
+            self.assertIsInstance(result1, pd.DataFrame)
         finally:
             os.remove(tmp.name)
 

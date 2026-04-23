@@ -1,5 +1,6 @@
 from typing import Callable
-from stratum.optimizer.ir._ops import DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, ValueOp, VariableOp
+from stratum.optimizer.ir._ops import (DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp,
+                                       MethodCallOp, Op, ValueOp, VariableOp,_resolve_args, _resolve_kwargs)
 from pandas import DataFrame
 import pandas as pd
 import polars as pl
@@ -27,19 +28,18 @@ class DataSourceOp(Op):
         self.read_kwargs = read_kwargs
         self.is_dataframe_op = True
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         if self.data is not None:
             if FLAGS.force_polars:
-                self.intermediate = pl.DataFrame(self.data)
+                return pl.DataFrame(self.data)
             else:
-                self.intermediate = self.data
-
+                return self.data
         else:
-            file_path = self.inputs[0].intermediate if self.file_path is DATA_OP_PLACEHOLDER else self.file_path
+            file_path = inputs[0] if self.file_path is DATA_OP_PLACEHOLDER else self.file_path
             if FLAGS.force_polars:
-                self.intermediate = pl.read_csv(file_path, *self.read_args, **self.read_kwargs)
+                return pl.read_csv(file_path, *self.read_args, **self.read_kwargs)
             else:
-                self.intermediate = pd.read_csv(file_path, *self.read_args, **self.read_kwargs)
+                return pd.read_csv(file_path, *self.read_args, **self.read_kwargs)
 
     def clone(self):
         raise ValueError(f"We should not clone DataSourceOp objects.")
@@ -56,17 +56,17 @@ class MetadataOp(Op):
         self.kwargs = kwargs
         self.is_dataframe_op = True
 
-    def process(self, mode: str, environment: dict):
-        iter_ins = iter(self.inputs)
-        _obj = next(iter_ins).intermediate
-        _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in self.args]
-        _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
+    def process(self, mode: str, environment: dict, inputs: list):
+        input_iter = iter(inputs)
+        _obj = next(input_iter)
+        _args = _resolve_args(self.args, input_iter)
+        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
         if FLAGS.force_polars:
             if "columns" in _kwargs:
                 _args.append(_kwargs["columns"])
-            self.intermediate = getattr(_obj, self.func)(*_args)
+            return getattr(_obj, self.func)(*_args)
         else:
-            self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
+            return getattr(_obj, self.func)(*_args, **_kwargs)
 
 class ProjectionOp(Op):
     fields = ["func", "is_method", "args", "kwargs", "columns"]
@@ -83,27 +83,27 @@ class ProjectionOp(Op):
         self.kwargs = kwargs
         self.is_dataframe_op = True
 
-    def _extract_args_and_kwargs(self):
+    def _extract_args_and_kwargs(self, inputs: list):
         """Extract and process arguments and kwargs from inputs."""
-        iter_ins, args_iter = iter(self.inputs), iter(self.args)
-        _obj = next(iter_ins).intermediate
+        input_iter, args_iter = iter(inputs), iter(self.args)
+        _obj = next(input_iter)
         if not self.is_method:
             next(args_iter)
-        _args = [next(iter_ins).intermediate if arg is DATA_OP_PLACEHOLDER else arg for arg in args_iter]
-        _kwargs = {k: next(iter_ins).intermediate if v is DATA_OP_PLACEHOLDER else v for k, v in self.kwargs.items()}
+        _args = _resolve_args(args_iter, input_iter)
+        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
         return _obj, _args, _kwargs
 
-    def process(self, mode: str, environment: dict):
-        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+    def process(self, mode: str, environment: dict, inputs: list):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
         # self.func is a string
         if self.is_method:
             if FLAGS.force_polars:
                 raise ValueError(f"Unsupported method: {self.func}")
             else:
-                self.intermediate = getattr(_obj, self.func)(*_args, **_kwargs)
+                return getattr(_obj, self.func)(*_args, **_kwargs)
         # self.func is a function
         elif callable(self.func):
-            self.intermediate = self.func(_obj, *_args, **_kwargs)
+            return self.func(_obj, *_args, **_kwargs)
         else:
             raise TypeError(f"`func` must be callable when `is_method=False`, got {type(self.func)}")
 
@@ -113,17 +113,17 @@ class DropOp(ProjectionOp):
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
 
-    def process(self, mode: str, environment: dict):
-        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+    def process(self, mode: str, environment: dict, inputs: list):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
 
         if FLAGS.force_polars:
             if "columns" in _kwargs:
                 _args.append(_kwargs["columns"])
             if "ignore_errors" in _kwargs:
                 _args.append(_kwargs["ignore_errors"] == "raise")
-            self.intermediate = _obj.drop(*_args)
+            return _obj.drop(*_args)
         else:
-            self.intermediate = _obj.drop(*_args, **_kwargs)
+            return _obj.drop(*_args, **_kwargs)
 
 class ApplyUDFOp(ProjectionOp):
     fields = ["args", "kwargs", "columns"]
@@ -131,8 +131,8 @@ class ApplyUDFOp(ProjectionOp):
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
 
-    def process(self, mode: str, environment: dict):
-        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+    def process(self, mode: str, environment: dict, inputs: list):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
 
         n_cols = None
         if self.columns:
@@ -148,24 +148,24 @@ class ApplyUDFOp(ProjectionOp):
             if n_cols == 1:
                 if _args[0] == sin:
                     logger.debug("Rewrite UDF sin to polars sin")
-                    self.intermediate = _obj.sin()
+                    return _obj.sin()
                 elif _args[0] == cos:
                     logger.debug("Rewrite UDF cos to polars cos")
-                    self.intermediate = _obj.cos()
+                    return _obj.cos()
                 else:
-                    self.intermediate = _obj.map_elements(*_args, **_kwargs)
+                    return _obj.map_elements(*_args, **_kwargs)
             else:
-                self.intermediate = _obj.map_rows(*_args, **_kwargs)
+                return _obj.map_rows(*_args, **_kwargs)
         else:
-            self.intermediate = _obj.apply(*_args, **_kwargs)
+            return _obj.apply(*_args, **_kwargs)
 
 class AssignOp(ProjectionOp):
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
 
-    def process(self, mode: str, environment: dict):
-        _obj, _args, _kwargs = self._extract_args_and_kwargs()
+    def process(self, mode: str, environment: dict, inputs: list):
+        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
         if FLAGS.force_polars:
             checked_kwargs = {}
             for k, v in _kwargs.items():
@@ -176,9 +176,9 @@ class AssignOp(ProjectionOp):
                     checked_kwargs[k] = pl.from_pandas(v)
                 else:
                     checked_kwargs[k] = v
-            self.intermediate = _obj.with_columns(*_args, **checked_kwargs)
+            return _obj.with_columns(*_args, **checked_kwargs)
         else:
-            self.intermediate = _obj.assign(*_args, **_kwargs)
+            return _obj.assign(*_args, **_kwargs)
 
 class DatetimeConversionOp(ProjectionOp):
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
@@ -186,11 +186,11 @@ class DatetimeConversionOp(ProjectionOp):
         super().__init__(args=args, inputs=inputs, outputs=outputs, columns=columns)
         self.strict = kwargs.get("errors", "raise") == "raise"
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         if FLAGS.force_polars:
-            self.intermediate = self.inputs[0].intermediate.str.to_datetime(*self.args, strict=self.strict)
+            return inputs[0].str.to_datetime(*self.args, strict=self.strict)
         else:
-            self.intermediate = pd.to_datetime(self.inputs[0].intermediate, *self.args, errors="raise" if self.strict else "coerce")
+            return pd.to_datetime(inputs[0], *self.args, errors="raise" if self.strict else "coerce")
 
 class GetAttrProjectionOp(Op):
     fields = ["attr_name"]
@@ -217,37 +217,35 @@ class GetAttrProjectionOp(Op):
         attr_name = ".".join(self.attr_name)
         return f"GetAttrProjectionOp({attr_name}) [df]"
 
-    def process(self, mode: str, environment: dict):
-        self.intermediate = self.inputs[0].intermediate
-        tmp = self.intermediate
+    def process(self, mode: str, environment: dict, inputs: list):
+        result = inputs[0]
+        tmp = result
         if FLAGS.force_polars:
             for attr in self.attr_name:
                 attr = self.POLARS_ATTR_NAME_MAP.get(attr, attr)
 
                 # TODO find better way to handle this
                 if attr == "is_month_end":
-                    self.intermediate = (self.intermediate.dt.month_end() == self.intermediate)
-                    return
+                    return result.dt.month_end() == result
 
                 # polars implements dt.day as a method, not an attribute
                 # use getattr to handle both attributes and methods
                 tmp = getattr(tmp, attr)
-            self.intermediate = tmp()
+            return tmp()
         else:
             for attr in self.attr_name:
                 tmp = getattr(tmp, attr)
-            self.intermediate = tmp
-
+            return tmp
 class GroupedDataframeOp(Op):
     def __init__(self, ops: list[Op]):
         super().__init__(name="GROUPED_DATAFRAME", is_X=False, is_y=False)
         self.ops = ops
         self.is_dataframe_op = True
 
-    def process(self, mode: str, environment: dict):
-        for op in self.ops:
-            op.process(mode, environment)
-        self.intermediate = self.ops[-1].intermediate
+    def process(self, mode: str, environment: dict, inputs: list):  # pragma: no cover
+        # TODO: GroupedDataframeOp is experimental and not integrated yet.
+        # Needs proper refactoring to collect sub-op inputs from the pool.
+        raise NotImplementedError("GroupedDataframeOp is not integrated yet.")
 
 class ConcatOp(Op):
     fields = ["first", "others", "axis"] # Add more if needed
@@ -263,15 +261,15 @@ class ConcatOp(Op):
         self.axis = DATA_OP_PLACEHOLDER if isinstance(axis, DataOp) else axis
         self.is_dataframe_op = True
 
-    def process(self, mode: str, environment: dict):
-        input_iter = iter(self.inputs)
-        first = next(input_iter).intermediate if self.first is DATA_OP_PLACEHOLDER else self.first
-        others = [next(input_iter).intermediate if other is DATA_OP_PLACEHOLDER else other for other in self.others]
-        axis = next(input_iter).intermediate if self.axis is DATA_OP_PLACEHOLDER else self.axis
+    def process(self, mode: str, environment: dict, inputs: list):
+        input_iter = iter(inputs)
+        first = next(input_iter) if self.first is DATA_OP_PLACEHOLDER else self.first
+        others = [next(input_iter) if other is DATA_OP_PLACEHOLDER else other for other in self.others]
+        axis = next(input_iter) if self.axis is DATA_OP_PLACEHOLDER else self.axis
         if FLAGS.force_polars:
-            self.intermediate = pl.concat([first, *others], how=self.axis_map[axis])
+            return pl.concat([first, *others], how=self.axis_map[axis])
         else:
-            self.intermediate = pd.concat([first, *others], axis=axis)
+            return pd.concat([first, *others], axis=axis)
 
 
 class SplitOp(Op):
@@ -281,14 +279,14 @@ class SplitOp(Op):
         self.is_dataframe_op = True
         self.indices = None
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         # we need to handle both pandas and polars dfs
-        x = self.inputs[0].intermediate
-        y = self.inputs[1].intermediate
+        x = inputs[0]
+        y = inputs[1]
         if isinstance(x, pd.DataFrame):
-            self.intermediate = (x.iloc[self.indices], y.iloc[self.indices])
+            return (x.iloc[self.indices], y.iloc[self.indices])
         elif isinstance(x, pl.DataFrame):
-            self.intermediate = (x[self.indices], y[self.indices])
+            return (x[self.indices], y[self.indices])
         else:
             raise ValueError(f"Unsupported dataframe type: {type(x)}")
 
@@ -299,11 +297,11 @@ class SplitOutput(Op):
         self.is_x = is_x
         self.is_dataframe_op = True
 
-    def process(self, mode: str, environment: dict):
+    def process(self, mode: str, environment: dict, inputs: list):
         if self.is_x:
-            self.intermediate = self.inputs[0].intermediate[0]
+            return inputs[0][0]
         else:
-            self.intermediate = self.inputs[0].intermediate[1]
+            return inputs[0][1]
 
 def add_splitting_op(root: Op) -> Op:
     start = start_time()

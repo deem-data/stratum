@@ -6,6 +6,7 @@ from skrub._data_ops._data_ops import DataOp
 from stratum._api import evaluate
 import stratum as st
 from sklearn.dummy import DummyRegressor
+from stratum.optimizer.ir._ops import Op
 
 
 def datetime_pipeline1(x: DataOp, y: DataOp) -> DataOp:
@@ -71,4 +72,36 @@ class RuntimeTest(unittest.TestCase):
         learner.fit(splits["train"])
         preds_skrub = learner.predict(splits["test"])
         np.testing.assert_array_equal(preds_skrub, preds)
+
+
+def _make_op(name="op"):
+    """Create a minimal Op (no intermediate attribute — data lives in the pool)."""
+    return Op(name=name)
+
+
+def _make_linear_dag():
+    """A -> B -> C (linear chain)."""
+    a = _make_op("A")
+    b = _make_op("B")
+    c = _make_op("C")
+    a.outputs = [b]
+    b.inputs = [a]
+    b.outputs = [c]
+    c.inputs = [b]
+    return [a, b, c]
+
+
+def _make_diamond_dag():
+    """A -> B, A -> C, B -> D, C -> D (diamond)."""
+    a = _make_op("A")
+    b = _make_op("B")
+    c = _make_op("C")
+    d = _make_op("D")
+    a.outputs = [b, c]
+    b.inputs = [a]
+    b.outputs = [d]
+    c.inputs = [a]
+    c.outputs = [d]
+    d.inputs = [b, c]
+    return [a, b, c, d]
 

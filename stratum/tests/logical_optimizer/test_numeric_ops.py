@@ -3,7 +3,7 @@ import pandas as pd
 import stratum as st
 import numpy as np
 from sklearn.dummy import DummyRegressor
-from stratum.optimizer.ir._numeric_ops import  NumericOp
+from stratum.optimizer.ir._numeric_ops import NumericOp
 
 class TestNumericOps(unittest.TestCase):
     def setUp(self):
@@ -28,4 +28,4 @@ class TestNumericOps(unittest.TestCase):
         op = NumericOp(np.cos, None, None, [], [])
         op.type = "unsupported"
         with self.assertRaises(ValueError):
-            op.process("fit", {})
+            op.process("fit", {}, [])

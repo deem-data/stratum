@@ -8,6 +8,8 @@ from .ir._numeric_ops import extract_numeric_op
 from .ir._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
 from ._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
+from ._linearization import linearize_dag
+from ._input_removal_planning import compute_pinned_ops, plan_input_removals
 from stratum.utils._skrub_graph import build_graph
 import logging
 from stratum._config import FLAGS
@@ -106,8 +108,13 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     if config.algebraic_rewrites:
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
 
+    # Final passes: linearization and buffer removal planning
+    linearized_dag, split_pos, flagged_ops = linearize_dag(root)
+    pinned_ops = compute_pinned_ops(linearized_dag, split_pos, flagged_ops)
+    plan_input_removals(linearized_dag, pinned_ops)
+
     log_time("Optimization took in total", start)
-    return root
+    return linearized_dag, split_pos, flagged_ops
 
 
 def run_cse_pass(dag_root: DataOp, nodes: dict, order: list, parents: dict):
