@@ -143,7 +143,7 @@ class TestMetadataOpPolars(unittest.TestCase):
 
 class TestProjectionOp(unittest.TestCase):
     def test_process_non_method(self):
-        op = ProjectionOp(func=lambda df, v: df * v, is_method=False, args=(DATA_OP_PLACEHOLDER, 2), kwargs={})
+        op = ProjectionOp(func=lambda df, v: df * v, args=(DATA_OP_PLACEHOLDER, 2), kwargs={})
         op.inputs = [_inp(pd.DataFrame({"a": [1, 2]}))]
         result = op.process("fit_transform", {}, _inputs_for(op))
         self.assertEqual(result["a"].tolist(), [2, 4])
@@ -152,7 +152,7 @@ class TestProjectionOp(unittest.TestCase):
         orig = FLAGS.force_polars
         FLAGS.force_polars = True
         try:
-            op = ProjectionOp(func="drop", is_method=True, args=(), kwargs={})
+            op = ProjectionOp(method="drop", args=(), kwargs={})
             op.inputs = [_inp(pl.DataFrame({"a": [1]}))]
             with self.assertRaises(ValueError):
                 op.process("fit_transform", {}, _inputs_for(op))

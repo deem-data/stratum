@@ -69,15 +69,24 @@ class MetadataOp(Op):
             return getattr(_obj, self.func)(*_args, **_kwargs)
 
 class ProjectionOp(Op):
-    fields = ["func", "is_method", "args", "kwargs", "columns"]
-    
-    def __init__(self, func: str | Callable ="", is_method: bool = True, args: tuple | list = None, kwargs: dict = None,
+    fields = ["func", "method", "args", "kwargs", "columns"]
+
+    def __init__(self, func: Callable | None = None, method: str | None = None,
+        args: tuple | list = None, kwargs: dict = None,
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(name=func.upper() if is_method else f"{func.__name__.upper()}", inputs=inputs, outputs=outputs)
+        if func is not None and method is not None:
+            raise ValueError("`func` and `method` are mutually exclusive; set exactly one (or neither for subclasses that override `process`).")
+        if method is not None:
+            name = method.upper()
+        elif func is not None:
+            name = func.__name__.upper()
+        else:
+            name = ""
+        super().__init__(name=name, inputs=inputs, outputs=outputs)
         if kwargs is not None:
             self.check_kwargs(kwargs)
-        self.is_method = is_method
         self.func = func
+        self.method = method
         self.args = args
         self.columns = columns
         self.kwargs = kwargs
@@ -87,7 +96,7 @@ class ProjectionOp(Op):
         """Extract and process arguments and kwargs from inputs."""
         input_iter, args_iter = iter(inputs), iter(self.args)
         _obj = next(input_iter)
-        if not self.is_method:
+        if self.func is not None:
             next(args_iter)
         _args = _resolve_args(args_iter, input_iter)
         _kwargs = _resolve_kwargs(self.kwargs, input_iter)
@@ -95,17 +104,13 @@ class ProjectionOp(Op):
 
     def process(self, mode: str, environment: dict, inputs: list):
         _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
-        # self.func is a string
-        if self.is_method:
+        if self.method is not None:
             if FLAGS.force_polars:
-                raise ValueError(f"Unsupported method: {self.func}")
-            else:
-                return getattr(_obj, self.func)(*_args, **_kwargs)
-        # self.func is a function
-        elif callable(self.func):
+                raise ValueError(f"Unsupported method: {self.method}")
+            return getattr(_obj, self.method)(*_args, **_kwargs)
+        if self.func is not None:
             return self.func(_obj, *_args, **_kwargs)
-        else:
-            raise TypeError(f"`func` must be callable when `is_method=False`, got {type(self.func)}")
+        raise TypeError("ProjectionOp requires either `func` or `method` to be set.")
 
 class DropOp(ProjectionOp):
     fields = ["args", "kwargs", "columns"]
