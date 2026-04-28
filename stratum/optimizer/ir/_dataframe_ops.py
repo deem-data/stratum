@@ -344,14 +344,14 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
     elif not op.inputs[0].is_dataframe_op:
         if isinstance(op, CallOp):
             if op.func is pd.read_csv:
-                new_op = make_read_op(new_op, op)
+                new_op = make_read_op(op)
 
     # input is a dataframe op
     else:
         if isinstance(op, CallOp):
             # Datetime conversion detection
             if op.func is pd.to_datetime:
-                new_op = make_datetime_conversion_op(new_op, op)
+                new_op = make_datetime_conversion_op(op)
 
         elif isinstance(op, MethodCallOp):
             if op.method_name in ["rename"]:
@@ -389,7 +389,7 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
     return root, True
 
 
-def make_datetime_conversion_op(new_op: DatetimeConversionOp, op: CallOp) -> DatetimeConversionOp:
+def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp:
     # arg[0] is the input
     if len(op.args) > 1:
         args = op.args[1:]
@@ -401,7 +401,7 @@ def make_datetime_conversion_op(new_op: DatetimeConversionOp, op: CallOp) -> Dat
     return new_op
 
 
-def make_read_op(new_op: DataSourceOp, op: CallOp) -> DataSourceOp:
+def make_read_op(op: CallOp) -> DataSourceOp:
     input_iter = iter(op.inputs)
     # assume all inputs are ValueOps
     assert all(isinstance(arg, ValueOp) or isinstance(arg, VariableOp) for arg in op.inputs), "All inputs must be ValueOps or VariableOps"
