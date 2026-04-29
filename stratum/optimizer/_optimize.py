@@ -85,7 +85,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
         run_cse_pass(dag_root, nodes, order, parents)
 
     # Convert to Op DAG and add splitting op
-    root = convert_to_ops(dag_root, debug_graph=False)
+    root = convert_to_ops(dag_root)
     root = add_splitting_op(root)
 
     # Extract specialized operators from generic MethodCallOp / CallOp
@@ -188,7 +188,7 @@ def convert_to_ops(dag: DataOp, debug_graph: bool = True) -> Op:
     root = ids_to_ops[root_id]
     log_time("conversion took", start)
     if debug_graph:
-        _debug_show_graph(dag, "conversion")
+        _debug_show_graph(root, "conversion")
     return root
 
 

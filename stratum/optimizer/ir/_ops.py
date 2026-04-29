@@ -10,6 +10,7 @@ from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, Ge
 from pandas import DataFrame
 from polars import DataFrame as PlDataFrame
 import logging
+import os
 logger = logging.getLogger(__name__)
 
 class PlaceHolder():
@@ -210,7 +211,7 @@ class BaseEstimatorOp(Op):
         self.allow_reject = allow_reject
         self.unsupervised = unsupervised
         self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
-        self.parallelism = 8
+        self.parallelism = os.cpu_count() # TODO:this will should be set during physical planning phase
 
     def clone(self):
         params = self.estimator.get_params()
