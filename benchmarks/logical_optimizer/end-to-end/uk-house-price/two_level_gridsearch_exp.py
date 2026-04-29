@@ -15,7 +15,7 @@ import logging
 
 logging.basicConfig(level=logging.DEBUG)
 
-file_path = "price_paid_records_1M.csv" if test else "input/price_paid_records.csv"
+file_path = "input/price_paid_records_100K.csv" if test else "input/price_paid_records.csv"
 df = skrub.as_data_op(file_path).skb.apply_func(pd.read_csv).skb.subsample(n=1000)
 print(df.columns.skb.preview())
 df = df.rename(columns={"Town/City": "Town"}, inplace=False)
@@ -74,14 +74,12 @@ def pre_process_1(X, y):
         'PPDCategory Type', 
         'Record Status - monthly file only'], axis=1)
 
-    cat_selector = skrub.selectors.filter(lambda col: col.dtype == "object")
-    X_cat = X.skb.select(cat_selector)
+    X_cat = X.skb.select(~skrub.selectors.numeric())
     X_cat_enc = X_cat.skb.apply(skrub.StringEncoder())
-    num_selector = skrub.selectors.filter(lambda col: col.dtype != "object")
 
     X_te = X[["District", "County", "Town"]].skb.apply(TargetEncoder(), y=y)
     X_te = X_te.rename(columns={"District": "district_te", "County": "county_te", "Town": "town_te"})
-    X_num = X.skb.select(num_selector)
+    X_num = X.skb.select(skrub.selectors.numeric())
     X_num = X_num.skb.concat([X_te], axis=1)
 
     X_num_scaled = X_num.skb.apply(StandardScaler())
@@ -113,8 +111,9 @@ preds = preds.skb.apply_func(lambda a, m: (a, print(m))[0], skrub.eval_mode())
 cv = 3
 cv = ShuffleSplit(n_splits=1,test_size=0.2,random_state=42) if cv == 1 else KFold(n_splits=cv, shuffle=True, random_state=42)
 scorer = make_scorer(r2_score)
+preds.skb.draw_graph().open()
 t0 = perf_counter()
-with skrub.config(scheduler=True, stats=20, rust_backend=True):
+with skrub.config(scheduler=True, stats=20, rust_backend=True, DEBUG=True):
     search_stratum = preds.skb.make_grid_search(cv=cv, n_jobs=1, fitted=True, scoring=scorer)
 t1 = perf_counter()
 print("="*80)

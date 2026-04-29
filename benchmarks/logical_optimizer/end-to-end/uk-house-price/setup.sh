@@ -11,4 +11,5 @@ rm -rf tmp
 rm uk-housing-prices-paid.zip
 
 # downsample for testing:
-head -100000 input/price_paid_records.csv > input/price_paid_records_small.csv
+head -100000  input/price_paid_records.csv > input/price_paid_records_100K.csv
+head -1000000 input/price_paid_records.csv > input/price_paid_records_1M.csv
