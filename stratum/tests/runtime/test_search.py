@@ -131,7 +131,7 @@ class SearchTest(RuntimeTest):
         y = data["y"].skb.mark_as_y()
         date = X["datetime"].skb.apply_func(pd.to_datetime, format="%Y-%m-%d %H:%M:%S")
         X = X.assign(year=date.dt.year)
-        X = X.drop(columns=["datetime"], axis=1)
+        X = X.drop(columns=["datetime"])
         pred = X.skb.apply(DummyRegressor(), y=y)
         st._api.grid_search(pred)
 

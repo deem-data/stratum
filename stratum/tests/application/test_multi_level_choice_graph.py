@@ -63,19 +63,12 @@ def define_pipeline(file_path):
             'PPDCategory Type', 
             'Record Status - monthly file only'], axis=1)
 
-        def is_string_column(col):
-            return col.dtype == "object"
-
-        def is_numeric_column(col):
-            return col.dtype != "object"
-        cat_selector = st.selectors.filter(is_string_column)
-        X_cat = X.skb.select(cat_selector)
+        X_cat = X.skb.select(~st.selectors.numeric())
         X_cat_enc = X_cat.skb.apply(st.StringEncoder())
-        num_selector = st.selectors.filter(is_numeric_column)
 
         X_te = X[["District", "County", "Town"]].skb.apply(TargetEncoder(), y=y)
         X_te = X_te.rename(columns={"District": "district_te", "County": "county_te", "Town": "town_te"})
-        X_num = X.skb.select(num_selector)
+        X_num = X.skb.select(st.selectors.numeric())
         X_vec = X_num.skb.concat([X_te, X_cat_enc], axis=1)
 
         return X_vec
