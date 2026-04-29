@@ -25,7 +25,8 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
     "scikit-learn==1.8",
-    "skrub>=0.3",
+    "pandas==3.0.2",
+    "skrub==0.8.0",
     "polars",
     "graphviz",
     "pyarrow>=22.0.0",
