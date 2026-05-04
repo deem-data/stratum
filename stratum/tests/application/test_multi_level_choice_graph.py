@@ -122,3 +122,15 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
             search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
             self.assertIsNotNone(search.results_)
             self.assertGreater(len(search.results_), 0)
+
+
+    def test_application_polars(self):
+        tmp_path = tempfile.mkdtemp()
+        df = make_data()
+        df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
+        preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
+        scorer = make_scorer(r2_score)
+        with st.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, force_polars=True):
+            search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
+            self.assertIsNotNone(search.results_)
+            self.assertGreater(len(search.results_), 0)

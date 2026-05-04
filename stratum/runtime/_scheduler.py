@@ -44,6 +44,7 @@ class Scheduler:
     def _finish(self):
         """End of execution. Remove all buffers."""
         self.pool.remove_all()
+        self.log_memory_usage()
         logger.debug(f"Scheduler finished: {self.pool.total_removed} buffers removed total")
 
 
@@ -107,6 +108,9 @@ class Scheduler:
         results = results.group_by("id").mean().sort("scores", descending=greater_is_better)
         return results
 
+    def log_memory_usage(self):
+        logger.debug(f"Pool size: {self.pool.active_count}. Memory usage: {self.pool.total_size}")
+
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
         logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
@@ -130,7 +134,7 @@ class Scheduler:
 
             # 5. add output to the buffer pool
             self.pool.put(op, result)
-            logger.debug(f"[{perf_counter() - self.t0:.2f}s] Pool size: {self.pool.active_count}")
+            self.log_memory_usage()
 
             if self.timings is not None:
                 duration = perf_counter() - t0
@@ -193,10 +197,13 @@ class SequentialScheduler(Scheduler):
             if mode == "predict" and isinstance(node, SplitOp):
                 y_true = self.pool.pin(node)[1]
 
+        out = None
         if mode == "predict":
             pred = self.pool.pin(self.linearized_dag[-1])
-            return self._format_predict_result(pred), y_true
-        return None
+            out = self._format_predict_result(pred), y_true
+        self.pool.remove(self.linearized_dag[-1])
+        self.log_memory_usage()
+        return out
 
     def compute_xy(self) -> SplitOp:
         """Compute nodes until the split op is reached."""

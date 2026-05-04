@@ -28,15 +28,17 @@ def dummy_func(x, t: float=0.1):
     return out
 
 def main(use_skrub: bool, polars: bool):
+    tracker = MemoryTracker(mode="process", interval_sec=0.02)
+    tracker.start()
     with skrub.config_context(eager_data_ops=False):
-        n = 1_000_000
+        n = 30_000_000
         if not os.path.exists(f"input_{n}.csv"):
             cols = ["a", "b", "c", "d", "e", "f", "g", "h", "y"]
-            df = pd.DataFrame({col: np.random.random(n) for col in cols}, dtype=np.float64)
+            df = pl.DataFrame({col: np.random.random(n) for col in cols})
 
-            print(f"Memory usage: {df.memory_usage(deep=True).sum() / 1024**2} MB")
+            print(f"Memory usage: {df.estimated_size() / 1024**2} MB")
 
-            df.to_csv(f"input_{n}.csv", index=False)
+            df.write_csv(f"input_{n}.csv")
             del df
             print("CSV written")
 
@@ -45,24 +47,22 @@ def main(use_skrub: bool, polars: bool):
         y = df["y"]
         y = y.skb.apply_func(dummy_func, t=1.0).skb.mark_as_y()
 
-        for i in range(5):
+        for _ in range(10):
             X = X.skb.apply_func(dummy_func, t=0.3)
         model = DummyRegressor()
 
         pred = X.skb.apply(model, y=y)
         cv = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-        tracker = MemoryTracker(mode="process", interval_sec=0.02)
-        tracker.start()
 
         t0 = perf_counter()
         try:
-            with skrub.config(scheduler=not use_skrub, stats=20, DEBUG=False, force_polars=polars):
+            with skrub.config(scheduler=not use_skrub, stats=True, DEBUG=False, force_polars=polars):
                 search = pred.skb.make_grid_search(cv=cv, n_jobs=1, scoring="r2", fitted=True, refit=False)
         finally:
             samples = tracker.stop()
         t1 = perf_counter()
 
-    csv_path = os.path.join(os.path.dirname(__file__), f"memory_usage_{'skrub' if use_skrub else 'stratum'}.csv")
+    csv_path = os.path.join(os.path.dirname(__file__), f"memory_usage_{'skrub' if use_skrub else 'stratum'}_{'polars' if polars else 'pandas'}.csv")
     tracker.write_csv(csv_path)
 
     print(f"Time taken: {t1 - t0:.2f}s")
