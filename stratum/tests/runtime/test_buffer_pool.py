@@ -1,8 +1,11 @@
 import unittest
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._object_size import get_size
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, simple_pipeline, _make_op
 from stratum._api import grid_search
-
+import numpy as np
+import pandas as pd
+import polars as pl
 class TestBufferPool(unittest.TestCase):
     """Tests for BufferPool as a pure cache."""
 
@@ -50,6 +53,32 @@ class TestBufferPool(unittest.TestCase):
         self.assertEqual(pool.pin(op), "new_data")
         self.assertEqual(pool.active_count, 1)
 
+    def test_memory_usage(self):
+        pool = BufferPool()
+        op = _make_op("x")
+        data_x = np.random.random(1024).astype(np.float64)
+        pool.put(op, data_x)
+        self.assertEqual(pool.memory_usage, 1024*8)
+        pool.remove(op)
+        self.assertEqual(pool.memory_usage, 0)
+        pool.memory_usage = 2*1024**5
+        self.assertEqual(pool.total_size, "2048.00 GB")
+
+    def test_unknown_object_sizes(self):
+        class Foo:
+            pass
+
+        with self.assertRaises(ValueError):
+            get_size(Foo())
+
+        with self.assertRaises(ValueError):
+            get_size(pd.Index([1, 2, 3]))
+
+        with self.assertRaises(ValueError):
+            get_size(pl.LazyFrame({"a": [1, 2, 3]}))
+
+        with self.assertRaises(ValueError):
+            get_size(np.dtype("float64"))
 
 
 # ---------------------------------------------------------------------------
