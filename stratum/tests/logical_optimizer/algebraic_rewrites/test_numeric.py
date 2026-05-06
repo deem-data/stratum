@@ -4,6 +4,7 @@ import numpy as np
 from stratum.optimizer._optimize import  optimize
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
+from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 
 class TestCSE(unittest.TestCase):
 
@@ -92,6 +93,115 @@ class TestCSE(unittest.TestCase):
         config = OptConfig(
             algebraic_rewrites=True,
             algebraic_rewrite_config=AlgebraicRewritesConfig(exp_log=False),
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)
+
+    def test_sqrt_square_via_np_square(self):
+        df = st.as_data_op(4)
+        t1 = df.skb.apply_func(np.square)
+        t2 = t1.skb.apply_func(np.sqrt)
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        # abs(4) = 4
+        self.assertEqual(out[0].value, 4)
+
+    def test_sqrt_pow2(self):
+        df = st.as_data_op(-3)
+        t1 = df ** 2
+        t2 = t1.skb.apply_func(np.sqrt)
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        # abs(-3) = 3
+        self.assertEqual(out[0].value, -3)
+
+    def test_sqrt_square_with_trailing_op(self):
+        df = st.as_data_op(4)
+        t1 = df.skb.apply_func(np.square)
+        t2 = t1.skb.apply_func(np.sqrt)
+        t3 = t2.skb.apply_func(np.log1p)
+
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[0].value, 4)
+
+    def test_disable_sqrt_square_rewrite(self):
+        df = st.as_data_op(4)
+        t1 = df.skb.apply_func(np.square)
+        t2 = t1.skb.apply_func(np.sqrt)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(sqrt_square=False),
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 3)
+
+    def test_no_rewrite_sqrt_only(self):
+        df = st.as_data_op(4)
+        t1 = df.skb.apply_func(np.sqrt)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+
+    def test_sqrt_square_produces_abs_op(self):
+        """Rewrite must insert an abs op, not identity — critical for negative inputs."""
+        df = st.as_data_op(-5)
+        t1 = df.skb.apply_func(np.square)
+        t2 = t1.skb.apply_func(np.sqrt)
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.ABS)
+
+    def test_sqrt_pow2_produces_abs_op(self):
+        """BinOp(**2) → sqrt rewrite must also produce abs, not identity."""
+        df = st.as_data_op(-5)
+        t1 = df ** 2
+        t2 = t1.skb.apply_func(np.sqrt)
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.ABS)
+
+    def test_no_rewrite_square_log(self):
+        df = st.as_data_op(4)
+        t1 = df.skb.apply_func(np.square)
+        t2 = t1.skb.apply_func(np.log)
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 3)
+
+    def test_no_rewrite_sqrt_exp(self):
+        df = st.as_data_op(4)
+        t1 = df.skb.apply_func(np.sqrt)
+        t2 = t1.skb.apply_func(np.exp)
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 3)
+
+    def test_no_rewrite_pow3_sqrt(self):
+        """x**3 → sqrt should not rewrite; only x**2 qualifies."""
+        df = st.as_data_op(4)
+        t1 = df ** 3
+        t2 = t1.skb.apply_func(np.sqrt)
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 3)
+
+    def test_disable_sqrt_square_does_not_affect_log_exp(self):
+        """Disabling sqrt_square must not suppress other algebraic rewrites."""
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(sqrt_square=False),
         )
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)

@@ -34,6 +34,28 @@ def eliminate_two_op_chain_root_safe(op1: Op, op2: Op, root: Op) -> Op:
     return root
 
 
+def replace_two_op_chain(op1: Op, op2: Op, replacement: Op):
+    """Replace op1 -> op2 with replacement: x -> replacement -> downstream."""
+    x = op1.inputs[0]
+    x.replace_output(op1, replacement)
+    replacement.add_input(x)
+    for downstream in op2.outputs:
+        replacement.add_output(downstream)
+        downstream.replace_input(op2, replacement)
+
+
+def make_replace_two_op_chain_root_safe(make_replacement):
+    """Action factory: replace a two-op chain with a new op from make_replacement()."""
+    def action(op1: Op, op2: Op, root: Op) -> Op:
+        replacement = make_replacement()
+        replace_two_op_chain(op1, op2, replacement)
+        if op2 is root:
+            root = replacement
+        return root
+    return action
+
+
+
 eliminate_log_exp = rewrite_pass(
     match_two_op_chain(NumericOp, NumericOpType.LOG, NumericOpType.EXP),
     eliminate_two_op_chain_root_safe,
@@ -43,3 +65,11 @@ eliminate_exp_log = rewrite_pass(
     match_two_op_chain(NumericOp, NumericOpType.EXP, NumericOpType.LOG),
     eliminate_two_op_chain_root_safe,
 )
+
+_replace_with_abs = make_replace_two_op_chain_root_safe(lambda : NumericOp(inputs=[], outputs=[], type=NumericOpType.ABS))
+
+eliminate_sqrt_square = rewrite_pass(
+    match_two_op_chain(NumericOp, NumericOpType.SQUARE, NumericOpType.SQRT),
+    _replace_with_abs,
+)
+
