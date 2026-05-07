@@ -25,7 +25,7 @@ class TestNumericOps(unittest.TestCase):
             pred.skb.make_grid_search(cv=3)
 
     def test_unsupported_numeric_op(self):
-        op = NumericOp(np.cos, None, None, [], [])
+        op = NumericOp(inputs=[], outputs=None, func=np.cos)
         op.type = "unsupported"
         with self.assertRaises(ValueError):
             op.process("fit", {}, [])
