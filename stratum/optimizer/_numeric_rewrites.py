@@ -66,10 +66,7 @@ eliminate_exp_log = rewrite_pass(
     eliminate_two_op_chain_root_safe,
 )
 
-def make_abs_op():
-    return NumericOp(inputs=[], outputs=[], type=NumericOpType.ABS)
-
-_replace_with_abs = make_replace_two_op_chain_root_safe(make_abs_op)
+_replace_with_abs = make_replace_two_op_chain_root_safe(lambda : NumericOp(inputs=[], outputs=[], type=NumericOpType.ABS))
 
 eliminate_sqrt_square = rewrite_pass(
     match_two_op_chain(NumericOp, NumericOpType.SQUARE, NumericOpType.SQRT),
