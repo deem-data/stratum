@@ -107,6 +107,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     # Final optimized DAG
     if config.algebraic_rewrites:
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
+        _debug_show_graph(root, "algebraic_rewrite")
 
     # Final passes: linearization and buffer removal planning
     linearized_dag, split_pos, flagged_ops = linearize_dag(root)
@@ -151,10 +152,11 @@ def extract_frame_and_numeric_operators(root):
         if not matched:
             root, _ = extract_numeric_op(op, root)
     log_time("frame_and_numeric_rewrite took", start)
+    _debug_show_graph(root, "frame_and_numeric_rewrite")
     return root
 
 
-def convert_to_ops(dag: DataOp, debug_graph: bool = True) -> Op:
+def convert_to_ops(dag: DataOp) -> Op:
     """ Convert a Skrub DataOp DAG to a stratum's logical IR (Op DAG)"""
     start = start_time()
     children, nodes, parents = get_dataops_graph(dag)
@@ -187,8 +189,7 @@ def convert_to_ops(dag: DataOp, debug_graph: bool = True) -> Op:
                 op.inputs = [ids_to_ops[input] for input in children.get(node, [])]
     root = ids_to_ops[root_id]
     log_time("conversion took", start)
-    if debug_graph:
-        _debug_show_graph(root, "conversion")
+    _debug_show_graph(root, "conversion")
     return root
 
 
@@ -249,6 +250,7 @@ def choice_unrolling(root: Op):
                 del op
                 break
     log_time("unrolled took", start)
+    _debug_show_graph(root, "unrolled")
     return root
 
 
