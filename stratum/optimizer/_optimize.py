@@ -67,7 +67,7 @@ class OptConfig():
         self.algebraic_rewrite_config = algebraic_rewrite_config
 
 def _debug_show_graph(root: Op, name: str):
-    if FLAGS.DEBUG:
+    if FLAGS.debug_graph:
         show_graph(root, name)
 
 def optimize(dag_root: DataOp, config: OptConfig = None):

@@ -36,6 +36,7 @@ class _Flags:
     scheduler: bool =  False
     stats: bool = False # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
     stats_top_k: int = 20
+    debug_graph: bool = False,
     open_graph: bool = False,
     cse: bool = True,
     DEBUG: bool = False
@@ -45,17 +46,18 @@ class _Flags:
 FLAGS = _Flags()
 
 def set_config(rust_backend: bool | None = None,
-           num_threads: int | None = None,
-           debug_timing: bool | None = None,
-           allow_patch: bool | None = None,
-           stats: bool | None = None,
-           stats_top_k: int | None = None,
-           scheduler: bool | None = None,
-           open_graph: bool | None = None,
-           DEBUG: bool | None = None,
-           force_polars: bool | None = None,
-           cse: bool = True,
-           fast_dataops_convert: bool = True) -> None:
+    num_threads: int | None = None,
+    debug_timing: bool | None = None,
+    allow_patch: bool | None = None,
+    stats: bool | None = None,
+    stats_top_k: int | None = None,
+    scheduler: bool = False,
+    debug_graph: bool = False,
+    open_graph: bool = False,
+    DEBUG: bool | None = None,
+    force_polars: bool = False,
+    cse: bool = True,
+    fast_dataops_convert: bool = True) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -106,17 +108,12 @@ def set_config(rust_backend: bool | None = None,
     if allow_patch is not None:
         FLAGS.allow_patch = bool(allow_patch)
         os.environ["SKRUB_RUST_ALLOW_MONKEYPATCH"] = "1" if FLAGS.allow_patch else "0"
-    #TODO: Select between multiple schedulers in the future.
-    if scheduler is not None:
-        FLAGS.scheduler = bool(scheduler)
     if stats is not None:
         FLAGS.stats = bool(stats)
     if stats_top_k is not None:
         if not (isinstance(stats_top_k, int) and stats_top_k >= 0):
             raise ValueError("stats_top_k must be an int >= 0")
         FLAGS.stats_top_k = int(stats_top_k)
-    if open_graph is not None:
-        FLAGS.open_graph = bool(open_graph)
     if DEBUG is not None:
         FLAGS.DEBUG = bool(DEBUG)
         os.environ["STRATUM_DEBUG"] = "1" if FLAGS.DEBUG else "0"
@@ -124,11 +121,14 @@ def set_config(rust_backend: bool | None = None,
     if force_polars is not None:
         FLAGS.force_polars = bool(force_polars)
         os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
-    if cse is not None:
-        FLAGS.cse = bool(cse)
+    # TODO: Select between multiple schedulers in the future.
+    FLAGS.scheduler = bool(scheduler)
+    FLAGS.cse = bool(cse)
+    FLAGS.debug_graph = bool(debug_graph)
+    FLAGS.open_graph = bool(open_graph)
+
     #FIXME: This should be the default. No need to set it. Remove.
-    if fast_dataops_convert is not None:
-        FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
+    FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
 
 
 def get_config() -> dict:
@@ -141,6 +141,7 @@ def get_config() -> dict:
         "scheduler": FLAGS.scheduler,
         "stats": FLAGS.stats,
         "stats_top_k": FLAGS.stats_top_k,
+        "debug_graph": FLAGS.debug_graph,
         "open_graph": FLAGS.open_graph,
         "DEBUG" : FLAGS.DEBUG,
         "force_polars": FLAGS.force_polars,
