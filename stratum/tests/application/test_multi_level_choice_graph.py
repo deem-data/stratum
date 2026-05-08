@@ -118,7 +118,7 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
         scorer = make_scorer(r2_score)
-        with st.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False):
+        with st.config(DEBUG=True, debug_graph=False, scheduler=True, rust_backend=False):
             search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
             self.assertIsNotNone(search.results_)
             self.assertGreater(len(search.results_), 0)
@@ -130,7 +130,7 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         df.to_csv(os.path.join(tmp_path, "data.csv"), index=False)
         preds = define_pipeline(os.path.join(tmp_path, "data.csv"))
         scorer = make_scorer(r2_score)
-        with st.config(DEBUG=True, open_graph=False, scheduler=True, rust_backend=False, force_polars=True):
+        with st.config(DEBUG=False, open_graph=False, scheduler=True, rust_backend=False, force_polars=True):
             search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
             self.assertIsNotNone(search.results_)
             self.assertGreater(len(search.results_), 0)

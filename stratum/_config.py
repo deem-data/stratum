@@ -36,6 +36,7 @@ class _Flags:
     scheduler: bool =  False
     stats: bool = False # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
     stats_top_k: int = 20
+    debug_graph: bool = False,
     open_graph: bool = False,
     cse: bool = True,
     DEBUG: bool = False
@@ -45,17 +46,18 @@ class _Flags:
 FLAGS = _Flags()
 
 def set_config(rust_backend: bool | None = None,
-           num_threads: int | None = None,
-           debug_timing: bool | None = None,
-           allow_patch: bool | None = None,
-           stats: bool | None = None,
-           stats_top_k: int | None = None,
-           scheduler: bool | None = None,
-           open_graph: bool | None = None,
-           DEBUG: bool | None = None,
-           force_polars: bool | None = None,
-           cse: bool = True,
-           fast_dataops_convert: bool = True) -> None:
+    num_threads: int | None = None,
+    debug_timing: bool | None = None,
+    allow_patch: bool | None = None,
+    stats: bool | None = None,
+    stats_top_k: int | None = None,
+    scheduler: bool | None = None,
+    debug_graph: bool = False,
+    open_graph: bool | None = None,
+    DEBUG: bool | None = None,
+    force_polars: bool | None = None,
+    cse: bool = True,
+    fast_dataops_convert: bool = True) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -115,6 +117,8 @@ def set_config(rust_backend: bool | None = None,
         if not (isinstance(stats_top_k, int) and stats_top_k >= 0):
             raise ValueError("stats_top_k must be an int >= 0")
         FLAGS.stats_top_k = int(stats_top_k)
+    if debug_graph is not None:
+        FLAGS.debug_graph = bool(debug_graph)
     if open_graph is not None:
         FLAGS.open_graph = bool(open_graph)
     if DEBUG is not None:
@@ -141,6 +145,7 @@ def get_config() -> dict:
         "scheduler": FLAGS.scheduler,
         "stats": FLAGS.stats,
         "stats_top_k": FLAGS.stats_top_k,
+        "debug_graph": FLAGS.debug_graph,
         "open_graph": FLAGS.open_graph,
         "DEBUG" : FLAGS.DEBUG,
         "force_polars": FLAGS.force_polars,

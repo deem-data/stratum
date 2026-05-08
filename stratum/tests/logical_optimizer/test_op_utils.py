@@ -150,7 +150,7 @@ class TestOpUtils(unittest.TestCase):
         out = optimize(t7, OptConfig(cse=True, unroll_choices=False))
         root = out[-1]
         out = choice_unrolling(root)
-        with config(open_graph=False):
+        if graph:
             show_graph(out, filename='choice_unrolling')
 
 
