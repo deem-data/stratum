@@ -44,15 +44,6 @@ test = [
 benchmark = [
 ]
 dev = [
-    "jupyter",
-    "jupyterlab>=4.5.7",
-    "notebook>=7.5.6",
-    "tornado>=6.5.5",
-    "urllib3>=2.6.3",
-    "pillow>=12.2.0",
-    "nbconvert>=7.17.1",
-    "fonttools>=4.60.2",
-    "requests>=2.33.1",
 ]
 
 [project.urls]
