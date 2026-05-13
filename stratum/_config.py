@@ -36,9 +36,9 @@ class _Flags:
     scheduler: bool =  False
     stats: bool = False # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
     stats_top_k: int = 20
-    debug_graph: bool = False,
-    open_graph: bool = False,
-    cse: bool = True,
+    debug_graph: bool = False
+    open_graph: bool = False
+    cse: bool = True
     DEBUG: bool = False
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
     fast_dataops_convert: bool = True
