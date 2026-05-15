@@ -4,6 +4,7 @@
 from sys import getsizeof
 from pandas import DataFrame, Series
 from polars import DataFrame as PolarsDataFrame, Series as PolarsSeries
+import numpy as np
 from numpy import ndarray
 from logging import getLogger
 logger = getLogger(__name__)
@@ -47,5 +48,7 @@ def get_size_polars(obj):
 def get_size_numpy(obj):
     if isinstance(obj, ndarray):
         return obj.nbytes
+    elif isinstance(obj, np.generic):
+        return obj.itemsize
     else:
         raise ValueError(f"Unsupported numpy type for memory estimation: {type(obj)}")

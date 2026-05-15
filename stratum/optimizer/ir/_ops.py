@@ -8,7 +8,7 @@ from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Concat, Var, _wrap_estimator
 from pandas import DataFrame
-from polars import DataFrame as PlDataFrame
+from polars import DataFrame as PlDataFrame, Series as PlSeries
 import logging
 import os
 logger = logging.getLogger(__name__)
@@ -412,6 +412,8 @@ class MethodCallOp(Op):
         _obj = next(input_iter)
         _args = _resolve_args(self.args, input_iter)
         _kwargs = _resolve_kwargs(self.kwargs, input_iter)
+        if self.method_name == "apply" and isinstance(_obj, PlSeries):
+            return _obj.map_elements(*_args, **_kwargs)
         return _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
 
 class CallOp(Op):
