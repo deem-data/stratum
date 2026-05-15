@@ -3,6 +3,7 @@ import unittest
 import stratum as st
 from stratum.optimizer._optimize import optimize as optimize_, OptConfig, choice_unrolling, convert_to_ops
 from stratum.optimizer._op_utils import show_graph, clone_sub_dag, topological_iterator, FLAGS
+from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum._config import config
 graph = False
 
@@ -37,12 +38,15 @@ class TestOpUtils(unittest.TestCase):
     def test_iterator_dfs(self):
         ops = optimize(self.dag)
         self.assertEqual(ops[0].value, 1)
-        self.assertEqual(ops[1].op.__name__,"add")
-        self.assertEqual(ops[1].right, 2)
-        self.assertEqual(ops[2].op.__name__, "add")
-        self.assertEqual(ops[2].right, 5)
-        self.assertEqual(ops[3].op.__name__, "sub")
-        self.assertEqual(ops[3].right, 3)
+        self.assertIsInstance(ops[1], NumericOp)
+        self.assertEqual(ops[1].type, NumericOpType.ADD)
+        self.assertEqual(ops[1].constant, 2)
+        self.assertIsInstance(ops[2], NumericOp)
+        self.assertEqual(ops[2].type, NumericOpType.ADD)
+        self.assertEqual(ops[2].constant, 5)
+        self.assertIsInstance(ops[3], NumericOp)
+        self.assertEqual(ops[3].type, NumericOpType.SUBTRACT)
+        self.assertEqual(ops[3].constant, 3)
 
 
 
