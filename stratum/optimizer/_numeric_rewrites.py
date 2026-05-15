@@ -1,5 +1,5 @@
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
-from stratum.optimizer._op_utils import rewrite_pass
+from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
 from stratum.optimizer.ir._ops import Op
 
 def match_two_op_chain(op_cls, type1, type2):
@@ -18,12 +18,8 @@ def eliminate_two_op_chain(op1, op2):
     Rewires the DAG in-place so that op1's input connects directly to op2's output.
     """
     x = op1.inputs[0]
-    if len(op2.outputs) == 1:
-        y = op2.outputs[0]
-        y.replace_input(op2, x)
-        x.replace_output(op1, y)
-    else:
-        x.outputs = []
+    replace_op_in_outputs(op2, x)
+    x.outputs = [out for out in x.outputs if out is not op1]
 
 def eliminate_two_op_chain_root_safe(op1: Op, op2: Op, root: Op) -> Op:
     """Wrapper around eliminate_two_op_chain that handles the case where
