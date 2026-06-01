@@ -77,11 +77,11 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     if config is None:
         config = OptConfig()
 
-    children, nodes, parents = get_dataops_graph(dag_root)
-    order = topological_traverse(nodes, parents, children)
 
     # Apply CSE on skrub IR
     if FLAGS.cse:
+        children, nodes, parents = get_dataops_graph(dag_root)
+        order = topological_traverse(nodes, parents, children)
         run_cse_pass(dag_root, nodes, order, parents)
 
     # Convert to Op DAG and add splitting op
