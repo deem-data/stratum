@@ -56,6 +56,7 @@ class OptConfig():
         numeric_ops: bool = True,
         algebraic_rewrites: bool = True,
         algebraic_rewrite_config: AlgebraicRewritesConfig | None = None,
+        infer_schema: bool = True,
     ):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
@@ -65,6 +66,7 @@ class OptConfig():
         if algebraic_rewrite_config is None:
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
+        self.infer_schema = infer_schema
 
 def _debug_show_graph(root: Op, name: str):
     if FLAGS.debug_graph:
@@ -104,6 +106,11 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     if config.unroll_choices:
         root = choice_unrolling(root)
 
+    # try to infer schema
+    if config.infer_schema:
+        infer_output_schema(root)
+
+
     # Final optimized DAG
     if config.algebraic_rewrites:
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
@@ -142,6 +149,13 @@ def extract_numeric_operators(root):
         root, _ = extract_numeric_op(op, root)
     log_time("to_numeric took", start)
     return root
+
+def infer_output_schema(root):
+    """ Infer the schema of the dataframe ops in the dag."""
+    start = start_time()
+    for op in topological_iterator(root):
+        op.infer_output_schema()
+    log_time("schema_inference took", start)
 
 
 def extract_frame_and_numeric_operators(root):

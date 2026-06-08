@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, OrderedDict
 from collections.abc import Sequence
 from stratum.optimizer.ir._ops import (DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp,
                                        MethodCallOp, Op, ValueOp, VariableOp,_resolve_args, _resolve_kwargs)
@@ -28,6 +28,21 @@ class DataSourceOp(Op):
         self.read_args = read_args
         self.read_kwargs = read_kwargs
         self.is_dataframe_op = format != "npy"
+
+    def infer_output_schema(self):
+        if self.data is not None:
+            if isinstance(self.data, pl.DataFrame):
+                self.output_schema = self.data.schema
+            else:
+                self.output_schema = pl.DataFrame(self.data.head(100)).schema
+        else:
+            if self.format == "csv":
+                self.output_schema = pl.read_csv(self.file_path, *self.read_args, **self.read_kwargs, n_rows=100).schema
+            elif self.format == "npy":
+                self.output_schema = "float64"
+            else:
+                raise ValueError(f"Unsupported format: {self.format}")
+
 
     def process(self, mode: str, environment: dict, inputs: list):
         if self.data is not None:

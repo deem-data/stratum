@@ -47,6 +47,7 @@ class Op():
         self.is_split_op = False
         self.was_cloned = False
         self.remove_after: list[Op] = []
+        self.output_schema = None
 
     def to_str_helper(self):
         class_name = self.__class__.__name__
@@ -119,6 +120,11 @@ class Op():
                 f"The `{self}'s kwargs` should be a dict of named arguments. Got an object of type"
                 f" {type(kwargs).__name__!r} instead: {kwargs!r}"
             )
+
+    def infer_output_schema(self):
+        logger.debug(f"Inferring output schema is not implement for {self.__class__.__name__} objects. "
+                     f"Fallback to unknown.")
+        self.output_schema = None
 
 def clone_value(value):
     if isinstance(value, dict):
