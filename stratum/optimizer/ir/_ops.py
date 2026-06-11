@@ -9,32 +9,128 @@ from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Concat, Var, _wrap_estimator
 from pandas import DataFrame
 from polars import DataFrame as PlDataFrame, Series as PlSeries
+from stratum.utils._skrub_graph import _collect_child_data_ops
 import logging
 import os
 logger = logging.getLogger(__name__)
 
-class PlaceHolder():
-    def __init__(self, name: str):
-        self.name = name
-    
+
+def _operand_index_from_impl(skrub_impl) -> dict:
+    """Map id(DataOp) -> operand index, in the canonical field-walk order.
+
+    Uses the same walk as graph extraction (`_collect_child_data_ops` over
+    `impl._fields`), de-duplicating repeated DataOps to the same index. This is
+    the single source of truth shared with the converter so that an ImplOp's
+    `inputs` list and its operand indices always agree.
+    """
+    index: dict = {}
+    for field_name in skrub_impl._fields:
+        for data_op in _collect_child_data_ops(getattr(skrub_impl, field_name)):
+            if id(data_op) not in index:
+                index[id(data_op)] = len(index)
+    return index
+
+class OperandRef:
+    """Explicit reference to the ``k``-th entry of an :class:`Op`'s ``inputs`` list.
+
+    Replaces the old opaque ``DATA_OP_PLACEHOLDER`` sentinel. Instead of relying on
+    the *order* in which placeholders are walked at runtime, an operand now carries
+    the exact index of the input that fills it, so ``process()`` can resolve
+    ``inputs[ref.k]`` directly and rewrites that reorder inputs are checkable.
+    """
+    __slots__ = ("k",)
+
+    def __init__(self, k: int):
+        self.k = k
+
+    def __eq__(self, other):
+        return isinstance(other, OperandRef) and other.k == self.k
+
+    def __hash__(self):
+        return hash(("OperandRef", self.k))
+
     def __str__(self):
-        return self.name
+        return f"${self.k}"
 
     def __repr__(self):
-        return self.name
-
-# unique identifier for arguments, which need to be replaced with Op references later
-DATA_OP_PLACEHOLDER = PlaceHolder("DATA_OP_PLACEHOLDER")
+        return f"OperandRef({self.k})"
 
 
-def _resolve_args(args, input_iter):
-    """Replace DATA_OP_PLACEHOLDERs in an args sequence with values from input_iter."""
-    return [next(input_iter) if a is DATA_OP_PLACEHOLDER else a for a in args]
+class OperandBinder:
+    """Builds an op's de-duplicated ``inputs`` list and replaces DataOps in
+    structured fields with :class:`OperandRef`, all from a single ordered walk.
+
+    The order in which ``ref``/``bind_seq``/``bind_map`` are called defines the
+    canonical operand order (e.g. the implicit primary object is bound first, so
+    it becomes ``OperandRef(0)``). Repeated DataOps map to the same index, so the
+    same upstream op feeding two slots produces a single input edge.
+    """
+
+    def __init__(self, ids_to_ops: dict):
+        self.ids_to_ops = ids_to_ops
+        self.inputs: list = []
+        self._index: dict = {}  # id(Op) -> position in self.inputs
+
+    def ref_op(self, op: "Op") -> OperandRef:
+        """Bind an already-converted Op (not a DataOp) to an OperandRef."""
+        idx = self._index.get(id(op))
+        if idx is None:
+            idx = len(self.inputs)
+            self.inputs.append(op)
+            self._index[id(op)] = idx
+        return OperandRef(idx)
+
+    def ref(self, data_op: DataOp) -> OperandRef:
+        """Bind a single DataOp to an OperandRef via the id->Op lookup."""
+        return self.ref_op(self.ids_to_ops[id(data_op)])
+
+    def bind(self, value):
+        """Recursively replace DataOps nested in tuples/lists/dicts with OperandRefs.
+
+        The recursion order mirrors ``_collect_child_data_ops`` so operand indices
+        line up with the graph's child order (e.g. ``df.join([df2, df3])`` binds
+        df2 then df3 inside the list argument).
+        """
+        if isinstance(value, DataOp):
+            return self.ref(value)
+        if isinstance(value, tuple):
+            return tuple(self.bind(v) for v in value)
+        if isinstance(value, list):
+            return [self.bind(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self.bind(v) for k, v in value.items()}
+        return value
+
+    def bind_seq(self, seq):
+        """Bind DataOps in a tuple/list argument sequence to OperandRefs."""
+        return tuple(self.bind(a) for a in seq)
+
+    def bind_map(self, mapping):
+        """Bind DataOps in a kwargs dict to OperandRefs."""
+        return {k: self.bind(v) for k, v in mapping.items()}
 
 
-def _resolve_kwargs(kwargs, input_iter):
-    """Replace DATA_OP_PLACEHOLDERs in a kwargs dict with values from input_iter."""
-    return {k: next(input_iter) if v is DATA_OP_PLACEHOLDER else v for k, v in kwargs.items()}
+def _resolve_operand(value, inputs):
+    """Recursively replace OperandRefs nested in value with values from inputs."""
+    if isinstance(value, OperandRef):
+        return inputs[value.k]
+    if isinstance(value, tuple):
+        return tuple(_resolve_operand(v, inputs) for v in value)
+    if isinstance(value, list):
+        return [_resolve_operand(v, inputs) for v in value]
+    if isinstance(value, dict):
+        return {k: _resolve_operand(v, inputs) for k, v in value.items()}
+    return value
+
+
+def _resolve_args(args, inputs):
+    """Replace OperandRefs in an args sequence with values from the inputs list."""
+    return [_resolve_operand(a, inputs) for a in args]
+
+
+def _resolve_kwargs(kwargs, inputs):
+    """Replace OperandRefs in a kwargs dict with values from the inputs list."""
+    return {k: _resolve_operand(v, inputs) for k, v in kwargs.items()}
 
 class Op():
     def __init__(self, inputs=None,outputs=None, name=None, is_X=False, is_y=False):
@@ -73,11 +169,24 @@ class Op():
     def is_choice(self) -> bool:
         return isinstance(self, ChoiceOp)
 
+    @property
+    def num_input_operands(self) -> int:
+        return len(self.inputs)
+
     def add_output(self, output: Op):
+        """Add an output edge, de-duplicating so an op appears at most once."""
+        for out_ in self.outputs:
+            if out_ is output:
+                return
         self.outputs.append(output)
 
-    def add_input(self, input: Op):
+    def add_input(self, input: Op) -> int:
+        """Add an input edge, de-duplicating. Returns the operand index of `input`."""
+        for i, in_ in enumerate(self.inputs):
+            if in_ is input:
+                return i
         self.inputs.append(input)
+        return len(self.inputs) - 1
 
     def replace_input(self, old_input: Op, new_input: Op):
         for i, in_ in enumerate(self.inputs):
@@ -142,14 +251,23 @@ class ImplOp(Op):
         new_op.was_cloned = True
         return new_op
 
+    @property
+    def operand_index(self) -> dict:
+        """Cached id(DataOp) -> operand index map for this impl's fields."""
+        idx = getattr(self, "_operand_index", None)
+        if idx is None:
+            idx = _operand_index_from_impl(self.skrub_impl)
+            self._operand_index = idx
+        return idx
+
     def replace_fields_with_values(self, inputs):
         """Replace DataOp fields in implementation with their computed values."""
-        input_iter = iter(inputs)
+        index = self.operand_index
 
         def replace_dataop(value):
-            """Recursively replace DataOp instances with their actual values."""
+            """Recursively replace DataOp instances with their resolved input."""
             if isinstance(value, DataOp):
-                return next(input_iter)
+                return inputs[index[id(value)]]
             elif isinstance(value, (list, tuple)):
                 new_seq = [replace_dataop(item) for item in value]
                 return type(value)(new_seq)
@@ -163,17 +281,20 @@ class ImplOp(Op):
     def process(self, mode: str, environment: dict, inputs: list):
         if hasattr(self.skrub_impl, "eval"):
             # DataOp with eval method have a fused implementation of the generator and the compute method
-            # we need to iterate over the generator and replace the requested fields with correct inputs
+            # we need to iterate over the generator and replace the requested fields with correct inputs.
+            # Indices are assigned in yield order (de-duplicating repeated DataOps), matching the
+            # order in which inputs are consumed.
+            index = {}
             last_yield = None
             gen = self.skrub_impl.eval(mode=mode, environment=environment)
-            input_iter = iter(inputs)
             while True:
                 try:
                     last_yield = gen.send(last_yield)
                 except StopIteration as e:
                     return e.value
                 if isinstance(last_yield, DataOp):
-                    last_yield = next(input_iter)
+                    k = index.setdefault(id(last_yield), len(index))
+                    last_yield = inputs[k]
         else:
             ns = self.replace_fields_with_values(inputs)
             return self.skrub_impl.compute(ns, mode, environment)
@@ -194,23 +315,25 @@ class VariableOp(Op):
         return environment[self.name]
 
 class BaseEstimatorOp(Op):
-    fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs"]
-    
-    def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None):
+    fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs", "param_refs"]
+
+    def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None, param_refs=None):
         super().__init__(name=estimator.__class__.__name__)
         if kwargs is None:
             kwargs = {}
         self.check_kwargs(kwargs)
         self.estimator = estimator
-        place_holders = {k: v for k, v in self.estimator.get_params().items() if isinstance(v, DataOp)}
-        self.estimator.set_params(**place_holders)
         self.original_estimator = clone(self.estimator)
-        self.y = DATA_OP_PLACEHOLDER if isinstance(y, DataOp) else y
-        self.cols = DATA_OP_PLACEHOLDER if isinstance(cols, DataOp) else cols
+        # X is the implicit primary operand (OperandRef(0)); y/cols are OperandRef
+        # when fed by the graph, otherwise plain values. param_refs maps the names of
+        # estimator hyper-parameters that are graph-fed to their OperandRef.
+        self.y = y
+        self.cols = cols
         self.how = how
         self.allow_reject = allow_reject
         self.unsupervised = unsupervised
-        self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
+        self.kwargs = kwargs
+        self.param_refs = param_refs if param_refs is not None else {}
         self.parallelism = os.cpu_count() # TODO:this will should be set during physical planning phase
 
     def clone(self):
@@ -218,13 +341,14 @@ class BaseEstimatorOp(Op):
         estimator_new = clone(self.estimator)
         estimator_new.set_params(**params)
         new_op = self.__class__(
-            estimator=estimator_new, 
-            y=self.y, 
-            cols=self.cols, 
-            how=self.how, 
-            allow_reject=self.allow_reject, 
-            unsupervised=self.unsupervised, 
-            kwargs=self.kwargs
+            estimator=estimator_new,
+            y=self.y,
+            cols=self.cols,
+            how=self.how,
+            allow_reject=self.allow_reject,
+            unsupervised=self.unsupervised,
+            kwargs=self.kwargs,
+            param_refs=self.param_refs,
         )
         new_op.was_cloned = True
         return new_op
@@ -235,14 +359,13 @@ class BaseEstimatorOp(Op):
 
         Returns a tuple of picklable data that can be sent to worker processes.
         """
-        input_iter = iter(inputs)
-        x = next(input_iter)
+        x = inputs[0]
         assert x is not None, f"X is None for {self}"
-        y = None if mode == 'predict' else next(input_iter) if self.y == DATA_OP_PLACEHOLDER else self.y
+        y = None if mode == 'predict' else inputs[self.y.k] if isinstance(self.y, OperandRef) else self.y
         estm = self.estimator if mode == "predict" else self.original_estimator
-        place_holders = {k: next(input_iter) for k, v in estm.get_params().items() if isinstance(v, DataOp)}
+        place_holders = {name: inputs[ref.k] for name, ref in self.param_refs.items()}
         estm.set_params(**place_holders)
-        cols = next(input_iter) if self.cols == DATA_OP_PLACEHOLDER else self.cols
+        cols = inputs[self.cols.k] if isinstance(self.cols, OperandRef) else self.cols
         return (
             estm,
             x,
@@ -347,7 +470,7 @@ def process_transformer_task(task_data):
 class ChoiceOp(Op):
     fields = ["outcome_names"]
     
-    def __init__(self, outcome_names: list[str] = None, n_outcomes: int = None, choice_name: str=None, append_choice_name = True, inputs: list[Op] = None):
+    def __init__(self, outcome_names: list[str] = None, n_outcomes: int = None, choice_name: str=None, append_choice_name = True, inputs: list = None):
         if inputs is None:
             inputs = []
         if outcome_names is None:
@@ -404,14 +527,14 @@ class MethodCallOp(Op):
         if kwargs is not None:
             self.check_kwargs(kwargs)
         self.method_name = method_name
-        self.args = remove_datops_from_args(args) if args is not None else args
-        self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
+        self.args = args
+        self.kwargs = kwargs
 
     def process(self, mode: str, environment: dict, inputs: list):
-        input_iter = iter(inputs)
-        _obj = next(input_iter)
-        _args = _resolve_args(self.args, input_iter)
-        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
+        # The object the method is called on is the implicit primary operand (index 0).
+        _obj = inputs[0]
+        _args = _resolve_args(self.args, inputs)
+        _kwargs = _resolve_kwargs(self.kwargs, inputs)
         if self.method_name == "apply" and isinstance(_obj, PlSeries):
             return _obj.map_elements(*_args, **_kwargs)
         return _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
@@ -426,13 +549,12 @@ class CallOp(Op):
         if kwargs is not None:
             self.check_kwargs(kwargs)
         self.func = func
-        self.args = remove_datops_from_args(args) if args is not None else args
-        self.kwargs = remove_datops_from_args(kwargs) if kwargs is not None else kwargs
+        self.args = args
+        self.kwargs = kwargs
 
     def process(self, mode: str, environment: dict, inputs: list):
-        input_iter = iter(inputs)
-        _args = _resolve_args(self.args, input_iter)
-        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
+        _args = _resolve_args(self.args, inputs)
+        _kwargs = _resolve_kwargs(self.kwargs, inputs)
         return self.func(*_args, **_kwargs)
 
 class GetAttrOp(Op):
@@ -454,16 +576,17 @@ class GetAttrOp(Op):
 class GetItemOp(Op):
     fields = ["key"]
     
-    def __init__(self, key=None):
-        self.key = DATA_OP_PLACEHOLDER if isinstance(key, DataOp) else key
-        name = key._skrub_impl.__class__.__name__ if isinstance(key, DataOp) else str(self.key)
+    def __init__(self, key=None, name=None):
+        # key is either a constant or an OperandRef (when the key is graph-fed).
+        self.key = key
+        if name is None:
+            name = str(key)
         super().__init__(name=name)
 
 
     def process(self, mode: str, environment: dict, inputs: list):
-        key = self.key
-        if key is DATA_OP_PLACEHOLDER:
-            key = inputs[1]
+        # The container being indexed is the implicit primary operand (index 0).
+        key = inputs[self.key.k] if isinstance(self.key, OperandRef) else self.key
         return inputs[0][key]
 
 class BinOp(Op):
@@ -472,22 +595,14 @@ class BinOp(Op):
     def __init__(self, op: Callable, left, right):
         super().__init__(name=op.__name__.lstrip('__').rstrip('__'))
         self.op = op
-        self.left = DATA_OP_PLACEHOLDER if isinstance(left, DataOp) else left
-        self.right = DATA_OP_PLACEHOLDER if isinstance(right, DataOp) else right
+        # left/right are OperandRefs when graph-fed, otherwise constants.
+        self.left = left
+        self.right = right
 
 
     def process(self, mode: str, environment: dict, inputs: list):
-        i = 0
-        if self.left is DATA_OP_PLACEHOLDER:
-            left = inputs[i]
-            i += 1
-        else:
-            left = self.left
-        if self.right is DATA_OP_PLACEHOLDER:
-            right = inputs[i]
-            i += 1
-        else:
-            right = self.right
+        left = inputs[self.left.k] if isinstance(self.left, OperandRef) else self.left
+        right = inputs[self.right.k] if isinstance(self.right, OperandRef) else self.right
         return self.op(left, right)
 
 class SearchEvalOp(Op):    
@@ -501,65 +616,102 @@ class SearchEvalOp(Op):
     def clone(self, children: list[Op] = None, parents: list[Op] = None):
         raise ValueError(f"We should not clone SearchEvalOp objects.")
 
-def remove_datops_from_args(args: tuple  | dict):
-    if isinstance(args, tuple):
-        return tuple(DATA_OP_PLACEHOLDER if isinstance(a, DataOp) else a for a in args)
-    elif isinstance(args, dict):
-        return {k: DATA_OP_PLACEHOLDER if isinstance(v, DataOp) else v for k,v in args.items()}
-    else:
-        raise ValueError(f"Expected tuple or dict, got {type(args)}")
+def _bind_or_value(binder: OperandBinder, value):
+    """Bind a field that is either a single DataOp (-> OperandRef) or a constant."""
+    return binder.ref(value) if isinstance(value, DataOp) else value
 
-def as_op(data_op: DataOp):
+
+def as_op(data_op: DataOp, ids_to_ops: dict) -> Op:
+    """Convert a single skrub DataOp into an Op, building its de-duplicated
+    ``inputs`` list and operand references in one canonical field walk.
+
+    ``ids_to_ops`` maps ``id(DataOp) -> Op`` and must already contain every input
+    of ``data_op`` (guaranteed by converting in topological order). Output edges
+    are wired here too: each input op gets ``data_op``'s Op added to its outputs.
+    """
     impl = data_op._skrub_impl
-    is_X = False
-    is_y = False
+    is_X = is_y = False
     if impl is not None:
         is_X = impl.is_X
         is_y = impl.is_y
+    binder = OperandBinder(ids_to_ops)
     return_op = None
+
     if isinstance(impl, Value):
         if isinstance(impl.value, Choice):
             choice = impl.value
-            parents = [0]*len(choice.outcomes)
-            for i, outcome in enumerate(choice.outcomes):
-                if not isinstance(outcome, DataOp):
-                    # TODO handle tuples of dataops
-                    parents[i] = ValueOp(outcome)
-            return_op = ChoiceOp(choice.outcome_names, len(choice.outcomes), choice.name, inputs=parents)
+            # Choice outcomes are consumed positionally by ChoiceOp.process; keep one
+            # input entry per outcome (constants become fresh ValueOps).
+            inputs = [ids_to_ops[id(o)] if isinstance(o, DataOp) else ValueOp(o)
+                      for o in choice.outcomes]
+            return_op = ChoiceOp(choice.outcome_names, len(choice.outcomes), choice.name)
+            return_op.inputs = inputs
         else:
             return_op = ValueOp(impl.value)
     elif isinstance(impl, CallMethod):
-        return_op = MethodCallOp(impl.method_name, impl.args, impl.kwargs)
+        binder.ref(impl.obj)  # implicit primary operand -> OperandRef(0)
+        return_op = MethodCallOp(impl.method_name, binder.bind_seq(impl.args), binder.bind_map(impl.kwargs))
+        return_op.inputs = binder.inputs
     elif isinstance(impl, Call):
         return_op = CallOp(
             name=impl.get_func_name(),
             func=impl.func,
-            args=impl.args,
-            kwargs=impl.kwargs
+            args=binder.bind_seq(impl.args),
+            kwargs=binder.bind_map(impl.kwargs),
         )
+        return_op.inputs = binder.inputs
     elif isinstance(impl, GetAttr):
+        binder.ref(impl.source_object)  # OperandRef(0)
         return_op = GetAttrOp(attr_name=impl.attr_name)
+        return_op.inputs = binder.inputs
     elif isinstance(impl, GetItem):
-        return_op = GetItemOp(key=impl.key)
+        binder.ref(impl.container)  # OperandRef(0)
+        key = _bind_or_value(binder, impl.key)
+        name = impl.key._skrub_impl.__class__.__name__ if isinstance(impl.key, DataOp) else str(impl.key)
+        return_op = GetItemOp(key=key, name=name)
+        return_op.inputs = binder.inputs
     elif isinstance(impl, SkrubBinOp):
-        return_op = BinOp(op=impl.op, left=impl.left, right=impl.right)
+        left = _bind_or_value(binder, impl.left)
+        right = _bind_or_value(binder, impl.right)
+        return_op = BinOp(op=impl.op, left=left, right=right)
+        return_op.inputs = binder.inputs
     elif isinstance(impl, Apply):
         estimator_class = EstimatorOp if hasattr(impl.estimator, "predict") else TransformerOp
+        binder.ref(impl.X)  # OperandRef(0)
+        param_refs = {k: binder.ref(v) for k, v in impl.estimator.get_params().items()
+                      if isinstance(v, DataOp) and id(v) in ids_to_ops}
+        y = _bind_or_value(binder, impl.y)
+        cols = _bind_or_value(binder, impl.cols)
         return_op = estimator_class(
-            y=impl.y, 
-            estimator=impl.estimator, 
-            cols=impl.cols, 
-            how=impl.how, 
-            allow_reject=impl.allow_reject, 
-            unsupervised=impl.unsupervised, 
-            kwargs= {})
+            estimator=impl.estimator,
+            y=y,
+            cols=cols,
+            how=impl.how,
+            allow_reject=impl.allow_reject,
+            unsupervised=impl.unsupervised,
+            kwargs={},
+            param_refs=param_refs,
+        )
+        return_op.inputs = binder.inputs
     elif isinstance(impl, Var):
         return_op = VariableOp(name=impl.name, value=impl.value)
     elif isinstance(impl, Concat):
         from stratum.optimizer.ir._dataframe_ops import ConcatOp
-        return_op = ConcatOp(first=impl.first, others=impl.others, axis=impl.axis)
+        first = _bind_or_value(binder, impl.first)
+        others = list(binder.bind_seq(impl.others))
+        axis = _bind_or_value(binder, impl.axis)
+        return_op = ConcatOp(first=first, others=others, axis=axis)
+        return_op.inputs = binder.inputs
     else:
+        for field_name in impl._fields:
+            for child in _collect_child_data_ops(getattr(impl, field_name)):
+                binder.ref(child)
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
+        return_op.inputs = binder.inputs
+
+    # Wire output edges: every input op gets this op added to its outputs (deduped).
+    for in_op in return_op.inputs:
+        in_op.add_output(return_op)
 
     return_op.is_X = is_X
     return_op.is_y = is_y

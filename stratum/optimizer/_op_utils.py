@@ -2,7 +2,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Iterator
 from graphviz import Digraph
-from stratum.optimizer.ir._ops import DATA_OP_PLACEHOLDER, Op, ChoiceOp
+from stratum.optimizer.ir._ops import OperandRef, Op, ChoiceOp
 from stratum._config import get_config
 import os
 from dataclasses import dataclass
@@ -126,9 +126,9 @@ def compute_graph_node_indegree(root: Op) -> tuple[deque[Op], dict[Op, int]]:
         else:
             for in_op in op.inputs:
                 if in_op not in indegree:
-                    if in_op is DATA_OP_PLACEHOLDER:
+                    if isinstance(in_op, OperandRef):
                         raise RuntimeError(
-                            f"Encountered DATA_OP_PLACEHOLDER as input of op {op}, which should not happen.")
+                            f"Encountered OperandRef as input of op {op}, which should not happen.")
                     curr_indegree = len(in_op.inputs)
                     indegree[in_op] = curr_indegree
                     queue1.append(in_op)
@@ -160,10 +160,45 @@ def topological_iterator_dfs(queue, indegree) -> Iterator[Op]:
             if indegree[out_op] == 0:
                 stack.append(out_op)
 
+def _iter_operand_refs(value):
+    """Yield every OperandRef nested in value (recurses lists/tuples/dicts)."""
+    if isinstance(value, OperandRef):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _iter_operand_refs(v)
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_operand_refs(v)
+
+
+def validate_operands(op: Op) -> None:
+    """Assert every OperandRef stored on `op` indexes a valid entry of op.inputs.
+
+    Catches rewrites that drop/reorder inputs without renumbering operand refs.
+    """
+    n = len(op.inputs)
+    for attr, value in op.__dict__.items():
+        if attr in ("inputs", "outputs", "remove_after"):
+            continue
+        for ref in _iter_operand_refs(value):
+            if not (0 <= ref.k < n):
+                raise ValueError(
+                    f"Operand {ref} on {op!r} (attr '{attr}') is out of range for "
+                    f"{n} input(s); a rewrite likely changed inputs without renumbering.")
+
+
+def validate_dag(root: Op) -> None:
+    """Run `validate_operands` over every op reachable from root."""
+    for op in topological_iterator(root):
+        validate_operands(op)
+
+
 def show_graph(root: Op, filename: str = 'plan'):
     """Show the runtime plan of the DataOp DAG."""
     dot = Digraph(comment=filename, format='png', graph_attr={'rankdir': 'BT'})
     for current_op in topological_iterator(root):
+        validate_operands(current_op)
         current_op.update_name()
         name = str(current_op) if not isinstance(current_op, ChoiceOp) else current_op.name
         name = name.replace("<","'").replace(">","'") if name is not None else "None"

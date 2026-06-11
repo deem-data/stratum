@@ -1,12 +1,12 @@
 from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
-from collections import deque
+from collections import deque, defaultdict
 from ._cse import apply_cse
 from .ir._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .ir._numeric_ops import extract_numeric_op
-from .ir._ops import ChoiceOp, ImplOp, Op, SearchEvalOp, as_op
-from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator
+from .ir._ops import ChoiceOp, Op, SearchEvalOp, as_op
+from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
 from ._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
 from ._linearization import linearize_dag
@@ -75,6 +75,15 @@ def _debug_explain_linear_plan(name: str, linearized_dag: list, split_pos: int |
     if FLAGS.explain_linear_plan:
         explain_linear_plan(name, linearized_dag, split_pos)
 
+
+def _debug_validate_dag(root: Op):
+    """Assert every OperandRef indexes a valid input edge across the whole DAG.
+
+    Gated by FLAGS.validate_dag so a rewrite that drops/reorders inputs without
+    renumbering its operand refs fails loudly instead of silently miswiring."""
+    if FLAGS.validate_dag:
+        validate_dag(root)
+
 def optimize(dag_root: DataOp, config: OptConfig = None):
     """ Entry point for the logical optimizer. Takes a Skrub DataOp DAG, applies logical optimizations,
     and returns an Op root node."""
@@ -92,6 +101,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     # Convert to Op DAG and add splitting op
     root = convert_to_ops(dag_root)
     root = add_splitting_op(root)
+    _debug_validate_dag(root)  # operand refs as wired by as_op
 
     # Extract specialized operators from generic MethodCallOp / CallOp
     if config.dataframe_ops:
@@ -115,6 +125,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
         _debug_show_graph(root, "algebraic_rewrite")
 
     # Final passes: linearization and buffer removal planning
+    _debug_validate_dag(root)  # operand refs after all rewrites, before linearization
     linearized_dag, split_pos, flagged_ops = linearize_dag(root)
     pinned_ops = compute_pinned_ops(linearized_dag, split_pos, flagged_ops)
     plan_input_removals(linearized_dag, pinned_ops)
@@ -164,37 +175,34 @@ def extract_frame_and_numeric_operators(root):
 
 
 def convert_to_ops(dag: DataOp) -> Op:
-    """ Convert a Skrub DataOp DAG to a stratum's logical IR (Op DAG)"""
+    """Convert a Skrub DataOp DAG to stratum's logical IR (Op DAG).
+
+    Single fused topological pass: ``as_op`` builds each op together with its
+    de-duplicated ``inputs`` list, operand references, and output edges. Inputs
+    are resolved through ``ids_to_ops`` (keyed by ``id(DataOp)``), which is
+    guaranteed populated because we walk in topological, inputs-first order.
+    """
     start = start_time()
     children, nodes, parents = get_dataops_graph(dag)
     order = topological_traverse(nodes, parents, children)
     root_id = order[-1]
 
-    # make logical IR:
-    # we start by making unconnected ops
-    ids_to_ops = {node: as_op(nodes[node]) for node in order}
-    # we then connect the ops to a graph
-    for node in order:
-        op = ids_to_ops[node]
-        if isinstance(op, ImplOp) and isinstance(op.skrub_impl, SubsamplePreviews):
-            output_ids = parents.get(node, [])
-            output_ops = [ids_to_ops[output] for output in output_ids]
-            input_id = children.get(node, [])[0]
-            input_op = ids_to_ops[input_id]
-            input_op.outputs.remove(op)
-            input_op.outputs.extend(output_ops)
-            for output_id in output_ids:
-                children[output_id].remove(node)
-                children[output_id].append(input_id)
-            del ids_to_ops[node]
-        else:
-            op.outputs = [ids_to_ops[output] for output in parents.get(node, [])]
+    # id(DataOp) -> Op. Keyed by DataOp identity (not the graph's node keys) so
+    # as_op's operand binder can resolve inputs found in the impl fields directly.
+    ids_to_ops = {}
+    for node_key in order:
+        skrub_op = nodes[node_key]
+        impl = skrub_op._skrub_impl
+        if isinstance(impl, SubsamplePreviews):
+            # Drop the preview node: route its single input straight to consumers.
+            # Consumers reference this node's DataOp in their fields, so mapping it
+            # to the input op makes them wire to the input op directly.
+            input_key = children.get(node_key, [])[0]
+            ids_to_ops[id(skrub_op)] = ids_to_ops[id(nodes[input_key])]
+            continue
+        ids_to_ops[id(skrub_op)] = as_op(skrub_op, ids_to_ops)
 
-            if op.is_choice():
-                convert_handle_choice(node, op, ids_to_ops, children)
-            else:
-                op.inputs = [ids_to_ops[input] for input in children.get(node, [])]
-    root = ids_to_ops[root_id]
+    root = ids_to_ops[id(nodes[root_id])]
     log_time("conversion took", start)
     _debug_show_graph(root, "conversion")
     return root
@@ -211,15 +219,6 @@ def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
     children = g["children"]
     log_time("Conversion dag took", start)
     return children, nodes, parents
-
-
-def convert_handle_choice(node, op, ids_to_ops, children):
-    input_iter = iter(ids_to_ops[input] for input in children.get(node, []))
-    for j, p in enumerate(op.inputs):
-        if p == 0:
-            op.inputs[j] = next(input_iter)
-        else:
-            p.outputs = [op]
 
 
 def choice_unrolling(root: Op):

@@ -5,7 +5,7 @@ import stratum as st
 import numpy as np
 from sklearn.dummy import DummyRegressor
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType, make_binary_numeric_op
-from stratum.optimizer.ir._ops import CallOp, DATA_OP_PLACEHOLDER
+from stratum.optimizer.ir._ops import CallOp, OperandRef
 from stratum.optimizer._optimize import optimize
 
 class TestNumericOps(unittest.TestCase):
@@ -163,23 +163,23 @@ class TestNumericOps(unittest.TestCase):
         self.assertEqual(out[1].type, NumericOpType.DIVIDE)
 
     def test_process_add_var_var(self):
-        op = NumericOp([], [], type=NumericOpType.ADD, opt_operand=DATA_OP_PLACEHOLDER, reversed=False)
+        op = NumericOp([], [], type=NumericOpType.ADD, opt_operand=OperandRef(1), reversed=False)
         self.assertIsNone(op.constant)
         result = op.process("fit", {}, [np.array([1.0, 2.0, 3.0]), np.array([4.0, 5.0, 6.0])])
         np.testing.assert_array_almost_equal(result, np.array([5.0, 7.0, 9.0]))
 
     def test_process_subtract_var_var(self):
-        op = NumericOp([], [], type=NumericOpType.SUBTRACT, opt_operand=DATA_OP_PLACEHOLDER, reversed=False)
+        op = NumericOp([], [], type=NumericOpType.SUBTRACT, opt_operand=OperandRef(1), reversed=False)
         result = op.process("fit", {}, [np.array([10.0, 9.0, 8.0]), np.array([1.0, 2.0, 3.0])])
         np.testing.assert_array_almost_equal(result, np.array([9.0, 7.0, 5.0]))
 
     def test_process_multiply_var_var(self):
-        op = NumericOp([], [], type=NumericOpType.MULTIPLY, opt_operand=DATA_OP_PLACEHOLDER, reversed=False)
+        op = NumericOp([], [], type=NumericOpType.MULTIPLY, opt_operand=OperandRef(1), reversed=False)
         result = op.process("fit", {}, [np.array([1.0, 2.0, 3.0]), np.array([4.0, 5.0, 6.0])])
         np.testing.assert_array_almost_equal(result, np.array([4.0, 10.0, 18.0]))
 
     def test_process_divide_var_var(self):
-        op = NumericOp([], [], type=NumericOpType.DIVIDE, opt_operand=DATA_OP_PLACEHOLDER, reversed=False)
+        op = NumericOp([], [], type=NumericOpType.DIVIDE, opt_operand=OperandRef(1), reversed=False)
         result = op.process("fit", {}, [np.array([6.0, 8.0, 9.0]), np.array([2.0, 4.0, 3.0])])
         np.testing.assert_array_almost_equal(result, np.array([3.0, 2.0, 3.0]))
 
@@ -187,7 +187,7 @@ class TestNumericOps(unittest.TestCase):
         ops = [op for op in out if isinstance(op, NumericOp) and op.type == numeric_type]
         self.assertEqual(len(ops), 1)
         op = ops[0]
-        self.assertIs(op.opt_operand, DATA_OP_PLACEHOLDER)
+        self.assertEqual(op.opt_operand, OperandRef(1))
         self.assertIsNone(op.constant)
         self.assertFalse(op.reversed)
         return op
@@ -309,13 +309,13 @@ class TestNumericOps(unittest.TestCase):
 
     def test_make_binary_numeric_op_raises_on_non_pair_args(self):
         op = CallOp(func=np.add, args=None)
-        op.args = (DATA_OP_PLACEHOLDER,)
+        op.args = (OperandRef(0),)
         with self.assertRaises(ValueError):
             make_binary_numeric_op(op, NumericOpType.ADD)
 
     def test_make_binary_numeric_op_const_var(self):
         op = CallOp(func=np.subtract, args=None)
-        op.args = (10, DATA_OP_PLACEHOLDER)
+        op.args = (10, OperandRef(0))
         result = make_binary_numeric_op(op, NumericOpType.SUBTRACT)
         self.assertEqual(result.constant, 10)
         self.assertTrue(result.reversed)

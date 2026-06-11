@@ -2,7 +2,12 @@
 import unittest
 import stratum as st
 from stratum.optimizer._optimize import optimize as optimize_, OptConfig, choice_unrolling, convert_to_ops
-from stratum.optimizer._op_utils import show_graph, clone_sub_dag, topological_iterator, FLAGS
+from stratum.optimizer._op_utils import (
+    show_graph, clone_sub_dag, topological_iterator, validate_operands,
+    validate_dag, compute_graph_node_indegree, FLAGS,
+)
+from stratum.optimizer.ir._ops import BinOp, CallOp, OperandRef, Op, ValueOp
+import operator
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum._config import config
 graph = False
@@ -156,6 +161,57 @@ class TestOpUtils(unittest.TestCase):
         out = choice_unrolling(root)
         if graph:
             show_graph(out, filename='choice_unrolling')
+
+
+class TestValidateOperands(unittest.TestCase):
+    def _wire(self, op, *inputs):
+        op.inputs = list(inputs)
+        return op
+
+    def test_valid_op_passes(self):
+        op = self._wire(BinOp(op=operator.add, left=OperandRef(0), right=OperandRef(1)),
+                        ValueOp(1), ValueOp(2))
+        validate_operands(op)  # must not raise
+
+    def test_ref_out_of_range_raises(self):
+        # right references index 1 but only one input edge exists
+        op = self._wire(BinOp(op=operator.add, left=OperandRef(0), right=OperandRef(1)),
+                        ValueOp(1))
+        with self.assertRaises(ValueError):
+            validate_operands(op)
+
+    def test_negative_ref_raises(self):
+        op = self._wire(BinOp(op=operator.add, left=OperandRef(-1), right=2), ValueOp(1))
+        with self.assertRaises(ValueError):
+            validate_operands(op)
+
+    def test_nested_ref_in_args_validated(self):
+        # OperandRef nested inside a tuple arg is reached by the recursive walk
+        op = self._wire(CallOp(func=lambda *a: a, args=((OperandRef(0), OperandRef(5)),), kwargs={}),
+                        ValueOp(1))
+        with self.assertRaises(ValueError):
+            validate_operands(op)
+
+    def test_nested_ref_in_kwargs_validated(self):
+        # OperandRef nested inside a kwargs dict is reached by the recursive walk
+        op = self._wire(CallOp(func=lambda **k: k, args=(), kwargs={"a": OperandRef(0), "b": OperandRef(7)}),
+                        ValueOp(1))
+        with self.assertRaises(ValueError):
+            validate_operands(op)
+
+    def test_validate_dag_walks_all_ops(self):
+        a = ValueOp(1)
+        bad = self._wire(BinOp(op=operator.add, left=OperandRef(0), right=OperandRef(9)), a)
+        a.add_output(bad)
+        with self.assertRaises(ValueError):
+            validate_dag(bad)
+
+    def test_indegree_rejects_operandref_as_input(self):
+        # A raw OperandRef leaking into the inputs list is a bug; indegree must flag it.
+        op = Op()
+        op.inputs = [OperandRef(0)]
+        with self.assertRaises(RuntimeError):
+            compute_graph_node_indegree(op)
 
 
 

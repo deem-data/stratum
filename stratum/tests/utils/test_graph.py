@@ -9,23 +9,22 @@ class TestGraph(unittest.TestCase):
     def _graph_signature(self,graph):
         """Return an id-agnostic structural summary of a skrub graph dict."""
         nodes = graph["nodes"]
-        n = len(nodes)
 
         children = graph["children"]
         parents = graph["parents"]
 
-        out_degrees = [len(children.get(i, [])) for i in range(n)]
-        in_degrees = [len(parents.get(i, [])) for i in range(n)]
+        out_degrees = [len(children.get(node_id, [])) for node_id in nodes]
+        in_degrees = [len(parents.get(node_id, [])) for node_id in nodes]
 
         edge_count = sum(out_degrees)
 
-        roots = sum(1 for i in range(n) if len(parents.get(i, [])) == 0)
-        leaves = sum(1 for i in range(n) if len(children.get(i, [])) == 0)
+        roots = sum(1 for node_id in nodes if len(parents.get(node_id, [])) == 0)
+        leaves = sum(1 for node_id in nodes if len(children.get(node_id, [])) == 0)
 
         in_out_pairs = sorted(zip(sorted(in_degrees), sorted(out_degrees)))
 
         return {
-            "n_nodes": n,
+            "n_nodes": len(nodes),
             "edge_count": edge_count,
             "in_degrees_sorted": sorted(in_degrees),
             "out_degrees_sorted": sorted(out_degrees),
@@ -66,6 +65,16 @@ class TestGraph(unittest.TestCase):
         fast_sig = self._graph_signature(fast)
 
         self.assertEqual(ref_sig, fast_sig)
+
+    def test_build_graph_edges_are_deduplicated(self):
+        dag = self._build_example_dag()
+        fast = build_graph(dag)
+        for node_id, child_ids in fast["children"].items():
+            self.assertEqual(len(child_ids), len(set(child_ids)),
+                             f"duplicate child edges for node {node_id}")
+        for node_id, parent_ids in fast["parents"].items():
+            self.assertEqual(len(parent_ids), len(set(parent_ids)),
+                             f"duplicate parent edges for node {node_id}")
 
 
     def test_build_graph_matches_skrub_graph_for_branching_dag(self):

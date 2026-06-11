@@ -1,4 +1,4 @@
-from stratum.optimizer.ir._ops import BinOp, CallOp, Op, DATA_OP_PLACEHOLDER
+from stratum.optimizer.ir._ops import BinOp, CallOp, Op, OperandRef
 import operator
 import numpy as np
 from enum import Enum
@@ -92,8 +92,10 @@ class NumericOp(Op):
         elif self.type == NumericOpType.EXPM1:
             return np.expm1(inputs[0])
         elif self.type in _BINARY_TYPES:
+            # The primary operand is always input 0 (bound first); the optional
+            # second operand is referenced explicitly so x op x (single edge) works.
             primary = inputs[0]
-            operand = inputs[1] if self.opt_operand is DATA_OP_PLACEHOLDER else self.constant
+            operand = inputs[self.opt_operand.k] if isinstance(self.opt_operand, OperandRef) else self.constant
             left, right = (operand, primary) if self.reversed else (primary, operand)
             if self.type == NumericOpType.ADD:
                 return np.add(left, right)
@@ -119,10 +121,10 @@ def make_binary_numeric_op(op: CallOp, type: NumericOpType) -> NumericOp:
         raise ValueError(
             f"make_binary_numeric_op called with args that are not a pair: {args}"
         )
-    l_ph = args[0] is DATA_OP_PLACEHOLDER
-    r_ph = args[1] is DATA_OP_PLACEHOLDER
+    l_ph = isinstance(args[0], OperandRef)
+    r_ph = isinstance(args[1], OperandRef)
     if l_ph and r_ph:
-        extra = dict(opt_operand=DATA_OP_PLACEHOLDER, reversed=False)
+        extra = dict(opt_operand=args[1], reversed=False)
     elif l_ph:
         extra = dict(constant=args[1], reversed=False)
     elif r_ph:
@@ -139,11 +141,11 @@ def extract_numeric_op(op: Op, root: Op) -> tuple[Op, bool]:
     if isinstance(op, BinOp) and op.op is operator.pow and op.right == 2:
         new_op = NumericOp(func=np.square, args=(), kwargs={}, inputs=op.inputs, outputs=op.outputs)
     elif isinstance(op, BinOp) and op.op in _ARITH_OP_MAP:
-        l_ph = op.left is DATA_OP_PLACEHOLDER
-        r_ph = op.right is DATA_OP_PLACEHOLDER
+        l_ph = isinstance(op.left, OperandRef)
+        r_ph = isinstance(op.right, OperandRef)
         extra = None
         if l_ph and r_ph:
-            extra = dict(opt_operand=DATA_OP_PLACEHOLDER, reversed=False)
+            extra = dict(opt_operand=op.right, reversed=False)
         elif l_ph:
             extra = dict(constant=op.right, reversed=False)
         elif r_ph:

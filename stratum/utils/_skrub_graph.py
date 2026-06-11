@@ -79,14 +79,9 @@ def build_graph(data_op):
                 if child_id not in visited:
                     stack.append(child)
 
-    short = {obj_id: i for i, obj_id in enumerate(raw_nodes)}
-    nodes = {short[k]: v for k, v in raw_nodes.items()}
-    children = {
-        short[k]: [short[c] for c in _unique(v)]
-        for k, v in raw_children.items()
-    }
-    parents = {
-        short[k]: [short[p] for p in _unique(v)]
-        for k, v in raw_parents.items()
-    }
-    return {"nodes": nodes, "children": children, "parents": parents}
+    # De-duplicate edges (a node may reference the same child via several fields).
+    # Operand multiplicity is reconstructed separately from the impl field walk, so
+    # collapsing duplicate edges keeps the topology clean without losing information.
+    children = {k: _unique(v) for k, v in raw_children.items()}
+    parents = {k: _unique(v) for k, v in raw_parents.items()}
+    return {"nodes": raw_nodes, "children": children, "parents": parents}

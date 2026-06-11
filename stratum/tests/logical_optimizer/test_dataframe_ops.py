@@ -15,7 +15,7 @@ from stratum.optimizer.ir._dataframe_ops import (
     ApplyUDFOp, AssignOp, ConcatOp, DataSourceOp, DatetimeConversionOp, DropOp,
     GetAttrProjectionOp, JoinOp, MetadataOp, ProjectionOp, SplitOp,
     make_datetime_conversion_op, make_read_op)
-from stratum.optimizer.ir._ops import (CallOp, DATA_OP_PLACEHOLDER, GetItemOp,
+from stratum.optimizer.ir._ops import (CallOp, OperandRef, GetItemOp,
                                        MethodCallOp, Op, ValueOp)
 from stratum.runtime._buffer_pool import BufferPool
 
@@ -213,7 +213,7 @@ class TestProjectionOp(unittest.TestCase):
 
     def test_func_path(self):
         op = ProjectionOp(func=lambda df, v: df * v,
-                          args=(DATA_OP_PLACEHOLDER, 2), kwargs={})
+                          args=(OperandRef(0), 2), kwargs={})
         result = run_op(op, pd.DataFrame({"a": [1, 2]}))
         self.assertEqual([2, 4], result["a"].tolist())
 
@@ -292,9 +292,10 @@ class TestAssignOpPolars(PolarsTestCase):
         self.assertIn("b", result.columns)
 
     def test_placeholder_raises(self):
-        op = AssignOp(args=(), kwargs={"b": DATA_OP_PLACEHOLDER})
+        # An OperandRef surviving into a polars assign kwarg is unsupported.
+        op = AssignOp(args=(), kwargs={"b": OperandRef(1)})
         with self.assertRaises(NotImplementedError):
-            run_op(op, pl.DataFrame({"a": [1, 2]}), DATA_OP_PLACEHOLDER)
+            run_op(op, pl.DataFrame({"a": [1, 2]}), OperandRef(1))
 
 
 class TestDatetimeConversionOp(unittest.TestCase):
@@ -334,8 +335,7 @@ class TestGetAttrProjectionOp(unittest.TestCase):
 
 class TestConcatOpPolars(PolarsTestCase):
     def test_polars_concat(self):
-        op = ConcatOp(first=MagicMock(spec=DataOp),
-                      others=[MagicMock(spec=DataOp)], axis=0)
+        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=0)
         result = run_op(op, pl.DataFrame({"a": [1, 2]}), pl.DataFrame({"a": [3, 4]}))
         self.assertEqual(4, len(result))
 
@@ -409,7 +409,7 @@ class TestMakeReadOp(unittest.TestCase):
 
     def test_with_plain_positional_arg(self):
         call_op = CallOp(func=pd.read_csv,
-                         args=(DATA_OP_PLACEHOLDER, ","), kwargs={})
+                         args=(OperandRef(0), ","), kwargs={})
         call_op.inputs = [ValueOp("dummy.csv")]
         new_op = make_read_op(call_op)
         self.assertIsInstance(new_op, DataSourceOp)
@@ -419,7 +419,7 @@ class TestMakeReadOp(unittest.TestCase):
 class TestMakeDatetimeConversionOp(unittest.TestCase):
     def test_extra_positional_args(self):
         op = CallOp(func=pd.to_datetime,
-                    args=(DATA_OP_PLACEHOLDER, "ISO8601"), kwargs={})
+                    args=(OperandRef(0), "ISO8601"), kwargs={})
         new_op = make_datetime_conversion_op(op)
         self.assertEqual(("ISO8601",), tuple(new_op.args))
 

@@ -43,6 +43,7 @@ class _Flags:
     DEBUG: bool = False
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
     fast_dataops_convert: bool = True
+    validate_dag: bool = True
 
 FLAGS = _Flags()
 
@@ -59,7 +60,8 @@ def set_config(rust_backend: bool | None = None,
     DEBUG: bool | None = None,
     force_polars: bool = False,
     cse: bool = True,
-    fast_dataops_convert: bool = True) -> None:
+    fast_dataops_convert: bool = True,
+    validate_dag: bool = True) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -135,6 +137,7 @@ def set_config(rust_backend: bool | None = None,
 
     #FIXME: This should be the default. No need to set it. Remove.
     FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
+    FLAGS.validate_dag = bool(validate_dag)
 
 
 def get_config() -> dict:
@@ -154,6 +157,7 @@ def get_config() -> dict:
         "force_polars": FLAGS.force_polars,
         "cse": FLAGS.cse,
         "fast_dataops_convert": FLAGS.fast_dataops_convert,
+        "validate_dag": FLAGS.validate_dag,
     }
 
 @contextmanager

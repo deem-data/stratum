@@ -1,6 +1,6 @@
 from typing import Callable
 from collections.abc import Sequence
-from stratum.optimizer.ir._ops import (DATA_OP_PLACEHOLDER, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp,
+from stratum.optimizer.ir._ops import (OperandRef, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp,
                                        MethodCallOp, Op, ValueOp, VariableOp,_resolve_args, _resolve_kwargs)
 from pandas import DataFrame
 import pandas as pd
@@ -36,14 +36,16 @@ class DataSourceOp(Op):
             else:
                 return self.data
         else:
-            file_path = inputs[0] if self.file_path is DATA_OP_PLACEHOLDER else self.file_path
+            file_path = inputs[self.file_path.k] if isinstance(self.file_path, OperandRef) else self.file_path
+            read_args = _resolve_args(self.read_args, inputs) if self.read_args else []
+            read_kwargs = _resolve_kwargs(self.read_kwargs, inputs) if self.read_kwargs else {}
             if FLAGS.force_polars:
-                return pl.read_csv(file_path, *self.read_args, **self.read_kwargs)
+                return pl.read_csv(file_path, *read_args, **read_kwargs)
             else:
                 if self.format == "csv":
-                    return pd.read_csv(file_path, *self.read_args, **self.read_kwargs)
+                    return pd.read_csv(file_path, *read_args, **read_kwargs)
                 elif self.format == "npy":
-                    return np.load(file_path, *self.read_args, **self.read_kwargs)
+                    return np.load(file_path, *read_args, **read_kwargs)
                 else:
                     raise ValueError(f"Unsupported format: {self.format}")
 
@@ -105,10 +107,9 @@ class MetadataOp(Op):
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict, inputs: list):
-        input_iter = iter(inputs)
-        _obj = next(input_iter)
-        _args = _resolve_args(self.args, input_iter)
-        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
+        _obj = inputs[0]
+        _args = _resolve_args(self.args, inputs)
+        _kwargs = _resolve_kwargs(self.kwargs, inputs)
         if FLAGS.force_polars:
             if "columns" in _kwargs:
                 _args.append(_kwargs["columns"])
@@ -142,12 +143,12 @@ class ProjectionOp(Op):
 
     def _extract_args_and_kwargs(self, inputs: list):
         """Extract and process arguments and kwargs from inputs."""
-        input_iter, args_iter = iter(inputs), iter(self.args)
-        _obj = next(input_iter)
-        if self.func is not None:
-            next(args_iter)
-        _args = _resolve_args(args_iter, input_iter)
-        _kwargs = _resolve_kwargs(self.kwargs, input_iter)
+        # The object is the implicit primary operand (index 0). For func-based ops
+        # the first positional arg is that object slot, so skip it here.
+        _obj = inputs[0]
+        args = self.args[1:] if self.func is not None else self.args
+        _args = _resolve_args(args, inputs)
+        _kwargs = _resolve_kwargs(self.kwargs, inputs)
         return _obj, _args, _kwargs
 
     def process(self, mode: str, environment: dict, inputs: list):
@@ -222,7 +223,7 @@ class AssignOp(ProjectionOp):
         if FLAGS.force_polars:
             checked_kwargs = {}
             for k, v in _kwargs.items():
-                if v is DATA_OP_PLACEHOLDER:
+                if isinstance(v, OperandRef):
                     raise NotImplementedError("Is not yet suppoerted, please report this issue")
                 elif isinstance(v, pd.Series) or isinstance(v, pd.DataFrame):
                     logger.warning(f"Converting pandas object to polars object for column {k}")
@@ -308,18 +309,18 @@ class ConcatOp(Op):
         0: "diagonal_relaxed",
         1: "horizontal",
     }
-    def __init__(self, first: Op, others: list[Op], axis: int):
+    def __init__(self, first, others: list, axis):
         super().__init__(name="CONCAT", is_X=False, is_y=False)
-        self.first = DATA_OP_PLACEHOLDER if isinstance(first, DataOp) else first
-        self.others = [DATA_OP_PLACEHOLDER if isinstance(other, DataOp) else other for other in others]
-        self.axis = DATA_OP_PLACEHOLDER if isinstance(axis, DataOp) else axis
+        # first/others entries/axis are OperandRefs when graph-fed, else constants.
+        self.first = first
+        self.others = list(others)
+        self.axis = axis
         self.is_dataframe_op = True
 
     def process(self, mode: str, environment: dict, inputs: list):
-        input_iter = iter(inputs)
-        first = next(input_iter) if self.first is DATA_OP_PLACEHOLDER else self.first
-        others = [next(input_iter) if other is DATA_OP_PLACEHOLDER else other for other in self.others]
-        axis = next(input_iter) if self.axis is DATA_OP_PLACEHOLDER else self.axis
+        first = inputs[self.first.k] if isinstance(self.first, OperandRef) else self.first
+        others = [inputs[o.k] if isinstance(o, OperandRef) else o for o in self.others]
+        axis = inputs[self.axis.k] if isinstance(self.axis, OperandRef) else self.axis
         if FLAGS.force_polars:
             return pl.concat([first, *others], how=self.axis_map[axis])
         else:
@@ -458,32 +459,31 @@ def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp:
 
 
 def make_read_op(op: CallOp, format: str = "csv") -> DataSourceOp:
-    input_iter = iter(op.inputs)
-    # assume all inputs are ValueOps
+    # assume all inputs are ValueOps or VariableOps
     assert all(isinstance(arg, ValueOp) or isinstance(arg, VariableOp) for arg in op.inputs), "All inputs must be ValueOps or VariableOps"
+    # Rebuild a fresh, renumbered inputs list keeping only VariableOps as edges;
+    # ValueOp operands are inlined as their constant value.
     inputs = []
-    args = []
-    for arg in op.args:
-        if arg is DATA_OP_PLACEHOLDER:
-            actual_input_op = next(input_iter)
+    index = {}  # id(input op) -> new operand index
+
+    def keep(input_op):
+        i = index.get(id(input_op))
+        if i is None:
+            i = len(inputs)
+            inputs.append(input_op)
+            index[id(input_op)] = i
+        return OperandRef(i)
+
+    def convert(value):
+        if isinstance(value, OperandRef):
+            actual_input_op = op.inputs[value.k]
             if isinstance(actual_input_op, VariableOp):
-                args.append(DATA_OP_PLACEHOLDER)
-                inputs.append(actual_input_op)
-            else:
-                args.append(actual_input_op.value)
-        else:
-            args.append(arg)
-    kwargs = {}
-    for k, v in op.kwargs.items():
-        if v is DATA_OP_PLACEHOLDER:
-            actual_input_op = next(input_iter)
-            if isinstance(actual_input_op, VariableOp):
-                kwargs[k] = DATA_OP_PLACEHOLDER
-                inputs.append(actual_input_op)
-            else:
-                kwargs[k] = actual_input_op.value
-        else:
-            kwargs[k] = v
+                return keep(actual_input_op)
+            return actual_input_op.value
+        return value
+
+    args = [convert(a) for a in op.args]
+    kwargs = {k: convert(v) for k, v in op.kwargs.items()}
     new_op = DataSourceOp(file_path=args[0], _format=format, read_args=args[1:], read_kwargs=kwargs, inputs=inputs, outputs=op.outputs)
     for in_ in inputs:
         in_.replace_output(op, new_op)
@@ -510,7 +510,10 @@ def make_join_op(op: MethodCallOp) -> JoinOp:
         other_arg = op.kwargs.get("other")
 
     if isinstance(other_arg, (list, tuple)):
-        if len(other_arg) != len(set(id(x) for x in other_arg)):
+        # Compare by operand index: a frame used twice de-duplicates to one input
+        # edge (the same OperandRef.k), which the chained-join unrolling can't handle.
+        keys = [x.k if isinstance(x, OperandRef) else id(x) for x in other_arg]
+        if len(keys) != len(set(keys)):
             raise ValueError(
                 "Duplicate right-hand frames in chained joins are not supported."
             )
