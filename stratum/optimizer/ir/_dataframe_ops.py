@@ -1,6 +1,6 @@
 from typing import Callable
 from collections.abc import Sequence
-from stratum.optimizer.ir._ops import (OperandRef, BaseEstimatorOp, BinOp, CallOp, GetAttrOp, GetItemOp,
+from stratum.optimizer.ir._ops import (OperandRef, BaseEstimatorOp, BinOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp,
                                        MethodCallOp, Op, ValueOp, VariableOp,_resolve_args, _resolve_kwargs)
 from pandas import DataFrame
 import pandas as pd
@@ -66,7 +66,7 @@ class JoinOp(Op):
         inputs: list[Op] | None = None,
         outputs: list[Op] | None = None,
     ):
-        super().__init__(name="JOIN", inputs=inputs, outputs=outputs)
+        super().__init__(name="", inputs=inputs, outputs=outputs)
         self.how = how
         self.left_on = left_on
         self.right_on = right_on
@@ -93,6 +93,37 @@ class JoinOp(Op):
                 left_index=self.left_index,
                 right_index=self.right_index
             )
+
+class AggregateOp(Op):
+    """Fused ``groupby(...).agg(...)`` operation.
+
+    Captures a ``DataFrame.groupby(by)`` followed by a single aggregation call
+    (e.g. ``.agg("mean")``, ``.sum()``, ``.mean()``, ``.count()``) as one op.
+    Both the direct methods and ``.agg(spec)`` are normalized to ``aggregations``
+    so ``grouped.agg(aggregations)`` reproduces the original result.
+    """
+    fields = ["grouping_attributes", "aggregations", "groupby_kwargs"]
+
+    def __init__(self, grouping_attributes: str | list[str] | OperandRef,
+                 aggregations: str | list[str] | dict | OperandRef,
+                 groupby_kwargs: dict | None = None,
+                 inputs: list[Op] | None = None, outputs: list[Op] | None = None):
+        super().__init__(name="", inputs=inputs, outputs=outputs)
+        self.grouping_attributes = grouping_attributes
+        self.aggregations = aggregations
+        self.groupby_kwargs = groupby_kwargs or {}
+        self.is_dataframe_op = True
+
+    def __str__(self):
+        return f"AggregateOp(by={self.grouping_attributes}, agg={self.aggregations}) [df]"
+
+    def process(self, mode: str, environment: dict, inputs: list):
+        _obj = inputs[0]
+        grouping = inputs[self.grouping_attributes.k] if isinstance(self.grouping_attributes, OperandRef) else self.grouping_attributes
+        aggregations = inputs[self.aggregations.k] if isinstance(self.aggregations, OperandRef) else self.aggregations
+        if FLAGS.force_polars:
+            raise NotImplementedError("AggregateOp Polars backend is not implemented yet.")
+        return _obj.groupby(grouping, **self.groupby_kwargs).agg(aggregations)
 
 class MetadataOp(Op):
     fields = ["func", "args", "kwargs"]
@@ -409,7 +440,13 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
                 new_op = make_datetime_conversion_op(op)
 
         elif isinstance(op, MethodCallOp):
-            if op.method_name in ["rename"]:
+            if op.method_name == "groupby":
+                # Leave groupby as-is; mark it as a dataframe op so the following
+                # aggregation call is visited and can fuse with it.
+                op.is_dataframe_op = True
+            elif _is_aggregation(op):
+                new_op = make_aggregate_op(op)
+            elif op.method_name in ["rename"]:
                 new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs,
                                     outputs=op.outputs)
                 op.replace_output_of_inputs(new_op)
@@ -437,6 +474,11 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
         elif isinstance(op, GetItemOp) or isinstance(op, BaseEstimatorOp):
             op.is_dataframe_op = True
 
+        elif isinstance(op, ChoiceOp):
+            # check if all outcomes are dataframe ops
+            if all(outcome.is_dataframe_op for outcome in op.inputs):
+                op.is_dataframe_op = True
+
     if new_op is None:
         return root, False
     else:
@@ -444,6 +486,87 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
         if root is op:
             root = new_op
     return root, True
+
+
+# Aggregation methods callable directly on a groupby (no .agg wrapper needed).
+_AGG_METHODS = {"sum", "mean", "count", "min", "max", "median", "std", "var",
+                "first", "last", "prod", "size", "nunique", "sem"}
+# Generic aggregation entrypoints that take the aggregation spec as an argument.
+_AGG_FUNCS = {"agg", "aggregate"}
+
+
+def _is_groupby_op(op: Op) -> bool:
+    return isinstance(op, MethodCallOp) and op.method_name == "groupby"
+
+
+def _is_aggregation(op: MethodCallOp) -> bool:
+    """True for a `groupby(...).<agg>()` pair that can fuse into an AggregateOp.
+
+    Requires the aggregation to consume a `groupby` op directly (no GetItem or
+    other op in between) and that groupby to have a single consumer.
+    """
+    if not op.inputs or not _is_groupby_op(op.inputs[0]):
+        return False
+    if len(op.inputs[0].outputs) != 1:
+        return False
+    if _extract_grouping(op.inputs[0]) is None:
+        return False
+    if op.method_name in _AGG_METHODS:
+        return True
+    # `.agg(spec)` / `.aggregate(spec)`: only the positional-spec form is supported.
+    return op.method_name in _AGG_FUNCS and bool(op.args)
+
+
+def _extract_grouping(groupby_op: MethodCallOp) -> str | list[str] | OperandRef:
+    if groupby_op.args:
+        return groupby_op.args[0]
+    if groupby_op.kwargs and "by" in groupby_op.kwargs:
+        return groupby_op.kwargs["by"]
+    return None
+
+
+def _extract_aggregations(op: MethodCallOp) -> str | list[str] | OperandRef:
+    if op.method_name in _AGG_FUNCS:
+        return op.args[0]
+    # direct method such as .mean()/.sum()/.count() -> normalize to its name
+    return op.method_name
+
+
+def make_aggregate_op(op: MethodCallOp) -> AggregateOp:
+    """Fuse `groupby(by).agg(...)` (or `.sum()/.mean()/...`) into an AggregateOp."""
+    groupby_op = op.inputs[0]
+    df = groupby_op.inputs[0]
+
+    grouping_attributes = _extract_grouping(groupby_op)
+    aggregations = _extract_aggregations(op)
+
+    # Inputs in resolution order: the frame, then any placeholder operands of the
+    # grouping key, then any placeholder operands of the aggregation spec.
+    inputs = [df] + list(groupby_op.inputs[1:]) + list(op.inputs[1:])
+
+    # OperandRefs in aggregations index into op.inputs. After prepending
+    # groupby_op.inputs[1:], those refs need to shift by that slice's length.
+    offset = len(groupby_op.inputs) - 1
+    if isinstance(aggregations, OperandRef):
+        aggregations = OperandRef(aggregations.k + offset)
+
+    # All groupby kwargs except 'by', which is captured in grouping_attributes.
+    groupby_kwargs = {k: v for k, v in (groupby_op.kwargs or {}).items() if k != "by"}
+
+    new_op = AggregateOp(
+        grouping_attributes=grouping_attributes,
+        aggregations=aggregations,
+        groupby_kwargs=groupby_kwargs,
+        inputs=inputs,
+        outputs=op.outputs,
+    )
+    # Bypass the now-orphaned groupby op: rewire the frame and grouping-key
+    # producers, plus any aggregation-arg producers, to feed the new op.
+    groupby_op.replace_output_of_inputs(new_op)
+    for extra in op.inputs[1:]:
+        extra.replace_output(op, new_op)
+    groupby_op.outputs.remove(op)
+    return new_op
 
 
 def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp:
