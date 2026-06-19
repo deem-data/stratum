@@ -202,6 +202,12 @@ class TestOpProcess(unittest.TestCase):
         result = op.process("fit_transform", {}, ["{0} {end}", "hello", "world"])
         self.assertEqual(result, "hello world")
 
+    def test_method_call_with_placeholders2(self):
+        # input 0 is the implicit object; the format arg/kwarg reference inputs 1 and 2.
+        op = MethodCallOp("format", args=[(OperandRef(1),"X")], kwargs={"end": OperandRef(2)})
+        result = op.process("fit_transform", {}, ["{0} {end}", "hello", "world"])
+        self.assertEqual(result, "('hello', 'X') world")
+
     def test_call_op(self):
         op = CallOp(func=lambda a, b: a + b, args=(OperandRef(0), OperandRef(1)), kwargs={})
         result = op.process("fit_transform", {}, [3, 7])

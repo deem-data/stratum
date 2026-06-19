@@ -7,6 +7,7 @@ from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Concat, Var, _wrap_estimator
+from skrub.selectors._base import All
 from pandas import DataFrame
 from polars import DataFrame as PlDataFrame, Series as PlSeries
 from stratum.utils._skrub_graph import _collect_child_data_ops
@@ -132,6 +133,58 @@ def _resolve_kwargs(kwargs, inputs):
     """Replace OperandRefs in a kwargs dict with values from the inputs list."""
     return {k: _resolve_operand(v, inputs) for k, v in kwargs.items()}
 
+
+# --- Structure keys for common-subexpression elimination -------------------
+# `Op.structure_key()` returns a hashable value that is equal for two ops iff
+# they are the same computation. Sentinel keys carry a leading marker string so
+# they stay disjoint from real values.
+_ALL_SELECTOR_KEY = ("__all_selector__",)
+# A graph-fed estimator hyper-parameter: its binding is captured by an op's
+# `param_refs` plus the input ids, so the stale DataOp left in get_params() must
+# not block two otherwise-equal estimators from merging.
+_GRAPH_PARAM_KEY = ("__graph_param__",)
+
+
+def config_key(value):
+    """Turn a config-field value into a hashable, value-based key.
+
+    OperandRefs and hashable scalars are kept by value (so equal operands and
+    constants compare equal); containers are recursed into; estimators are keyed
+    by type and parameters; unhashable leaves (DataFrames, arrays, ...) fall back
+    to identity, which is conservative (distinct objects never compare equal).
+    """
+    if isinstance(value, OperandRef):
+        return value
+    if isinstance(value, All):
+        return _ALL_SELECTOR_KEY
+    if isinstance(value, BaseEstimator):
+        return estimator_key(value)
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(config_key(v) for v in value))
+    if isinstance(value, dict):
+        return ("__dict__", frozenset((k, config_key(v)) for k, v in value.items()))
+    if isinstance(value, (set, frozenset)):
+        return ("__set__", frozenset(config_key(v) for v in value))
+    try:
+        hash(value)
+    except TypeError:
+        return ("__id__", id(value))
+    return value
+
+
+def estimator_key(est: BaseEstimator):
+    """Structure key for an estimator, consistent with parameter-wise equality.
+
+    Graph-fed parameters (still DataOps in ``get_params()``) are normalized to a
+    constant marker: their binding is represented by the op's ``param_refs`` field
+    and input ids, not by the estimator object itself.
+    """
+    items = []
+    for k, v in est.get_params().items():
+        items.append((k, _GRAPH_PARAM_KEY if isinstance(v, DataOp) else config_key(v)))
+    return ("__estimator__", type(est), frozenset(items))
+
+
 class Op():
     def __init__(self, inputs=None,outputs=None, name=None, is_X=False, is_y=False):
         self.name = name
@@ -222,6 +275,23 @@ class Op():
     def process(self, mode: str, environment: dict, inputs: list):
         raise NotImplementedError(f"Processing of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
 
+    def structure_key(self):
+        """Hashable key for CSE: equal for two ops iff they are the same computation.
+
+        Returns ``None`` for ops that must never be merged (opaque ops without a
+        ``fields`` attribute, e.g. ImplOp/SearchEvalOp). The key combines the op
+        type, its inputs by identity (already canonicalized when visited in
+        topological order) and its configuration (the ``fields`` attributes,
+        whose operands are index-based ``OperandRef``s). Subclasses override when
+        identity- or name-based semantics are needed.
+        """
+        fields = getattr(type(self), "fields", None)
+        if fields is None:
+            return None
+        input_ids = tuple(id(i) for i in self.inputs)
+        config = tuple((name, config_key(getattr(self, name))) for name in fields)
+        return (type(self), input_ids, config)
+
     def check_kwargs(self, kwargs):
         if not isinstance(kwargs, dict):
             raise TypeError(
@@ -310,6 +380,10 @@ class VariableOp(Op):
 
     def clone(self):
         return VariableOp(name=self.name)
+
+    def structure_key(self):
+        # Two `var("x")` references denote the same input regardless of identity.
+        return (VariableOp, self.name)
 
     def process(self, mode: str, environment: dict, inputs: list):
         return environment[self.name]
@@ -501,6 +575,10 @@ class ChoiceOp(Op):
         new_op.name = self.name
         new_op.was_cloned = True
         return new_op
+
+    def structure_key(self):
+        # A choice models alternatives; merging two choices is never valid.
+        return None
 
     def process(self, mode: str, environment: dict, inputs: list):
         results = [{"id" : name, "vals" : inputs[i]} for i, name in enumerate(self.make_outcome_names())]

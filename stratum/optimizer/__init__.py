@@ -1,5 +1,5 @@
-from ._optimize import apply_cse_on_skrub_ir
+from ._op_cse import apply_op_cse
 
 __all__ = [
-    "apply_cse_on_skrub_ir",
+    "apply_op_cse",
 ]

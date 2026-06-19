@@ -2,7 +2,7 @@ from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque, defaultdict
-from ._cse import apply_cse
+from ._op_cse import apply_op_cse
 from .ir._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .ir._numeric_ops import extract_numeric_op
 from .ir._ops import ChoiceOp, Op, SearchEvalOp, as_op
@@ -39,13 +39,6 @@ def topological_traverse(nodes, parents, children):
 
     return topo_order
 
-
-def apply_cse_on_skrub_ir(dag: DataOp):
-    """ Apply CSE on a Skrub DataOp DAG and return the deduplicated DAG. (Deprecated versio of optimize function)"""
-    children, nodes, parents = get_dataops_graph(dag)
-    order = topological_traverse(nodes, parents, children)
-    apply_cse(dag, nodes, order, parents)
-    return dag
 
 class OptConfig():
     # TODO we should move this class to the _config.py file
@@ -92,14 +85,14 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
         config = OptConfig()
 
 
-    # Apply CSE on skrub IR
-    if FLAGS.cse:
-        children, nodes, parents = get_dataops_graph(dag_root)
-        order = topological_traverse(nodes, parents, children)
-        run_cse_pass(dag_root, nodes, order, parents)
-
-    # Convert to Op DAG and add splitting op
+    # Convert to Op DAG
     root = convert_to_ops(dag_root)
+
+    # Apply CSE on the Op IR (post-conversion)
+    if FLAGS.cse:
+        root = run_op_cse_pass(root)
+
+    # Add splitting op
     root = add_splitting_op(root)
     _debug_validate_dag(root)  # operand refs as wired by as_op
 
@@ -136,12 +129,14 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     return linearized_dag, split_pos, flagged_ops
 
 
-def run_cse_pass(dag_root: DataOp, nodes: dict, order: list, parents: dict):
-    """ Apply CSE on a Skrub DataOp DAG and return the deduplicated DAG."""
+def run_op_cse_pass(root: Op) -> Op:
+    """Apply CSE on the Op IR (post-conversion) and return the deduplicated root."""
     start = start_time()
-    apply_cse(dag_root, nodes, order, parents)
-    # TODO cse should directly return the new list of ops ordered so we dont have to iterate again
-    log_time("CSE took", start)
+    root = apply_op_cse(root)
+    log_time("Op CSE took", start)
+    _debug_validate_dag(root)
+    _debug_show_graph(root, "op_cse")
+    return root
 
 
 def extract_frame_operators(root):
