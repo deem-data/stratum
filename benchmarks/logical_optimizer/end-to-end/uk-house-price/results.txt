@@ -1,3 +1,0 @@
-100K
-stratum: 86s
-skrub: 249s
