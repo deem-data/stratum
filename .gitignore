@@ -90,13 +90,18 @@ stratum/_rust_backend_native.abi3.so
 
 # Ignore input folders in benchmarks
 benchmarks/**/input/
+benchmarks-staging
 
 # Ignore any data files
 *.zip
 *.csv
 *.pdf
 *.ipynb
+*.npy
 
 # coding agents
 .cursor
 .claude
+
+# buffer pool spill directory
+**/.stratum/

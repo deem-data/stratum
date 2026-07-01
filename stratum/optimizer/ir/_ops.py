@@ -640,7 +640,9 @@ class ValueOp(Op):
         raise ValueError(f"We should not clone ValueOp objects.")
 
     def process(self, mode: str, inputs: list):
-        return self.value
+        out = self.value
+        self.value = None
+        return out
 
 class MethodCallOp(Op):
     fields = ["method_name", "args", "kwargs"]

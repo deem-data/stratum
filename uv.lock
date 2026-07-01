@@ -1762,6 +1762,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+benchmark = [
+    { name = "psutil" },
+]
 dev = [
     { name = "ipykernel" },
 ]
@@ -1789,6 +1792,7 @@ requires-dist = [
     { name = "numexpr", specifier = ">=2.14.1" },
     { name = "pandas", specifier = "==3.0.2" },
     { name = "polars" },
+    { name = "psutil", marker = "extra == 'benchmark'", specifier = ">=7.2" },
     { name = "pyarrow", specifier = ">=22.0.0" },
     { name = "pygments", specifier = ">=2.20.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },

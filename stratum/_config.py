@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 
 def _env_bool(name, default=False):
     val = os.getenv(name)
@@ -44,6 +45,7 @@ class _Flags:
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
     fast_dataops_convert: bool = True
     validate_dag: bool = True
+    buffer_pool_memory_budget: int = 0
 
 FLAGS = _Flags()
 
@@ -61,7 +63,8 @@ def set_config(rust_backend: bool | None = None,
     force_polars: bool = False,
     cse: bool = True,
     fast_dataops_convert: bool = True,
-    validate_dag: bool = True) -> None:
+    validate_dag: bool = True,
+    buffer_pool_memory_budget: int = 0) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -135,6 +138,7 @@ def set_config(rust_backend: bool | None = None,
     FLAGS.open_graph = bool(open_graph)
     FLAGS.explain_linear_plan = bool(explain_linear_plan)
 
+    FLAGS.buffer_pool_memory_budget = int(buffer_pool_memory_budget)
     #FIXME: This should be the default. No need to set it. Remove.
     FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
     FLAGS.validate_dag = bool(validate_dag)
@@ -158,6 +162,7 @@ def get_config() -> dict:
         "cse": FLAGS.cse,
         "fast_dataops_convert": FLAGS.fast_dataops_convert,
         "validate_dag": FLAGS.validate_dag,
+        "buffer_pool_memory_budget": FLAGS.buffer_pool_memory_budget,
     }
 
 @contextmanager
@@ -165,7 +170,15 @@ def config(**kwargs):
     """Temporarily override runtime config inside a context."""
     original = get_config()
     set_config(**kwargs)
+    stratum_logger = logging.getLogger("stratum")
+    prev_level = stratum_logger.level
+    if kwargs.get("DEBUG", False):
+        # set for this module stratum only
+        print("DEBUG MODE ENABLED")
+        logging.basicConfig(level=logging.INFO)
+        stratum_logger.setLevel(logging.DEBUG)
     try:
         yield
     finally:
         set_config(**original)
+        stratum_logger.setLevel(prev_level)

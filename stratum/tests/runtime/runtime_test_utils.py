@@ -79,6 +79,11 @@ def _make_op(name="op"):
     return Op(name=name)
 
 
+def _arr(n: int) -> np.ndarray:
+    """float64 array of length n — 8 bytes per element for predictable in-memory size."""
+    return np.arange(n, dtype=np.float64)
+
+
 def _make_linear_dag():
     """A -> B -> C (linear chain)."""
     a = _make_op("A")

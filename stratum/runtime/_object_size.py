@@ -52,3 +52,15 @@ def get_size_numpy(obj):
         return obj.itemsize
     else:
         raise ValueError(f"Unsupported numpy type for memory estimation: {type(obj)}")
+
+def prettify_bytes(num_bytes: float) -> str:
+    """Format a byte count as a human-readable string (e.g. ``"1.50 MB"``)."""
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    size = float(num_bytes)
+    for unit in units:
+        # Stop at the last unit even if `size` is still >= 1024, so the number
+        # and unit always stay paired (values > 1024 PB report as "N.NN PB").
+        if abs(size) < 1024 or unit == units[-1]:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} {units[-1]}"

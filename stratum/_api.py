@@ -49,4 +49,8 @@ def stats_printer(sched: SequentialScheduler):
         print("\n" + "=" * 80)
         print(f"Heavy hitters (sorted by time spent in DataOp evaluation):\n")
         print(table.head(FLAGS.stats_top_k).to_string(index=False))
+        print("=" * 80)
+        print("Total BufferPool overhead during execution:", sched.buffer_pool_overhead)
+        print("=" * 80 + "\n")
+        print(sched.pool.stats)
         print("=" * 80 + "\n")
