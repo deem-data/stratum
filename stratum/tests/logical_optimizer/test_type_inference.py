@@ -7,7 +7,7 @@ import stratum as st
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.ir._dataframe_ops import (
     ApplyUDFOp, DataSourceOp, DatetimeConversionOp, GetAttrProjectionOp)
-from stratum.optimizer.ir._ops import GetItemOp, OutputType, BinOp, OperandRef
+from stratum.optimizer.ir._ops import GetItemOp, OutputType, BinOp
 from stratum.tests.logical_optimizer.test_dataframe_ops import optimize, npy_file
 
 
@@ -49,18 +49,6 @@ class TestOutputTypeInference(unittest.TestCase):
         self.assertEqual(1, len(binops))
         self.assertIs(OutputType.SERIES, binops[0].output_type)
 
-    def test_mask_selection_is_frame(self):
-        # df[df["x"] > 1] : the trailing GetItem is keyed by a (boolean) series and
-        # selects rows -> FRAME. The column GetItem feeding the mask is a SERIES.
-        data = st.as_data_op(self.df)
-        ops = optimize(data[data["x"] > 1], OptConfig(dataframe_ops=True))
-        getitems = self._find(ops, GetItemOp)
-        col_gets = [g for g in getitems if g.output_type is OutputType.SERIES]
-        row_sel = [g for g in getitems if g.output_type is OutputType.FRAME]
-        self.assertEqual(1, len(col_gets))   # df["x"]
-        self.assertEqual(1, len(row_sel))    # df[mask]
-        self.assertIsInstance(row_sel[0].key, OperandRef)
-
     def test_npy_source_is_matrix(self):
         with npy_file(np.array([1, 2, 3])) as path:
             data = st.as_data_op(path).skb.apply_func(np.load)
@@ -74,16 +62,6 @@ class TestOutputTypeInference(unittest.TestCase):
         # (Arithmetic BinOps are consumed by the numeric path; comparisons stay.)
         ops = optimize(st.as_data_op(self.df) > 1, OptConfig(dataframe_ops=True))
         self.assertIs(OutputType.FRAME, self._one(ops, BinOp).output_type)
-
-    def test_chained_mask_comparison_is_series(self):
-        # (df["x"] > 1) & (df["y"] < 6) : both comparisons and their logical-and
-        # are columns -> every BinOp is a SERIES (the mask fed to df[...]).
-        data = st.as_data_op(self.df)
-        ops = optimize(data[(data["x"] > 1) & (data["y"] < 6)],
-                       OptConfig(dataframe_ops=True))
-        binops = self._find(ops, BinOp)
-        self.assertEqual(3, len(binops))  # >, <, &
-        self.assertTrue(all(b.output_type is OutputType.SERIES for b in binops))
 
     def test_datetime_conversion_on_column_is_series(self):
         # X["datetime"] is a SERIES; pd.to_datetime over it produces a

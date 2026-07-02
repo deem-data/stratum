@@ -131,4 +131,7 @@ def _remap_refs(value, mapping: dict):
         return [_remap_refs(v, mapping) for v in value]
     if isinstance(value, dict):
         return {k: _remap_refs(v, mapping) for k, v in value.items()}
+    if hasattr(value, "remap_operand_refs"):
+        # Column-expression tree (immutable) -> rebuild with remapped refs.
+        return value.remap_operand_refs(mapping)
     return value

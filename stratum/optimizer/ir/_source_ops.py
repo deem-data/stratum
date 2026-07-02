@@ -7,6 +7,13 @@ import polars as pl
 import numpy as np
 from stratum._config import FLAGS
 
+def rechunk_pl_frame(df, rows_per_chunk = 128_000):
+    n = len(df)
+    if rows_per_chunk <= 0 or n <= rows_per_chunk:
+        return df
+    parts = [df.slice(i, rows_per_chunk) for i in range(0, n, rows_per_chunk)]
+    return pl.concat(parts, rechunk=False)
+
 class DataSourceOp(Op):
     def __init__(self, data: DataFrame = None, file_path: str = None, _format: str = None,
                  read_args: tuple | list = None, read_kwargs: dict = None, is_X=False, is_y=False, outputs: list[Op] = None, inputs: list[Op] = None):
@@ -27,7 +34,8 @@ class DataSourceOp(Op):
     def process(self, mode: str, inputs: list):
         if self.data is not None:
             if FLAGS.force_polars:
-                return pl.DataFrame(self.data)
+                out = pl.DataFrame(self.data)
+                return rechunk_pl_frame(out) if FLAGS.rechunk else out
             else:
                 return self.data
         else:

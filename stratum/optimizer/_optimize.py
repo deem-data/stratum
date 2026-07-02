@@ -91,10 +91,6 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None):
     # Convert to Op DAG
     root = convert_to_ops(dag_root, env)
 
-    # Apply CSE on the Op IR (post-conversion)
-    if FLAGS.cse:
-        root = run_op_cse_pass(root)
-
     # Add splitting op
     root = add_splitting_op(root)
     _debug_validate_dag(root)  # operand refs as wired by as_op
@@ -104,6 +100,13 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None):
         root = extract_frame_operators(root)
     if config.numeric_ops:
         root = extract_numeric_operators(root)
+
+    # Apply CSE on the Op IR *after* extraction, so it can dedup whole specialized
+    # ops (e.g. two identical mask SelectionOps). Running it earlier would merge a
+    # mask's shared sub-expressions into a node with multiple consumers, which then
+    # blocks selection folding.
+    if FLAGS.cse:
+        root = run_op_cse_pass(root)
 
     # Unrolling of choices to a dag with only a single ChoiceOp at the end
     if config.unroll_choices:
@@ -140,7 +143,7 @@ def extract_frame_operators(root):
     """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
     start = start_time()
     for op in topological_iterator(root):
-        root, _ = extract_dataframe_op(op, root)
+        root, _ = extract_dataframe_op(op, root, FLAGS.make_selection_op)
     log_time("dataframe_rewrite took", start)
     _debug_show_graph(root, "frame_rewrite")
     return root

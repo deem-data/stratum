@@ -19,14 +19,6 @@ def _env_int(name, default=0):
     v = os.getenv(name)
     return int(v) if v is not None else int(default)
 
-def _env_str(name, default=None):
-    v = os.getenv(name)
-    if v is None:
-        return default
-    s = str(v).strip().lower()
-    if s in ("", "none", "null"):
-        return None
-    return s
 
 @dataclass
 class _Flags:
@@ -43,8 +35,11 @@ class _Flags:
     cse: bool = True
     DEBUG: bool = False
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
+    pandas_query: bool = _env_bool("STRATUM_PANDAS_QUERY", False)
     fast_dataops_convert: bool = True
     validate_dag: bool = True
+    make_selection_op: bool = True
+    rechunk: bool = True
     buffer_pool_memory_budget: int = 0
 
 FLAGS = _Flags()
@@ -61,10 +56,14 @@ def set_config(rust_backend: bool | None = None,
     explain_linear_plan: bool = False,
     DEBUG: bool | None = None,
     force_polars: bool = False,
+    pandas_query: bool = False,
     cse: bool = True,
     fast_dataops_convert: bool = True,
     validate_dag: bool = True,
-    buffer_pool_memory_budget: int = 0) -> None:
+    make_selection_op: bool = True,
+    rechunk: bool = True,
+buffer_pool_memory_budget: int = 0
+               ) -> None:
     """Runtime toggles (synced env for Rust to read).
 
     Parameter:
@@ -103,6 +102,11 @@ def set_config(rust_backend: bool | None = None,
 
         force_polars: bool, default false
             Force use of Polars instead of Pandas for dataframe operations.
+
+        pandas_query: bool, default false
+            Evaluate MASK selections on the pandas backend via ``DataFrame.query()``
+            when the predicate is expressible as a query string (no OperandLeaf / str
+            accessor); otherwise fall back to boolean-mask indexing.
     """
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
@@ -131,14 +135,18 @@ def set_config(rust_backend: bool | None = None,
     if force_polars is not None:
         FLAGS.force_polars = bool(force_polars)
         os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
+    FLAGS.pandas_query = bool(pandas_query)
+    os.environ["STRATUM_PANDAS_QUERY"] = "1" if FLAGS.pandas_query else "0"
     # TODO: Select between multiple schedulers in the future.
     FLAGS.scheduler = bool(scheduler)
     FLAGS.cse = bool(cse)
     FLAGS.debug_graph = bool(debug_graph)
     FLAGS.open_graph = bool(open_graph)
-    FLAGS.explain_linear_plan = bool(explain_linear_plan)
-
     FLAGS.buffer_pool_memory_budget = int(buffer_pool_memory_budget)
+    FLAGS.explain_linear_plan = bool(explain_linear_plan)
+    FLAGS.make_selection_op = bool(make_selection_op)
+    FLAGS.rechunk = bool(rechunk)
+
     #FIXME: This should be the default. No need to set it. Remove.
     FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
     FLAGS.validate_dag = bool(validate_dag)
@@ -146,24 +154,7 @@ def set_config(rust_backend: bool | None = None,
 
 def get_config() -> dict:
     # Shallow copy for safety
-    return {
-        "rust_backend": FLAGS.rust_backend,
-        "num_threads": FLAGS.num_threads,
-        "debug_timing": FLAGS.debug_timing,
-        "allow_patch": FLAGS.allow_patch,
-        "scheduler": FLAGS.scheduler,
-        "stats": FLAGS.stats,
-        "stats_top_k": FLAGS.stats_top_k,
-        "debug_graph": FLAGS.debug_graph,
-        "open_graph": FLAGS.open_graph,
-        "explain_linear_plan": FLAGS.explain_linear_plan,
-        "DEBUG" : FLAGS.DEBUG,
-        "force_polars": FLAGS.force_polars,
-        "cse": FLAGS.cse,
-        "fast_dataops_convert": FLAGS.fast_dataops_convert,
-        "validate_dag": FLAGS.validate_dag,
-        "buffer_pool_memory_budget": FLAGS.buffer_pool_memory_budget,
-    }
+    return vars(FLAGS).copy() # asdict if we want a deep copy
 
 @contextmanager
 def config(**kwargs):

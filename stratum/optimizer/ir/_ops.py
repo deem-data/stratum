@@ -1,5 +1,6 @@
 from __future__ import annotations
 from enum import Enum, auto
+from stratum._config import FLAGS
 from types import SimpleNamespace
 from typing import Callable
 
@@ -7,7 +8,7 @@ from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import Choice
-from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, Concat, Var, _wrap_estimator
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, Var, _wrap_estimator
 from skrub._utils import PassThrough
 from skrub.selectors._base import All
 from pandas import DataFrame
@@ -700,11 +701,12 @@ class GetAttrOp(Op):
             return getattr(inputs[0], self.attr_name)
 
 class GetItemOp(Op):
-    fields = ["key"]
+    fields = ["key", "is_filter"]
     
-    def __init__(self, key=None, name=None):
+    def __init__(self, key=None, name=None, is_filter=False):
         # key is either a constant or an OperandRef (when the key is graph-fed).
         self.key = key
+        self.is_filter = is_filter
         if name is None:
             name = str(key)
         super().__init__(name=name)
@@ -713,6 +715,8 @@ class GetItemOp(Op):
     def process(self, mode: str, inputs: list):
         # The container being indexed is the implicit primary operand (index 0).
         key = inputs[self.key.k] if isinstance(self.key, OperandRef) else self.key
+        if self.is_filter and FLAGS.force_polars:
+            return inputs[0].filter(key)
         return inputs[0][key]
 
 class BinOp(Op):
@@ -731,7 +735,20 @@ class BinOp(Op):
         right = inputs[self.right.k] if isinstance(self.right, OperandRef) else self.right
         return self.op(left, right)
 
-class SearchEvalOp(Op):    
+class UnaryOp(Op):
+    fields = ["op", "operand"]
+
+    def __init__(self, op: Callable, operand):
+        super().__init__(name=op.__name__.lstrip('__').rstrip('__'))
+        self.op = op
+        # operand is an OperandRef when graph-fed, otherwise a constant.
+        self.operand = operand
+
+    def process(self, mode: str, inputs: list):
+        operand = inputs[self.operand.k] if isinstance(self.operand, OperandRef) else self.operand
+        return self.op(operand)
+
+class SearchEvalOp(Op):
     def __init__(self, outcome_names: list[str], parent: Op = None):
         super().__init__()
         self.name = "evaluate gridsearch" 
@@ -870,6 +887,10 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None) -> Op:
         left = _bind_or_value(binder, impl.left)
         right = _bind_or_value(binder, impl.right)
         return_op = BinOp(op=impl.op, left=left, right=right)
+        return_op.inputs = binder.inputs
+    elif isinstance(impl, SkrubUnaryOp):
+        operand = _bind_or_value(binder, impl.operand)
+        return_op = UnaryOp(op=impl.op, operand=operand)
         return_op.inputs = binder.inputs
     elif isinstance(impl, Apply):
         if isinstance(impl.estimator, Choice):

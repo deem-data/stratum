@@ -1,4 +1,4 @@
-from stratum.optimizer.ir._ops import (OperandRef, OutputType, is_frame_like, BaseEstimatorOp, BinOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp,
+from stratum.optimizer.ir._ops import (OperandRef, OutputType, is_frame_like, BaseEstimatorOp, BinOp, UnaryOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp,
                                        MethodCallOp, Op, ValueOp)
 from pandas import DataFrame
 from polars import DataFrame as PolarsDataFrame
@@ -11,6 +11,9 @@ from stratum._config import FLAGS
 # `extract_dataframe_op` dispatcher below references them and so that existing
 # `from ..._dataframe_ops import X` import sites keep working (re-export hub).
 from stratum.optimizer.ir._source_ops import DataSourceOp, make_read_op
+from stratum.optimizer.ir._selection_ops import (
+    SelectionKind, SelectionOp, _SELECTION_METHODS, make_selection_op,
+    is_mask_selection, make_mask_selection_op)
 from stratum.optimizer.ir._aggregation_ops import (
     AggregateOp, GroupedDataframeOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
     _is_aggregation, _extract_grouping, _extract_aggregations, make_aggregate_op)
@@ -67,7 +70,7 @@ def _getitem_output_type(op: GetItemOp) -> OutputType:
     return OutputType.FRAME
 
 
-def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
+def extract_dataframe_op(op: Op, root: Op, selection_op = True) -> tuple[Op, bool]:
     new_op = None
     # DataSource detection (directly passed dataframe)
     if len(op.inputs) == 0:
@@ -126,19 +129,29 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
                 op.replace_output_of_inputs(new_op)
             elif op.method_name in ["join", "merge"]:
                 new_op = make_join_op(op)
+            elif op.method_name in _SELECTION_METHODS:
+                new_op = make_selection_op(op)
 
         # GetAttr Fusing and conversion to GetAttrDataframeOp
         elif isinstance(op, GetAttrOp):
             new_op = make_frame_get_attr(new_op, op)
 
-        # Projection: a BinOp over tabular data -> same tabular kind as its operand
-        # (e.g. `df["a"] > 7` is a SERIES, `df + 1` is a FRAME).
-        elif isinstance(op, BinOp):
+        # Projection: BinOp/UnaryOp over tabular data -> same tabular kind as its
+        # operand (e.g. `df["a"] > 7` is a SERIES, `df + 1` is a FRAME, `~mask` is
+        # a SERIES).
+        elif isinstance(op, (BinOp, UnaryOp)):
             op.output_type = op.inputs[0].output_type
 
-        # GetItem: a column projection (SERIES) / sub-frame / row selection.
+        # GetItem: a mask selection df[bool_series] folds into a SelectionOp;
+        # otherwise it is a column projection (SERIES) / sub-frame / row selection.
         elif isinstance(op, GetItemOp):
-            op.output_type = _getitem_output_type(op)
+            if is_mask_selection(op):
+                op.is_filter = True
+                if selection_op:
+                    new_op = make_mask_selection_op(op)
+
+            if new_op is None:
+                op.output_type = _getitem_output_type(op)
 
         elif isinstance(op, BaseEstimatorOp):
             op.output_type = OutputType.FRAME
