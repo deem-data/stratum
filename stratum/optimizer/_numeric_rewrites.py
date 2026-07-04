@@ -86,12 +86,11 @@ eliminate_sqrt_square = rewrite_pass(
 
 
 # ============================================================================
-# x * 1 -> x and 1 * x -> x
-def match_mul_one_both(op):
-    if (isinstance(op, NumericOp) and 
-            op.type is NumericOpType.MULTIPLY and 
-            op.constant == 1.0):
-        return (op, op.inputs[0])
+# x * 1 -> x
+def match_x_mul_one_only(op):
+    if isinstance(op, NumericOp) and op.type == NumericOpType.MULTIPLY:
+        if op.constant == 1:
+            return (op, op.inputs[0])
     return None
 
 def eliminate_mul_one_action(op: Op, x: Op, root: Op) -> Op:
@@ -101,5 +100,5 @@ def eliminate_mul_one_action(op: Op, x: Op, root: Op) -> Op:
         root = x
     return root
 
-eliminate_any_x_mul_one = rewrite_pass(match_mul_one_both, eliminate_mul_one_action)
+eliminate_x_mul_one = rewrite_pass(match_x_mul_one_only, eliminate_mul_one_action)
 

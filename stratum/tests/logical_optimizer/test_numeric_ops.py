@@ -324,9 +324,9 @@ class TestNumericOps(unittest.TestCase):
 
 
     # ============================================================================
-    # (x * 1 -> x and 1 * x -> x)
-    def test_eliminate_any_x_mul_one(self):
-        df = st.as_data_op(5)
+    # (x * 1 -> x)
+    def test_eliminate_x_mul_one(self):
+        df = st.as_data_op(8)
         t1 = df * 1
         out, *_ = optimize(t1)
         
