@@ -5,7 +5,7 @@ from stratum.optimizer._numeric_rewrites import (
     eliminate_log_exp,
     eliminate_log1p_expm1,
     eliminate_sqrt_square,
-    x_mul_one,
+    eliminate_x_mul_one,
 )
 from stratum.optimizer.ir._ops import Op
 from stratum.utils._utils import start_time, log_time
