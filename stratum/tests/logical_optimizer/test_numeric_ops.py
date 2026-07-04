@@ -324,10 +324,10 @@ class TestNumericOps(unittest.TestCase):
 
 
     # ============================================================================
-    # (x * 1 -> x)
-    def test_eliminate_x_mul_one(self):
-        df = st.as_data_op(8)
-        t1 = df * 1
+    # (1 * x -> x)
+    def test_eliminate_one_mul_x(self):
+        df = st.as_data_op(12)
+        t1 = 1 * df
         out, *_ = optimize(t1)
         
         has_multiply = any(isinstance(o, NumericOp) and o.type == NumericOpType.MULTIPLY for o in out)
