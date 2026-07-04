@@ -321,3 +321,16 @@ class TestNumericOps(unittest.TestCase):
         self.assertTrue(result.reversed)
         self.assertIsNone(result.opt_operand)
         self.assertEqual(result.process("fit", {}, [3]), 7)
+
+
+    # ============================================================================
+    # (x * 1 -> x and 1 * x -> x)
+    def test_eliminate_any_x_mul_one(self):
+        df = st.as_data_op(5)
+        t1 = df * 1
+        out, *_ = optimize(t1)
+        
+        has_multiply = any(isinstance(o, NumericOp) and o.type == NumericOpType.MULTIPLY for o in out)
+        self.assertFalse(has_multiply)
+
+    
