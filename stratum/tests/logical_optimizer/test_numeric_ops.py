@@ -324,13 +324,13 @@ class TestNumericOps(unittest.TestCase):
 
 
     # ============================================================================
-    # (1 * x -> x)
-    def test_eliminate_one_mul_x(self):
-        df = st.as_data_op(12)
-        t1 = 1 * df
+    # (x * 0 -> 0 and 0 * x -> 0)
+    def test_eliminate_any_mul_zero(self):
+        df = st.as_data_op(7)
+        t1 = df * 0
         out, *_ = optimize(t1)
         
-        has_multiply = any(isinstance(o, NumericOp) and o.type == NumericOpType.MULTIPLY for o in out)
-        self.assertFalse(has_multiply)
+        op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.GENERIC)
+        self.assertEqual(op.process("fit", {}, [7]), 0.0)
 
     
