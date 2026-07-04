@@ -324,13 +324,14 @@ class TestNumericOps(unittest.TestCase):
 
 
     # ============================================================================
-    # (0 * x -> 0)
-    def test_eliminate_zero_mul_x(self):    
-        df = st.as_data_op(15)
-        t1 = 0 * df
+    # (log(x + 1) -> log1p(x))
+    def test_rewrite_log_plus_one(self):
+        df = st.as_data_op(3)
+        add_expr = df + 1
+        t1 = add_expr.skb.apply_func(np.log)
         out, *_ = optimize(t1)
         
-        op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.GENERIC)
-        self.assertEqual(op.process("fit", {}, [15]), 0.0)
+        op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.LOG1P)
+        self.assertAlmostEqual(op.process("fit", {}, [3]), np.log1p(3))
 
     

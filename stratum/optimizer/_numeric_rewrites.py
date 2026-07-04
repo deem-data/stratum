@@ -86,23 +86,21 @@ eliminate_sqrt_square = rewrite_pass(
 
 
 # ============================================================================
-# 0 * x -> 0
-def match_zero_mul_x_only(op: Op):
+# replace log(x + 1) and log(1 + x) with log1p(x)
+def match_add_one_then_log(op: Op):
     if (isinstance(op, NumericOp) and 
-            op.type is NumericOpType.MULTIPLY and 
-            op.constant == 0.0 and 
-            op.reversed): 
-        return (op,)
+            op.type is NumericOpType.ADD and 
+            op.constant == 1.0 and 
+            len(op.outputs) == 1):
+        
+        op2 = op.outputs[0]
+        if isinstance(op2, NumericOp) and op2.type is NumericOpType.LOG:
+            return (op, op2)
     return None
 
-def eliminate_to_zero_action(op: Op, root: Op) -> Op:
-    zero_op = NumericOp(type=NumericOpType.GENERIC, func=lambda *args: 0.0, inputs=[], outputs=[])
-    for x in op.inputs:
-        x.outputs = [out for out in x.outputs if out is not op]
-    replace_op_in_outputs(op, zero_op)
-    if op is root:
-        root = zero_op
-    return root
+_replace_with_log1p = make_replace_two_op_chain_root_safe(
+    lambda: NumericOp(inputs=[], outputs=[], type=NumericOpType.LOG1P)
+)
 
-eliminate_zero_mul_x = rewrite_pass(match_zero_mul_x_only, eliminate_to_zero_action)
+rewrite_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
 
