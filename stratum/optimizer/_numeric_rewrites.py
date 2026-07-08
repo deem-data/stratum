@@ -14,11 +14,21 @@ def match_two_op_chain(op_cls, type1, type2):
     return match
 
 
-def match_identity_operation(op_cls, type1, const):
+def match_identity_operation(op_cls, type1, const, reversed=None):
+    """Match a var-const NumericOp that performs an identity transformation.
+
+    Parameters
+    ----------
+    reversed : bool or None
+        If None, the ``reversed`` flag is not checked (e.g. multiplication is
+        commutative so ``x*1`` and ``1*x`` are both identities).  Set to
+        ``True`` / ``False`` for non-commutative operations like subtraction.
+    """
     def match(op1):
         if isinstance(op1, op_cls) and op1.type == type1:
             if op1.opt_operand is None and op1.constant == const:
-                return (op1,)
+                if reversed is None or op1.reversed == reversed:
+                    return (op1,)
         return None
     return match
 
@@ -115,4 +125,9 @@ eliminate_identity_operation = rewrite_pass(
 eliminate_abs_abs = rewrite_pass(
     match_two_op_chain(NumericOp, NumericOpType.ABS, NumericOpType.ABS),
     _replace_with_abs,
+)
+
+eliminate_identity_subtract = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.SUBTRACT, 0, reversed=False),
+    eliminate_single_op_chain_root_safe,
 )
