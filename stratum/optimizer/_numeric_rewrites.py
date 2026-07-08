@@ -137,3 +137,8 @@ _replace_with_expm1 = make_replace_two_op_chain_root_safe(
 )
 
 eliminate_exp_minus_one = rewrite_pass(match_exp_minus_one, _replace_with_expm1)
+
+eliminate_identity_subtract = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.SUBTRACT, 0, reversed=False),
+    eliminate_single_op_chain_root_safe,
+)
