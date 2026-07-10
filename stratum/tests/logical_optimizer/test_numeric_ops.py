@@ -328,4 +328,3 @@ class TestNumericOps(unittest.TestCase):
         out, *_ = optimize(t1)
         op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.GENERIC)
         self.assertEqual(op.process("fit", {}, [7]), 0.0)
-

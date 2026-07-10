@@ -100,6 +100,3 @@ def eliminate_to_zero_action(op: Op, root: Op) -> Op:
     return root
 
 eliminate_any_mul_zero = rewrite_pass(match_mul_zero_both, eliminate_to_zero_action)
-
-
-

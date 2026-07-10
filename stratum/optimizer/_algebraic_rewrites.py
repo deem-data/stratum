@@ -7,7 +7,6 @@ from stratum.optimizer._numeric_rewrites import (
     eliminate_sqrt_square,
     eliminate_any_mul_zero,
 )
-
 from stratum.optimizer.ir._ops import Op
 from stratum.utils._utils import start_time, log_time
 import logging
@@ -40,7 +39,5 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
         root = eliminate_expm1_log1p(root)
     if config.any_mul_zero:
         root = eliminate_any_mul_zero(root)
-
-
     log_time("algebraic_rewrite", start)
     return root
