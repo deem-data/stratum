@@ -1,21 +1,8 @@
-"""
-Automatic monkey-patching of selected classes inside upstream skrub
-so that internal imports like `from ._string_encoder import StringEncoder` and
-usage in `TableVectorizer` resolve to Stratum adapters.
+"""Small upstream patches that are not physical-operator choices.
 
-Design notes:
-- Runs once, idempotent, without config flags.
-- Maintains a manual registry. Add to it when a new adapter is implemented in stratum.
-- Patches:
-  (1) the *defining modules* (e.g., `skrub._string_encoder.StringEncoder`),
-  (2) relevant *usage modules* that may already have bound names, and
-  (3) the top-level `skrub` package symbols for user-facing imports.
-
-Special case: OneHotEncoder
-- `skrub` uses `sklearn.preprocessing.OneHotEncoder` internally.
-- We therefore *cannot* patch a `skrub`-defined class. Instead, we override the
-  names `OneHotEncoder` in `skrub`'s usage modules and also expose our
-  `OneHotEncoder` at `skrub.OneHotEncoder` for convenience.
+Rust estimator implementations are registered with the physical operator
+registry. They are no longer installed by replacing upstream skrub or sklearn
+classes at import time.
 """
 from __future__ import annotations
 
@@ -24,9 +11,6 @@ import threading
 from types import ModuleType
 from typing import Dict, Tuple, List
 
-# --- Import adapters (raises at import time if not available) ---
-from stratum.adapters.string_encoder import RustyStringEncoder
-from stratum.adapters.one_hot_encoder import RustyOneHotEncoder
 from stratum.patching._gridsearch import make_grid_search as StratumMakeGridSearch
 
 # ------------------------
@@ -34,9 +18,6 @@ from stratum.patching._gridsearch import make_grid_search as StratumMakeGridSear
 # ------------------------
 # Definition: (module, symbol) -> adapter
 _DEFINITION_REPLACEMENTS: Dict[Tuple[str, str], object] = {
-    ("skrub._string_encoder", "StringEncoder"): RustyStringEncoder,
-    ("sklearn.preprocessing", "OneHotEncoder"): RustyOneHotEncoder,
-    # Note: There is no skrub-defined OneHotEncoder to replace at definition site.
 }
 
 # Method-level replacements (for methods on classes)
@@ -48,16 +29,11 @@ _METHOD_REPLACEMENTS: Dict[Tuple[str, str, str], object] = {
 # Replace/override names in these upstream usage modules if present.
 # Keep this list manually maintained. Add to it if skrub adds new direct imports.
 _USAGE_MODULES: List[str] = [
-    "skrub._table_vectorizer",
-    "skrub._tabular_pipeline",
-    # Add other skrub modules here if they import our adapters (e.g., StringEncoder, OneHotEncoder) directly.
 ]
 
 # Symbol-level overrides for usage modules and top-level exposure on `skrub`
 # (symbol name) -> adapter
 _SYMBOL_OVERRIDES: Dict[str, object] = {
-    "StringEncoder": RustyStringEncoder,
-    "OneHotEncoder": RustyOneHotEncoder,  # our adapter extends sklearn's
 }
 
 # Idempotence sentinel + lock
@@ -126,7 +102,7 @@ def _symbol_OVERRIDES_ITEMS():
     return _SYMBOL_OVERRIDES.items()
 
 def patch_skrub() -> None:
-    """Patch upstream `skrub` in-place so its internals use Stratum adapters.
+    """Patch upstream `skrub` in-place for non-operator-selector hooks.
 
     This function is safe to call multiple times (idempotent).
     """

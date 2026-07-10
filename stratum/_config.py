@@ -70,7 +70,8 @@ buffer_pool_memory_budget: int = 0
     -----------
 
         rust_backend: bool, default false
-            Enable/disable rust backend. It is a feature flag for the Rust backend.
+            Legacy feature flag for Rust execution. The physical
+            operator selector should choose Rust through the registry instead.
 
         num_threads: int >= 0 (0 lets backend decide), default 0
             Set the number of threads for the multithreaded rust operations.
@@ -79,8 +80,8 @@ buffer_pool_memory_budget: int = 0
             Print the timing in standard output.
 
         allow_patch: bool, default true
-            Allows disabling runtime backend swapping in sensitive contexts. This is a soft
-            kill-switch for disabling all non-sklearn backends, even if their flags are set.
+            Legacy kill-switch for direct adapter Rust execution. It does not
+            control physical operator registration.
 
         scheduler: bool, default false
             Enable/disable stratum's scheduler instead of skrub's make_grid_search.
@@ -121,7 +122,7 @@ buffer_pool_memory_budget: int = 0
         os.environ["SKRUB_RUST_DEBUG_TIMING"] = "1" if FLAGS.debug_timing else "0"
     if allow_patch is not None:
         FLAGS.allow_patch = bool(allow_patch)
-        os.environ["SKRUB_RUST_ALLOW_MONKEYPATCH"] = "1" if FLAGS.allow_patch else "0"
+        os.environ["SKRUB_RUST_ALLOW_PATCH"] = "1" if FLAGS.allow_patch else "0"
     if stats is not None:
         FLAGS.stats = bool(stats)
     if stats_top_k is not None:
