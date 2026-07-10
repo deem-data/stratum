@@ -17,6 +17,8 @@ from stratum.optimizer.ir._dataframe_ops import (
     make_datetime_conversion_op, make_read_op)
 from stratum.optimizer.ir._ops import (CallOp, OperandRef, GetItemOp,
                                        MethodCallOp, Op, ValueOp)
+from stratum.optimizer._projection_rewrites import (
+    fuse_consecutive_select)
 from stratum.runtime._buffer_pool import BufferPool
 
 
@@ -675,4 +677,53 @@ class TestJoinRewrites(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "Unsupported arguments for join"):
             optimize(data, OptConfig(dataframe_ops=True))
 
+
+class TestProjectionRewrites(unittest.TestCase):
+    def test_no_fuse_select_when_not_subset(self):
+        source = Op()
+        op1 = GetItemOp(key=["x"])
+        op1.inputs = [source]
+        source.outputs = [op1]
+        op2 = GetItemOp(key=["y"])
+        op2.inputs = [op1]
+        op1.outputs = [op2]
+
+        result_root = fuse_consecutive_select(op2)
+        self.assertIs(op2, result_root)
+        self.assertIs(op1, op2.inputs[0])
+
+    def test_fuse_consecutive_select_success(self):
+        source = Op()
+        op1 = GetItemOp(key=["x", "y"])
+        op1.inputs = [source]
+        source.outputs = [op1]
+        op2 = GetItemOp(key=["x"])
+        op2.inputs = [op1]
+        op1.outputs = [op2]
+
+        result_root = fuse_consecutive_select(op2)
+        self.assertIs(op2, result_root)
+        self.assertIs(source, op2.inputs[0])
+        self.assertIn(op2, source.outputs)
+        self.assertNotIn(op1, source.outputs)
+
+    def test_no_fuse_select_when_multiple_outputs(self):
+        source = Op()
+        op1 = GetItemOp(key=["x", "y"])
+        op1.inputs = [source]
+        source.outputs = [op1]
+        op2 = GetItemOp(key=["x"])
+        op2.inputs = [op1]
+        op3 = Op()  
+        op3.inputs = [op1]
+        op1.outputs = [op2, op3] 
+        sink = Op()
+        sink.inputs = [op2, op3]
+        op2.outputs = [sink]
+        op3.outputs = [sink]
+
+        result_root = fuse_consecutive_select(sink)
+        self.assertIs(sink, result_root)
+        self.assertIs(op1, op2.inputs[0])
+        self.assertIs(op1, op3.inputs[0])
 

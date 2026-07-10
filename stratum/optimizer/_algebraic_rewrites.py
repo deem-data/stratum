@@ -6,6 +6,9 @@ from stratum.optimizer._numeric_rewrites import (
     eliminate_log1p_expm1,
     eliminate_sqrt_square,
 )
+from stratum.optimizer._projection_rewrites import (
+    fuse_consecutive_select,
+)
 from stratum.optimizer.ir._ops import Op
 from stratum.utils._utils import start_time, log_time
 import logging
@@ -20,7 +23,7 @@ class AlgebraicRewritesConfig:
     sqrt_square: bool = True
     log1p_expm1: bool = True
     expm1_log1p: bool = True
-
+    consecutive_select: bool = True
 
 def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
     """Run all enabled algebraic rewrites, one pass per rewrite."""
@@ -35,5 +38,7 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
         root = eliminate_log1p_expm1(root)
     if config.expm1_log1p:
         root = eliminate_expm1_log1p(root)
+    if config.consecutive_select:
+        root = fuse_consecutive_select(root)
     log_time("algebraic_rewrite", start)
     return root
