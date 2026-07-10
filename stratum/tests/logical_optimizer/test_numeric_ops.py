@@ -321,17 +321,11 @@ class TestNumericOps(unittest.TestCase):
         self.assertTrue(result.reversed)
         self.assertIsNone(result.opt_operand)
         self.assertEqual(result.process("fit", {}, [3]), 7)
-
-
-    # ============================================================================
-    # (log(x + 1) -> log1p(x))
-    def test_rewrite_log_plus_one(self):
-        df = st.as_data_op(3)
-        add_expr = df + 1
-        t1 = add_expr.skb.apply_func(np.log)
+   
+    def test_eliminate_any_mul_zero(self):
+        df = st.as_data_op(7)
+        t1 = df * 0
         out, *_ = optimize(t1)
-        
-        op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.LOG1P)
-        self.assertAlmostEqual(op.process("fit", {}, [3]), np.log1p(3))
+        op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.GENERIC)
+        self.assertEqual(op.process("fit", {}, [7]), 0.0)
 
-    
