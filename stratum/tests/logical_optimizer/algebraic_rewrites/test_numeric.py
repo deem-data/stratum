@@ -23,7 +23,8 @@ class TestCSE(unittest.TestCase):
         t2 = t1.skb.apply_func(np.exp)
         t3 = t2.skb.apply_func(np.log1p)
 
-        out, *_ = optimize(t3)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t3, config=config)
         self.assertEqual(len(out), 2)
         self.assertEqual(out[0].value, 1)
 
@@ -42,7 +43,8 @@ class TestCSE(unittest.TestCase):
         t2 = t1.skb.apply_func(np.log)
         t3 = t2.skb.apply_func(np.log1p)
 
-        out, *_ = optimize(t3)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t3, config=config)
         self.assertEqual(len(out), 2)
         self.assertEqual(out[0].value, 1)
 
@@ -70,14 +72,15 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.log)
         t2 = t1.skb.apply_func(np.log1p)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
 
     def test_expm1_log1p_disabled(self):
         df = st.as_data_op(1)
         t1 = df.skb.apply_func(np.expm1)
         t2 = t1.skb.apply_func(np.log1p)
-        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(log1p_expm1 = False,expm1_log1p = False))
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(log1p_expm1 = False,expm1_log1p = False, constant_folding=False))
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
         self.assertEqual(out[0].value, 1)
@@ -88,7 +91,8 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.log)
         t2 = t1.skb.apply_func(np.log1p)
         t3 = t2.skb.apply_func(np.exp)
-        out, *_ = optimize(t3)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t3, config=config)
         self.assertEqual(len(out), 4)
 
     def test_log1p_log1p_exp(self):
@@ -97,7 +101,8 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.log1p)
         t2 = t1.skb.apply_func(np.log1p)
         t3 = t2.skb.apply_func(np.exp)
-        out, *_ = optimize(t3)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t3, config=config)
         self.assertEqual(len(out), 4)
 
     def test_disable_log_exp_rewrite1(self):
@@ -107,7 +112,7 @@ class TestCSE(unittest.TestCase):
 
         config = OptConfig(
             algebraic_rewrites=True,
-            algebraic_rewrite_config=AlgebraicRewritesConfig(log_exp=False),
+            algebraic_rewrite_config=AlgebraicRewritesConfig(log_exp=False, constant_folding=False),
         )
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
@@ -129,7 +134,8 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.square)
         t2 = t1.skb.apply_func(np.sqrt)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 2)
         # abs(4) = 4
         self.assertEqual(out[0].value, 4)
@@ -139,7 +145,8 @@ class TestCSE(unittest.TestCase):
         t1 = df ** 2
         t2 = t1.skb.apply_func(np.sqrt)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 2)
         # abs(-3) = 3
         self.assertEqual(out[0].value, -3)
@@ -150,7 +157,8 @@ class TestCSE(unittest.TestCase):
         t2 = t1.skb.apply_func(np.sqrt)
         t3 = t2.skb.apply_func(np.log1p)
 
-        out, *_ = optimize(t3)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t3, config=config)
         self.assertEqual(len(out), 3)
         self.assertEqual(out[0].value, 4)
 
@@ -161,7 +169,7 @@ class TestCSE(unittest.TestCase):
 
         config = OptConfig(
             algebraic_rewrites=True,
-            algebraic_rewrite_config=AlgebraicRewritesConfig(sqrt_square=False),
+            algebraic_rewrite_config=AlgebraicRewritesConfig(sqrt_square=False, constant_folding=False),
         )
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
@@ -170,7 +178,8 @@ class TestCSE(unittest.TestCase):
         df = st.as_data_op(4)
         t1 = df.skb.apply_func(np.sqrt)
 
-        out, *_ = optimize(t1)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t1, config=config)
         self.assertEqual(len(out), 2)
 
     def test_sqrt_square_produces_abs_op(self):
@@ -179,7 +188,8 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.square)
         t2 = t1.skb.apply_func(np.sqrt)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.ABS)
@@ -190,7 +200,8 @@ class TestCSE(unittest.TestCase):
         t1 = df ** 2
         t2 = t1.skb.apply_func(np.sqrt)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.ABS)
@@ -200,7 +211,8 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.square)
         t2 = t1.skb.apply_func(np.log)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
 
     def test_no_rewrite_sqrt_exp(self):
@@ -208,7 +220,8 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.sqrt)
         t2 = t1.skb.apply_func(np.exp)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
 
     def test_no_rewrite_pow3_sqrt(self):
@@ -217,7 +230,8 @@ class TestCSE(unittest.TestCase):
         t1 = df ** 3
         t2 = t1.skb.apply_func(np.sqrt)
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
 
     def test_disable_sqrt_square_does_not_affect_log_exp(self):
@@ -238,7 +252,8 @@ class TestCSE(unittest.TestCase):
         t1 = df * 1
         t2 = t1 + 3
 
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 2)
         self.assertEqual(out[1].process("fit", [out[0].value]), 5)
 
@@ -246,7 +261,7 @@ class TestCSE(unittest.TestCase):
         df = st.as_data_op(2)
         config = OptConfig(
             algebraic_rewrites=True,
-            algebraic_rewrite_config=AlgebraicRewritesConfig(identity_op=False),
+            algebraic_rewrite_config=AlgebraicRewritesConfig(identity_op=False, constant_folding=False),
         )
         t1 = df * 1
         t2 = t1 + 3
@@ -269,7 +284,8 @@ class TestCSE(unittest.TestCase):
         df = st.as_data_op(-3)
         t1 = df.skb.apply_func(np.abs)
         t2 = t1.skb.apply_func(np.abs)
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
 
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
@@ -278,7 +294,8 @@ class TestCSE(unittest.TestCase):
     def test_single_abs_untouched(self):
         df = st.as_data_op(-3)
         t1 = df.skb.apply_func(np.abs)
-        out, *_ = optimize(t1)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t1, config=config)
         self.assertEqual(len(out), 2)
 
     def test_abs_abs_with_trailing_op(self):
@@ -286,14 +303,16 @@ class TestCSE(unittest.TestCase):
         t1 = df.skb.apply_func(np.abs)
         t2 = t1.skb.apply_func(np.abs)
         t3 = t2.skb.apply_func(np.log1p)
-        out, *_ = optimize(t3)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t3, config=config)
         self.assertEqual(len(out), 3)
 
     def test_no_rewrite_abs_sqrt(self):
         df = st.as_data_op(4)
         t1 = df.skb.apply_func(np.abs)
         t2 = t1.skb.apply_func(np.sqrt)
-        out, *_ = optimize(t2)
+        config = OptConfig(algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False))
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
 
     def test_abs_abs_disabled(self):
@@ -302,7 +321,7 @@ class TestCSE(unittest.TestCase):
         t2 = t1.skb.apply_func(np.abs)
         config = OptConfig(
             algebraic_rewrites=True,
-            algebraic_rewrite_config=AlgebraicRewritesConfig(abs_abs=False)
+            algebraic_rewrite_config=AlgebraicRewritesConfig(abs_abs=False, constant_folding=False)
         )
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
