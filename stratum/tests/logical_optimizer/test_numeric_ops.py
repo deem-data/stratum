@@ -6,9 +6,15 @@ import numpy as np
 from sklearn.dummy import DummyRegressor
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType, make_binary_numeric_op
 from stratum.optimizer.ir._ops import CallOp, OperandRef
-from stratum.optimizer._optimize import optimize
+from stratum.optimizer._optimize import optimize, OptConfig
+from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
 
 class TestNumericOps(unittest.TestCase):
+    def _opt(self, dag):
+        return optimize(dag, OptConfig(
+            algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False),
+        ))
+
     def setUp(self):
         self.df = pd.DataFrame({
             "x": [1, 2, 3],
@@ -121,7 +127,7 @@ class TestNumericOps(unittest.TestCase):
     def test_extract_add_var_const(self):
         df = st.as_data_op(5)
         t1 = df + 3
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.ADD)
@@ -131,7 +137,7 @@ class TestNumericOps(unittest.TestCase):
     def test_extract_add_const_var(self):
         df = st.as_data_op(5)
         t1 = 3 + df
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.ADD)
@@ -141,7 +147,7 @@ class TestNumericOps(unittest.TestCase):
     def test_extract_subtract_var_const(self):
         df = st.as_data_op(5)
         t1 = df - 2
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.SUBTRACT)
@@ -149,7 +155,7 @@ class TestNumericOps(unittest.TestCase):
     def test_extract_multiply_var_const(self):
         df = st.as_data_op(5)
         t1 = df * 4
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.MULTIPLY)
@@ -157,7 +163,7 @@ class TestNumericOps(unittest.TestCase):
     def test_extract_divide_var_const(self):
         df = st.as_data_op(10)
         t1 = df / 2
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.DIVIDE)
@@ -195,35 +201,35 @@ class TestNumericOps(unittest.TestCase):
     def test_extract_binop_add_var_var(self):
         df1 = st.as_data_op(2)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1 + df2)
+        out, *_ = self._opt(df1 + df2)
         op = self._assert_var_var_extracted(out, NumericOpType.ADD)
         self.assertEqual(op.process("fit", [2, 3]), 5)
 
     def test_extract_binop_subtract_var_var(self):
         df1 = st.as_data_op(10)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1 - df2)
+        out, *_ = self._opt(df1 - df2)
         op = self._assert_var_var_extracted(out, NumericOpType.SUBTRACT)
         self.assertEqual(op.process("fit", [10, 3]), 7)
 
     def test_extract_binop_multiply_var_var(self):
         df1 = st.as_data_op(4)
         df2 = st.as_data_op(5)
-        out, *_ = optimize(df1 * df2)
+        out, *_ = self._opt(df1 * df2)
         op = self._assert_var_var_extracted(out, NumericOpType.MULTIPLY)
         self.assertEqual(op.process("fit", [4, 5]), 20)
 
     def test_extract_binop_divide_var_var(self):
         df1 = st.as_data_op(12)
         df2 = st.as_data_op(4)
-        out, *_ = optimize(df1 / df2)
+        out, *_ = self._opt(df1 / df2)
         op = self._assert_var_var_extracted(out, NumericOpType.DIVIDE)
         self.assertEqual(op.process("fit", [12, 4]), 3.0)
 
     def test_extract_add_produces_correct_result(self):
         df = st.as_data_op(5)
         t1 = df + 3
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         add_op = next(op for op in out if isinstance(op, NumericOp) and op.type == NumericOpType.ADD)
         self.assertEqual(add_op.process("fit", [5]), 8)
 
@@ -231,7 +237,7 @@ class TestNumericOps(unittest.TestCase):
         """CallOp with np.add should be extracted to NumericOp ADD."""
         df = st.as_data_op(5)
         t1 = df.skb.apply_func(np.add, 3)
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         add_ops = [op for op in out if isinstance(op, NumericOp) and op.type == NumericOpType.ADD]
         self.assertEqual(len(add_ops), 1)
 
@@ -239,49 +245,49 @@ class TestNumericOps(unittest.TestCase):
         """CallOp with np.multiply should be extracted to NumericOp MULTIPLY."""
         df = st.as_data_op(5)
         t1 = df.skb.apply_func(np.multiply, 4)
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         mul_ops = [op for op in out if isinstance(op, NumericOp) and op.type == NumericOpType.MULTIPLY]
         self.assertEqual(len(mul_ops), 1)
 
     def test_extract_callop_add_var_var(self):
         df1 = st.as_data_op(2)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1.skb.apply_func(np.add, df2))
+        out, *_ = self._opt(df1.skb.apply_func(np.add, df2))
         op = self._assert_var_var_extracted(out, NumericOpType.ADD)
         self.assertEqual(op.process("fit", [2, 3]), 5)
 
     def test_extract_callop_subtract_var_var(self):
         df1 = st.as_data_op(5)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1.skb.apply_func(np.subtract, df2))
+        out, *_ = self._opt(df1.skb.apply_func(np.subtract, df2))
         op = self._assert_var_var_extracted(out, NumericOpType.SUBTRACT)
         self.assertEqual(op.process("fit", [5, 3]), 2)
 
     def test_extract_callop_multiply_var_var(self):
         df1 = st.as_data_op(2)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1.skb.apply_func(np.multiply, df2))
+        out, *_ = self._opt(df1.skb.apply_func(np.multiply, df2))
         op = self._assert_var_var_extracted(out, NumericOpType.MULTIPLY)
         self.assertEqual(op.process("fit", [2, 3]), 6)
 
     def test_extract_callop_divide_var_var(self):
         df1 = st.as_data_op(6)
         df2 = st.as_data_op(2)
-        out, *_ = optimize(df1.skb.apply_func(np.divide, df2))
+        out, *_ = self._opt(df1.skb.apply_func(np.divide, df2))
         op = self._assert_var_var_extracted(out, NumericOpType.DIVIDE)
         self.assertEqual(op.process("fit", [6, 2]), 3.0)
 
     def test_extract_subtract_const_var_produces_correct_result(self):
         df = st.as_data_op(3)
         t1 = 10 - df
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.SUBTRACT)
         self.assertEqual(op.process("fit", [3]), 7)
 
     def test_extract_divide_const_var_produces_correct_result(self):
         df = st.as_data_op(4)
         t1 = 12 / df
-        out, *_ = optimize(t1)
+        out, *_ = self._opt(t1)
         op = next(o for o in out if isinstance(o, NumericOp) and o.type == NumericOpType.DIVIDE)
         self.assertEqual(op.process("fit", [4]), 3.0)
 
