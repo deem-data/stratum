@@ -1,6 +1,6 @@
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
-from stratum.optimizer.ir._ops import Op
+from stratum.optimizer.ir._ops import Op, ValueOp
 
 
 def match_two_op_chain(op_cls, type1, type2):
@@ -98,6 +98,39 @@ def match_exp_minus_one(op):
     return None
 
 
+def match_constant_foldable(op):
+    """Match a NumericOp whose variable inputs are all ValueOps (constants).
+
+    For binary ops with a constant operand (``opt_operand is None``) only the
+    primary input must be a ValueOp; the constant side is already a Python scalar.
+    For var-var binary ops both inputs must be ValueOps.
+    """
+    if not isinstance(op, NumericOp):
+        return None
+    if not op.inputs:
+        return None
+    if op.opt_operand is not None:
+        # var-var binary: every input must be a ValueOp
+        if not all(isinstance(inp, ValueOp) for inp in op.inputs):
+            return None
+    else:
+        # unary or var-const binary: only the primary input must be a ValueOp
+        if not isinstance(op.inputs[0], ValueOp):
+            return None
+    return (op,)
+
+
+def fold_constant_op_root_safe(op, root):
+    """Evaluate *op* with its constant inputs and replace it with a ValueOp."""
+    input_values = [inp.value for inp in op.inputs]
+    result = op.process("fit", input_values)
+    new_op = ValueOp(result)
+    replace_op_in_outputs(op, new_op)
+    if op is root:
+        root = new_op
+    return root
+
+
 eliminate_log_exp = rewrite_pass(
     match_two_op_chain(NumericOp, NumericOpType.LOG, NumericOpType.EXP),
     eliminate_two_op_chain_root_safe,
@@ -151,4 +184,9 @@ eliminate_exp_minus_one = rewrite_pass(match_exp_minus_one, _replace_with_expm1)
 eliminate_identity_subtract = rewrite_pass(
     match_identity_operation(NumericOp, NumericOpType.SUBTRACT, 0, reversed=False),
     eliminate_single_op_chain_root_safe,
+)
+
+eliminate_constant_folding = rewrite_pass(
+    match_constant_foldable,
+    fold_constant_op_root_safe,
 )
