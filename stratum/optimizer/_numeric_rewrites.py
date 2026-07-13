@@ -110,6 +110,14 @@ def fold_constant_op_root_safe(op, root):
         root = new_op
     return root
 
+def match_exp_minus_one(op):
+    """Match exp(x) - 1"""
+    if isinstance(op, NumericOp) and op.type is NumericOpType.EXP and len(op.outputs) == 1:
+        op2 = op.outputs[0]
+        if (isinstance(op2, NumericOp) and op2.type is NumericOpType.SUBTRACT
+                and op2.opt_operand is None and op2.constant == 1 and not op2.reversed):
+            return (op, op2)
+    return None
 
 
 eliminate_log_exp = rewrite_pass(
@@ -155,3 +163,13 @@ eliminate_constant_folding = rewrite_pass(
     match_constant_foldable,
     fold_constant_op_root_safe,
 )
+eliminate_add_zero = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.ADD, 0),
+    eliminate_single_op_chain_root_safe,
+)
+
+_replace_with_expm1 = make_replace_two_op_chain_root_safe(
+    lambda: NumericOp(inputs=[], outputs=[], type=NumericOpType.EXPM1)
+)
+
+eliminate_exp_minus_one = rewrite_pass(match_exp_minus_one, _replace_with_expm1)

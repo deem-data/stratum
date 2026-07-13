@@ -12,6 +12,8 @@ on:
       - 'stratum/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - '.github/copilot-instructions.md'
+      - '.github/instructions/**'
     branches: [main, master]
   pull_request:
     paths-ignore:
@@ -24,6 +26,8 @@ on:
       - 'stratum/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - '.github/copilot-instructions.md'
+      - '.github/instructions/**'
     branches: [main, master]
   workflow_dispatch:
 

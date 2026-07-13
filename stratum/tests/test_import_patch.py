@@ -1,41 +1,25 @@
-import sys
-import pandas as pd
-import stratum as st
 from sklearn.preprocessing import OneHotEncoder
-from skrub import TableVectorizer, StringEncoder
+from skrub import StringEncoder
 
-def capture_std_out(capfd):
-    # Capture timing output
-    sys.stdout.flush()
-    sys.stderr.flush()
-    captured = capfd.readouterr()
-    combined_output = (captured.out or "") + (captured.err or "")
-    return combined_output
+import stratum as st
+from stratum.optimizer.ir._ops import TransformerOp
+from stratum.optimizer.physical import build_default_physical_registry
 
-def test_tablevectorizer_stringencoder(capfd):
-    df = pd.DataFrame({
-        'A': ['one', 'two', 'two', 'three'],
-        'B': ['02/02/2024', '23/02/2024', '12/03/2024', '13/03/2024'],
-        'C': ['1.5', 'N/A', '12.2', 'N/A'],
-    })
-    with st.config(rust_backend=True, debug_timing=True):
-        vectorizer = TableVectorizer(low_cardinality=StringEncoder())
-        _ = vectorizer.fit_transform(df)
-        # Assert if the fitted transformers is RustyStringEncoder
-        assert repr(vectorizer.transformers_['A']).startswith('RustyStringEncoder')
-        # Assert if the Rust code is executed
-        assert "[rust]" in capture_std_out(capfd)
 
-def test_tablevectorizer_onehotencoder(capfd):
-    df = pd.DataFrame({
-        'A': ['one', 'two', 'two', 'three'],
-        'B': ['02/02/2024', '23/02/2024', '12/03/2024', '13/03/2024'],
-        'C': ['1.5', 'N/A', '12.2', 'N/A'],
-    })
-    with st.config(rust_backend=True, debug_timing=True):
-        vectorizer = TableVectorizer(low_cardinality=OneHotEncoder())
-        _ = vectorizer.fit_transform(df)
-        # Assert if the fitted transformers is RustyStringEncoder
-        assert repr(vectorizer.transformers_['A']).startswith('RustyOneHotEncoder')
-        # Assert if the Rust code is executed
-        assert "[rust]" in capture_std_out(capfd)
+def test_skrub_and_sklearn_estimators_are_not_monkey_patched():
+    assert StringEncoder.__module__.startswith("skrub")
+    assert OneHotEncoder.__module__.startswith("sklearn")
+
+
+def test_rust_estimators_are_registered_as_physical_operators():
+    registry = build_default_physical_registry()
+
+    rust_candidates = registry.candidates_for(TransformerOp, backend_name="rust")
+
+    assert len(rust_candidates) == 2
+    assert {candidate.backend_name for candidate in rust_candidates} == {"rust"}
+
+
+def test_stratum_still_exposes_adapter_classes_for_direct_legacy_use():
+    assert st.StringEncoder.__name__ == "RustyStringEncoder"
+    assert st.OneHotEncoder.__name__ == "RustyOneHotEncoder"

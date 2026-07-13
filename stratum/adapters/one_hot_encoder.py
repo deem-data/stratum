@@ -12,6 +12,29 @@ from .._rust_backend import _to_list
 # File-internal config flags
 _DEBUG_INFO = False
 
+
+def _rust_runtime_available() -> bool:
+    return (
+        rb.HAVE_RUST
+        and getattr(rb, "ohe_transform", None) is not None
+        and getattr(rb, "csr_to_dense", None) is not None
+    )
+
+
+def supports_rust_one_hot_encoder(estimator) -> tuple[bool, str]:
+    if not isinstance(estimator, _SKOneHot):
+        return False, "estimator is not a sklearn OneHotEncoder"
+    if not _rust_runtime_available():
+        return False, "Rust OneHotEncoder runtime is not available"
+    if getattr(estimator, "drop", None) != "if_binary":
+        return False, "drop must be 'if_binary'"
+    if np.dtype(getattr(estimator, "dtype", np.float64)) != np.dtype(np.float32):
+        return False, "dtype must be float32"
+    if getattr(estimator, "handle_unknown", None) != "ignore":
+        return False, "handle_unknown must be 'ignore'"
+    return True, ""
+
+
 def _iter_columns(X):
     if hasattr(X, "ndim") and getattr(X, "ndim", 1) == 2 and hasattr(X, "shape"):
         n_cols = X.shape[1]
@@ -75,7 +98,8 @@ class RustyOneHotEncoder(_SKOneHot):
     def transform(self, X):
         # Check kill-switch and feature flag at call time
         rc = get_config()
-        if not (rc["allow_patch"] and rc["rust_backend"] and rb.HAVE_RUST):
+        force_rust = getattr(self, "_stratum_force_rust", False)
+        if not (force_rust or (rc["allow_patch"] and rc["rust_backend"] and rb.HAVE_RUST)):
             return super().transform(X)
         # Check if the rust modules are available
         if getattr(rb, "ohe_transform", None) is None or getattr(rb, "csr_to_dense", None) is None:

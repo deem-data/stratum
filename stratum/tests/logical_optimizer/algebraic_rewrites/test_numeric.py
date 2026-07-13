@@ -475,3 +475,132 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 1)  # log(exp(x)) eliminated
         self.assertEqual(out[0].value, 1)
 
+    def test_eliminate_add_zero(self):
+        df = st.as_data_op(2)
+        t1 = df + 0
+        t2 = t1 + 3
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 5)
+
+    def test_eliminate_zero_add(self):
+        df = st.as_data_op(2)
+        t1 = 0 + df
+        t2 = t1 + 3
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 5)
+
+    def test_eliminate_add_zero_root_safe(self):
+        df = st.as_data_op(2)
+        root = df + 0
+        out, *_ = optimize(root)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].process("fit", [out[0].value]), 2)
+
+    def test_disable_eliminate_add_zero(self):
+        df = st.as_data_op(2)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(add_zero=False),
+        )
+        t1 = 0 + df
+        t2 = t1 + 3
+        out, *_ = optimize(t2, config=config)
+        print(out)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 2)
+
+    def test_no_rewrite_add_nonzero(self):
+        df = st.as_data_op(2)
+        t1 = df + 1
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 3)
+
+    def test_add_zero_with_trailing_op(self):
+        df = st.as_data_op(2)
+        t1 = df + 0
+        t2 = t1 + 3
+        t3 = t2.skb.apply_func(np.log1p)
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 3)
+
+    def test_add_zero_and_identity_operation(self):
+        df = st.as_data_op(2)
+        t1 = df * 1
+        t2 = t1 + 0
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 2)
+
+    def test_exp_minus_one(self):
+        df = st.as_data_op(0)
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1 - 1
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)                                  # source + expm1 (was 3)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.EXPM1)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 0)     # expm1(0) == 0
+
+    def test_no_rewrite_one_minus_exp(self):
+        df = st.as_data_op(0)
+        t1 = df.skb.apply_func(np.exp)
+        t2 = 1 - t1                                                     # reversed: NOT expm1
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 3)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.EXP)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 1)
+
+    def test_no_rewrite_exp_minus_two(self):
+        df = st.as_data_op(0)
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1 - 2                                                     # constant != 1
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 3)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.EXP)
+
+    def test_disable_exp_minus_one(self):
+        df = st.as_data_op(0)
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1 - 1
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(exp_minus_one=False),
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 3)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.EXP)
+
+    def test_exp_minus_one_and_identity_operation(self):
+        df = st.as_data_op(0)
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1 + 0
+        t3 = t2 - 1
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.EXPM1)
+
+    def test_log1p_of_exp_minus_one_reduces_to_input(self):
+        df = st.as_data_op(0)
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1 - 1
+        t3 = t2.skb.apply_func(np.log1p)  # log1p(exp(df)-1)
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 1)  # -> log1p(expm1(df)) -> df
+        self.assertEqual(out[0].value, 0)
+
+    def test_exp_log_minus_one_not_fused(self):
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+        t3 = t2 - 1  # exp(log(x)) - 1
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 2)  # exp/log cancel -> x - 1
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.SUBTRACT)

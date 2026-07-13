@@ -3,13 +3,21 @@ import numpy as np
 
 from skrub import StringEncoder as _SE  # base class from vanilla skrub
 from .. import _rust_backend as rb
-from .. _config import get_config
+from .._config import get_config
 from skrub._string_encoder import scaling_factor
 from skrub import _dataframe as sbd
 
 # File-internal config flags
 _DEBUG_INFO = False
 _FD_PATH = True
+
+
+def _rust_runtime_available() -> bool:
+    return (
+        rb.HAVE_RUST
+        and getattr(rb, "hashing_tfidf_fit", None) is not None
+        and getattr(rb, "tfidf_fit", None) is not None
+    )
 
 def _rust_supported_subset(enc: _SE) ->tuple[bool, str]:
     # Supports vectorizer="hashing/tfidf" with char/char_wb analyzer, no stopwords.
@@ -23,6 +31,15 @@ def _rust_supported_subset(enc: _SE) ->tuple[bool, str]:
     if not (isinstance(ngr, tuple) and len(ngr) == 2 and 1 <= ngr[0] <= ngr[1]):
         return False, f"invalid ngram_range {ngr!r}"
     return True, ""
+
+
+def supports_rust_string_encoder(estimator) -> tuple[bool, str]:
+    if not isinstance(estimator, _SE):
+        return False, "estimator is not a skrub StringEncoder"
+    if not _rust_runtime_available():
+        return False, "Rust StringEncoder runtime is not available"
+    return _rust_supported_subset(estimator)
+
 
 def _clean_strings(x_list):
     # Fill null/NaN → "", and coerce to str
@@ -71,11 +88,12 @@ class RustyStringEncoder(_SE):
 
     def fit_transform(self, X, y=None):
         # Check supported parameters
-        if not _rust_supported_subset(_SE):
+        if not _rust_supported_subset(self)[0]:
             return super().fit_transform(X, y)
         # Check kill-switch and feature flag at call time
         rc = get_config()
-        if not (rc["allow_patch"] and rc["rust_backend"] and rb.HAVE_RUST):
+        force_rust = getattr(self, "_stratum_force_rust", False)
+        if not (force_rust or (rc["allow_patch"] and rc["rust_backend"] and rb.HAVE_RUST)):
             return super().fit_transform(X, y)
 
         # Prepare inputs for Rust
@@ -153,7 +171,8 @@ class RustyStringEncoder(_SE):
     def transform(self, X):
         # Check kill-switch and feature flag at call time
         rc = get_config()
-        if not (rc["allow_patch"] and rc["rust_backend"] and rb.HAVE_RUST):
+        force_rust = getattr(self, "_stratum_force_rust", False)
+        if not (force_rust or (rc["allow_patch"] and rc["rust_backend"] and rb.HAVE_RUST)):
             return super().transform(X)
         # Check if we have stored state from fit_transform
         if not hasattr(self, "_rust_state_") or self._rust_state_ is None:

@@ -33,7 +33,45 @@ class JoinOp(Op):
         right_df = inputs[1]
 
         if FLAGS.force_polars:
-            raise NotImplementedError("JoinOp Polars backend is not implemented yet.")
+            if self.left_index or self.right_index:
+                raise NotImplementedError("JoinOp Polars backend does not support index-based joins.")
+            if self.how not in ("inner", "left", "outer"):
+                raise NotImplementedError(
+                    f"JoinOp Polars backend does not support how={self.how!r}."
+                )
+            no_defined_join_columns = self.left_on is None and self.right_on is None
+            if not no_defined_join_columns and not isinstance(self.left_on, (str, list, tuple)):
+                raise NotImplementedError(
+                    f"JoinOp Polars backend does not support left_on of type "
+                    f"{type(self.left_on).__name__}."
+                )
+
+            left_columns_list = list(left_df.columns)
+            common_columns = [col for col in right_df.columns if col in left_columns_list]
+            how = "full" if self.how == "outer" else self.how
+            left_on = common_columns if no_defined_join_columns else self.left_on
+            right_on = common_columns if no_defined_join_columns else self.right_on
+
+            result = left_df.join(
+                right_df,
+                how=how,
+                left_on=left_on,
+                right_on=right_on,
+                suffix=self.suffixes[1],
+                coalesce = self.left_on == self.right_on # keep the different key-rows and get rid off identical ones 
+            )
+            if no_defined_join_columns:
+                return result
+            if isinstance(self.left_on, str):
+                key_cols = {self.left_on, self.right_on}
+            else:  # list/tuple, validated above
+                key_cols = set(self.left_on) | set(self.right_on)
+            mapping = {
+                col: col + self.suffixes[0]
+                for col in common_columns
+                if col not in key_cols
+            }
+            return result.rename(mapping=mapping)
         else:
             return left_df.merge(
                 right_df,
