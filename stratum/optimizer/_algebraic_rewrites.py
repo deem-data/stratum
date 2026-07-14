@@ -37,7 +37,7 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
         root = eliminate_log1p_expm1(root)
     if config.expm1_log1p:
         root = eliminate_expm1_log1p(root)
-    if config.any_mul_zero:
+    if config.log_plus_one:
         root = rewrite_log_plus_one(root)
     log_time("algebraic_rewrite", start)
     return root
