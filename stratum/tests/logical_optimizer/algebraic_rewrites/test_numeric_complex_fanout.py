@@ -1,11 +1,17 @@
 import unittest
 import stratum as st
 import numpy as np
-from stratum.optimizer._optimize import optimize
+from stratum.optimizer._optimize import optimize, OptConfig
+from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer.ir._ops import ValueOp
 
 class TestNumericComplexFanout(unittest.TestCase):
+
+    def _opt(self, dag):
+        return optimize(dag, OptConfig(
+            algebraic_rewrite_config=AlgebraicRewritesConfig(constant_folding=False),
+        ))
 
     def test_fanout_before_and_after_chain(self):
         """
@@ -32,7 +38,7 @@ class TestNumericComplexFanout(unittest.TestCase):
         t1 = d + b
         final = t1 + c
         
-        linearized_dag, *_ = optimize(final)
+        linearized_dag, *_ = self._opt(final)
         
         # 1. Find the original 'a' Op
         a_op = linearized_dag[0]
@@ -68,7 +74,7 @@ class TestNumericComplexFanout(unittest.TestCase):
         c = exp_log_a + 2.0
         final = b + c
 
-        linearized_dag, *_ = optimize(final)
+        linearized_dag, *_ = self._opt(final)
 
         a_op = linearized_dag[0]
         self.assertIsInstance(a_op, ValueOp)
@@ -95,7 +101,7 @@ class TestNumericComplexFanout(unittest.TestCase):
         log_a = a.skb.apply_func(np.log)
         exp_log_a = log_a.skb.apply_func(np.exp)
 
-        linearized_dag, *_ = optimize(exp_log_a)
+        linearized_dag, *_ = self._opt(exp_log_a)
 
         a_op = linearized_dag[0]
         self.assertIsInstance(a_op, ValueOp)
@@ -126,7 +132,7 @@ class TestNumericComplexFanout(unittest.TestCase):
         d = a + 10.0
         
         combined = exp_log_a + d
-        linearized_dag, *_ = optimize(combined)
+        linearized_dag, *_ = self._opt(combined)
         
         a_op = linearized_dag[0]
         self.assertIsInstance(a_op, ValueOp)
