@@ -18,7 +18,7 @@ from stratum.optimizer.ir._dataframe_ops import (
 from stratum.optimizer.ir._ops import (CallOp, OperandRef, GetItemOp,
                                        MethodCallOp, Op, ValueOp)
 from stratum.optimizer._projection_rewrites import (
-    fuse_consecutive_select)
+    fuse_consecutive_drop)
 from stratum.runtime._buffer_pool import BufferPool
 
 
@@ -679,51 +679,45 @@ class TestJoinRewrites(unittest.TestCase):
 
 
 class TestProjectionRewrites(unittest.TestCase):
-    def test_no_fuse_select_when_not_subset(self):
+    def test_no_fuse_drop_when_row_drop(self):
         source = Op()
-        op1 = GetItemOp(key=["x"])
+        op1 = DropOp(args=(["x"],), kwargs={})  
         op1.inputs = [source]
         source.outputs = [op1]
-        op2 = GetItemOp(key=["y"])
+        op2 = DropOp(args=(), kwargs={"columns": ["y"]})
         op2.inputs = [op1]
         op1.outputs = [op2]
 
-        result_root = fuse_consecutive_select(op2)
+        result_root = fuse_consecutive_drop(op2)
         self.assertIs(op2, result_root)
         self.assertIs(op1, op2.inputs[0])
 
-    def test_fuse_consecutive_select_success(self):
+    def test_fuse_consecutive_drop_success(self):
         source = Op()
-        op1 = GetItemOp(key=["x", "y"])
+        op1 = DropOp(args=(), kwargs={"columns": ["x"]})
         op1.inputs = [source]
         source.outputs = [op1]
-        op2 = GetItemOp(key=["x"])
+        op2 = DropOp(args=(), kwargs={"columns": ["y"]})
         op2.inputs = [op1]
         op1.outputs = [op2]
 
-        result_root = fuse_consecutive_select(op2)
-        self.assertIs(op2, result_root)
-        self.assertIs(source, op2.inputs[0])
-        self.assertIn(op2, source.outputs)
-        self.assertNotIn(op1, source.outputs)
+        result_root = fuse_consecutive_drop(op2)
+        self.assertIsNot(op2, result_root)
+        self.assertIsInstance(result_root, DropOp)
+        self.assertEqual(["x", "y"], result_root.kwargs["columns"])
+        self.assertIs(source, result_root.inputs[0])
 
-    def test_no_fuse_select_when_multiple_outputs(self):
+    def test_fuse_consecutive_drop_mixed_syntax_success(self):
         source = Op()
-        op1 = GetItemOp(key=["x", "y"])
+        op1 = DropOp(args=(["x"],), kwargs={"axis": 1})
         op1.inputs = [source]
         source.outputs = [op1]
-        op2 = GetItemOp(key=["x"])
+        op2 = DropOp(args=(), kwargs={"columns": ["y"]})
         op2.inputs = [op1]
-        op3 = Op()  
-        op3.inputs = [op1]
-        op1.outputs = [op2, op3] 
-        sink = Op()
-        sink.inputs = [op2, op3]
-        op2.outputs = [sink]
-        op3.outputs = [sink]
+        op1.outputs = [op2]
 
-        result_root = fuse_consecutive_select(sink)
-        self.assertIs(sink, result_root)
-        self.assertIs(op1, op2.inputs[0])
-        self.assertIs(op1, op3.inputs[0])
+        result_root = fuse_consecutive_drop(op2)
+        self.assertIsInstance(result_root, DropOp)
+        self.assertEqual(["x", "y"], result_root.kwargs["columns"])
+        self.assertIs(source, result_root.inputs[0])
 
