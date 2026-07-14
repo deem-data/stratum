@@ -97,6 +97,7 @@ def match_exp_minus_one(op):
             return (op, op2)
     return None
 
+
 def fold_to_zero(op: Op, root: Op) -> Op:
     """Constant-fold ``x * 0`` (or ``0 * x``) to ``0``.
 
@@ -111,6 +112,19 @@ def fold_to_zero(op: Op, root: Op) -> Op:
         operand.outputs = [out for out in operand.outputs if out is not op]
     replace_op_in_outputs(op, zero_op)
     return zero_op if op is root else root
+
+
+def fold_to_one(op: Op, root: Op) -> Op:
+    """Constant-fold ``x ** 0`` to ``1``.
+
+    Parallels :func:`fold_to_zero`: drops the pow op and its dead operand edges
+    and rewires downstream consumers to a :class:`ValueOp` holding ``1``.
+    """
+    one_op = ValueOp(1)
+    for operand in op.inputs:
+        operand.outputs = [out for out in operand.outputs if out is not op]
+    replace_op_in_outputs(op, one_op)
+    return one_op if op is root else root
 
 
 eliminate_log_exp = rewrite_pass(
@@ -173,20 +187,6 @@ eliminate_any_mul_zero = rewrite_pass(
     match_identity_operation(NumericOp, NumericOpType.MULTIPLY, 0),
     fold_to_zero,
 )
-
-
-def fold_to_one(op: Op, root: Op) -> Op:
-    """Constant-fold ``x ** 0`` to ``1``.
-
-    Parallels :func:`fold_to_zero`: drops the pow op and its dead operand edges
-    and rewires downstream consumers to a :class:`ValueOp` holding ``1``.
-    """
-    one_op = ValueOp(1)
-    for operand in op.inputs:
-        operand.outputs = [out for out in operand.outputs if out is not op]
-    replace_op_in_outputs(op, one_op)
-    return one_op if op is root else root
-
 
 eliminate_pow_zero = rewrite_pass(
     match_identity_operation(NumericOp, NumericOpType.POW, 0, reversed=False),
