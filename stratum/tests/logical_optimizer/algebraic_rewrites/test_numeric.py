@@ -655,5 +655,117 @@ class TestCSE(unittest.TestCase):
             algebraic_rewrite_config=AlgebraicRewritesConfig(pow_zero=False),
         )
         out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)  # log(exp(x)) still eliminated
+        self.assertEqual(out[0].value, 1)
+
+    # --- log-sum-exp -----------------------------------------------------
+
+    def test_log_sum_exp_rewrite(self):
+        """log(sum(exp(x))) → logsumexp(x)"""
+        df = st.as_data_op(np.array([1.0, 2.0, 3.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.sum)
+        t3 = t2.skb.apply_func(np.log)
+
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.GENERIC)
+        result = out[1].process("fit", [out[0].value])
+        expected = np.log(np.sum(np.exp([1.0, 2.0, 3.0])))
+        np.testing.assert_almost_equal(result, expected)
+
+    def test_log_sum_exp_rewrite_root_safe(self):
+        """When log(sum(exp(x))) is the root, DAG must not break."""
+        df = st.as_data_op(np.array([0.0, 1.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.sum)
+        root = t2.skb.apply_func(np.log)
+
+        out, *_ = optimize(root)
+        self.assertEqual(len(out), 2)
+        result = out[1].process("fit", [out[0].value])
+        expected = np.log(np.sum(np.exp([0.0, 1.0])))
+        np.testing.assert_almost_equal(result, expected)
+
+    def test_log_sum_exp_with_trailing_op(self):
+        """log(sum(exp(x))) + 1  →  logsumexp(x) + 1"""
+        df = st.as_data_op(np.array([1.0, 2.0, 3.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.sum)
+        t3 = t2.skb.apply_func(np.log)
+        t4 = t3 + 1
+
+        out, *_ = optimize(t4)
+        self.assertEqual(len(out), 3)
+
+    def test_log_sum_exp_disabled(self):
+        """Disabling log_sum_exp must leave the 3-op chain untouched."""
+        df = st.as_data_op(np.array([1.0, 2.0, 3.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.sum)
+        t3 = t2.skb.apply_func(np.log)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(log_sum_exp=False),
+        )
+        out, *_ = optimize(t3, config=config)
+        self.assertEqual(len(out), 4)
+
+    def test_no_rewrite_sum_log_exp(self):
+        """sum(log(exp(x))) must NOT match (wrong order)."""
+        df = st.as_data_op(np.array([1.0, 2.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.log)
+        t3 = t2.skb.apply_func(np.sum)
+
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 2)
+
+    def test_no_rewrite_log_mean_exp(self):
+        """log(mean(exp(x))) must NOT match (mean, not sum)."""
+        df = st.as_data_op(np.array([1.0, 2.0, 3.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.mean)
+        t3 = t2.skb.apply_func(np.log)
+
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 4)
+
+    def test_disable_log_sum_exp_does_not_affect_log_exp(self):
+        """Disabling log_sum_exp must not suppress other rewrites."""
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(log_sum_exp=False),
+        )
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
+
+    def test_no_rewrite_exp_sum_sqrt(self):
+        """exp → sum → sqrt must NOT match (third op is SQRT, not LOG)."""
+        df = st.as_data_op(np.array([1.0, 2.0, 3.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.sum)
+        t3 = t2.skb.apply_func(np.sqrt)
+
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 4)
+
+    def test_no_rewrite_sum_has_fanout(self):
+        """exp → sum → [log, sqrt] must NOT match (sum has fan-out)."""
+        df = st.as_data_op(np.array([1.0, 2.0, 3.0]))
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1.skb.apply_func(np.sum)
+        t3 = t2.skb.apply_func(np.log)
+        t4 = t2.skb.apply_func(np.sqrt)
+        combined = t3 + t4
+
+        out, *_ = optimize(combined)
+        num_sum = sum(1 for op in out if isinstance(op, NumericOp) and op.type == NumericOpType.SUM)
+        self.assertGreaterEqual(num_sum, 1)

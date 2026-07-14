@@ -1,6 +1,7 @@
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
 from stratum.optimizer.ir._ops import Op, ValueOp
+import numpy as np
 
 
 def _is_scalar_const(value) -> bool:
@@ -232,3 +233,66 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+
+def replace_three_op_chain(op1: Op, op2: Op, op3: Op, replacement: Op):
+    """Replace op1 -> op2 -> op3 with replacement: x -> replacement -> downstream."""
+    x = op1.inputs[0]
+    x.replace_output(op1, replacement)
+    replacement.add_input(x)
+    for downstream in op3.outputs:
+        replacement.add_output(downstream)
+        downstream.replace_input(op3, replacement)
+
+
+def make_replace_three_op_chain_root_safe(make_replacement):
+    """Action factory: replace a three-op chain with a new op from make_replacement()."""
+    def action(op1: Op, op2: Op, op3: Op, root: Op) -> Op:
+        replacement = make_replacement()
+        replace_three_op_chain(op1, op2, op3, replacement)
+        if op3 is root:
+            root = replacement
+        return root
+    return action
+
+
+def _logsumexp(x):
+    """Numerically stable log(sum(exp(x)))."""
+    c = np.max(x)
+    return c + np.log(np.sum(np.exp(x - c)))
+
+
+def match_log_sum_exp(op):
+    """Match ``EXP -> SUM -> LOG`` chain."""
+    if not isinstance(op, NumericOp):
+        return None
+    if op.type is not NumericOpType.EXP:
+        return None
+    if len(op.outputs) != 1:
+        return None
+
+    op2 = op.outputs[0]
+    if not isinstance(op2, NumericOp):
+        return None
+    if op2.type is not NumericOpType.SUM:
+        return None
+    if len(op2.outputs) != 1:
+        return None
+
+    op3 = op2.outputs[0]
+    if not isinstance(op3, NumericOp):
+        return None
+    if op3.type is not NumericOpType.LOG:
+        return None
+
+    return (op, op2, op3)
+
+
+_replace_with_logsumexp = make_replace_three_op_chain_root_safe(
+    lambda: NumericOp(inputs=[], outputs=[], func=_logsumexp)
+)
+
+eliminate_log_sum_exp = rewrite_pass(
+    match_log_sum_exp,
+    _replace_with_logsumexp,
+)

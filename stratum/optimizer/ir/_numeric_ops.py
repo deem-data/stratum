@@ -17,6 +17,7 @@ class NumericOpType(Enum):
     MULTIPLY = "multiply"
     DIVIDE = "divide"
     POW = "pow"
+    SUM = "sum"
 
 _ARITH_OP_MAP = {
     operator.add: NumericOpType.ADD,
@@ -42,6 +43,7 @@ _NUMPY_UNARY_MAP = {
     np.square: NumericOpType.SQUARE,
     np.log1p: NumericOpType.LOG1P,
     np.expm1: NumericOpType.EXPM1,
+    np.sum: NumericOpType.SUM,
 }
 
 _UNARY_NUMPY_FUNCS = frozenset(_NUMPY_UNARY_MAP.keys())
@@ -94,6 +96,8 @@ class NumericOp(Op):
             return np.log1p(inputs[0])
         elif self.type == NumericOpType.EXPM1:
             return np.expm1(inputs[0])
+        elif self.type == NumericOpType.SUM:
+            return np.sum(inputs[0])
         elif self.type in _BINARY_TYPES:
             # The primary operand is always input 0 (bound first); the optional
             # second operand is referenced explicitly so x op x (single edge) works.
