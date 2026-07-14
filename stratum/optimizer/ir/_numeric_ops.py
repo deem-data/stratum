@@ -16,12 +16,14 @@ class NumericOpType(Enum):
     SUBTRACT = "subtract"
     MULTIPLY = "multiply"
     DIVIDE = "divide"
+    POW = "pow"
 
 _ARITH_OP_MAP = {
     operator.add: NumericOpType.ADD,
     operator.sub: NumericOpType.SUBTRACT,
     operator.mul: NumericOpType.MULTIPLY,
     operator.truediv: NumericOpType.DIVIDE,
+    operator.pow: NumericOpType.POW,
 }
 
 _NUMPY_BINARY_MAP = {
@@ -29,6 +31,7 @@ _NUMPY_BINARY_MAP = {
     np.subtract: NumericOpType.SUBTRACT,
     np.multiply: NumericOpType.MULTIPLY,
     np.divide: NumericOpType.DIVIDE,
+    np.power: NumericOpType.POW,
 }
 
 _NUMPY_UNARY_MAP = {
@@ -105,6 +108,8 @@ class NumericOp(Op):
                 return np.multiply(left, right)
             elif self.type == NumericOpType.DIVIDE:
                 return np.divide(left, right)
+            elif self.type == NumericOpType.POW:
+                return np.power(left, right)
             else:
                 raise ValueError(f"Unsupported binary numeric operation type: {self.type}")
         else:

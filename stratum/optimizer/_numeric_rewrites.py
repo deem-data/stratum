@@ -1,7 +1,6 @@
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
-from stratum.optimizer.ir._ops import Op, ValueOp, BinOp, OperandRef
-import operator
+from stratum.optimizer.ir._ops import Op, ValueOp
 
 
 def match_two_op_chain(op_cls, type1, type2):
@@ -176,29 +175,20 @@ eliminate_any_mul_zero = rewrite_pass(
 )
 
 
-def match_pow_zero(op):
-    """Match ``x ** 0`` (a variable raised to the power zero).
+def fold_to_one(op: Op, root: Op) -> Op:
+    """Constant-fold ``x ** 0`` to ``1``.
 
-    Only matches when the base is a variable (OperandRef), not a constant,
-    so that ``0 ** 0`` is *not* rewritten — the ``x != 0`` semantics are
-    the caller's responsibility.
+    Parallels :func:`fold_to_zero`: drops the pow op and its dead operand edges
+    and rewires downstream consumers to a :class:`ValueOp` holding ``1``.
     """
-    if isinstance(op, BinOp) and op.op is operator.pow:
-        if op.right == 0 and isinstance(op.left, OperandRef):
-            return (op,)
-    return None
-
-
-def annihilate_pow_zero_root_safe(op, root):
-    """Replace ``x ** 0`` with ``ValueOp(1)``."""
-    new_op = ValueOp(1)
-    replace_op_in_outputs(op, new_op)
-    if op is root:
-        root = new_op
-    return root
+    one_op = ValueOp(1)
+    for operand in op.inputs:
+        operand.outputs = [out for out in operand.outputs if out is not op]
+    replace_op_in_outputs(op, one_op)
+    return one_op if op is root else root
 
 
 eliminate_pow_zero = rewrite_pass(
-    match_pow_zero,
-    annihilate_pow_zero_root_safe,
+    match_identity_operation(NumericOp, NumericOpType.POW, 0, reversed=False),
+    fold_to_one,
 )
