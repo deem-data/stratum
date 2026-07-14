@@ -163,7 +163,7 @@ def extract_numeric_op(op: Op, root: Op) -> tuple[Op, bool]:
         elif op.func in _NUMPY_BINARY_MAP:
             new_op = make_binary_numeric_op(op, _NUMPY_BINARY_MAP[op.func])
         # if op is some other function from np package, make a generic numeric op
-        elif op.func.__module__ == "numpy" and op.func not in _BINARY_NUMPY_FUNCS:
+        elif getattr(op.func, '__module__', op.func.__class__.__module__) == "numpy" and op.func not in _BINARY_NUMPY_FUNCS:
             new_op = make_unary_numeric_op(op)
 
     if new_op is None:
