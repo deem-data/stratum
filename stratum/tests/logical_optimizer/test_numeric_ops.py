@@ -183,6 +183,16 @@ class TestNumericOps(unittest.TestCase):
         result = op.process("fit", [np.array([6.0, 8.0, 9.0]), np.array([2.0, 4.0, 3.0])])
         np.testing.assert_array_almost_equal(result, np.array([3.0, 2.0, 3.0]))
 
+    def test_process_pow_var_const(self):
+        op = NumericOp([], [], type=NumericOpType.POW, constant=3, reversed=False)
+        result = op.process("fit", [np.array([1.0, 2.0, 3.0])])
+        np.testing.assert_array_almost_equal(result, np.array([1.0, 8.0, 27.0]))
+
+    def test_process_pow_var_var(self):
+        op = NumericOp([], [], type=NumericOpType.POW, opt_operand=OperandRef(1), reversed=False)
+        result = op.process("fit", [np.array([2.0, 3.0, 4.0]), np.array([3.0, 2.0, 1.0])])
+        np.testing.assert_array_almost_equal(result, np.array([8.0, 9.0, 4.0]))
+
     def _assert_var_var_extracted(self, out, numeric_type):
         ops = [op for op in out if isinstance(op, NumericOp) and op.type == numeric_type]
         self.assertEqual(len(ops), 1)
