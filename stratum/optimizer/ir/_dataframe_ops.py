@@ -23,6 +23,7 @@ from stratum.optimizer.ir._projection_ops import (
     DatetimeConversionOp, GetAttrProjectionOp, StringMethodOp,
     make_column_selector_op, make_datetime_conversion_op, make_frame_get_attr,
     make_string_method_op, resolve_selector_columns)
+from stratum.optimizer.ir._map_ops import MapOp, AssignMapOp, make_assign_map_op
 from stratum.optimizer.ir._join_ops import (
     JoinOp, _MERGE_POSITIONAL, _JOIN_POSITIONAL, _JOIN_OP_FIELDS, make_join_op,
     _make_chained_join_op)
@@ -72,7 +73,7 @@ def _getitem_output_type(op: GetItemOp) -> OutputType:
     return OutputType.FRAME
 
 
-def extract_dataframe_op(op: Op, root: Op, selection_op = True) -> tuple[Op, bool]:
+def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True) -> tuple[Op, bool]:
     new_op = None
     # DataSource detection (directly passed dataframe)
     if len(op.inputs) == 0:
@@ -127,8 +128,13 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True) -> tuple[Op, boo
                 new_op.output_type = op.inputs[0].output_type
                 op.replace_output_of_inputs(new_op)
             elif op.method_name in ["assign"]:
-                new_op = AssignOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-                op.replace_output_of_inputs(new_op)
+                if map_op:
+                    new_op = make_assign_map_op(op)
+                if new_op is None:
+                    # Not foldable (positional args / sequence-valued constant
+                    # kwargs): keep the opaque assign.
+                    new_op = AssignOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                    op.replace_output_of_inputs(new_op)
             elif op.method_name in ["join", "merge"]:
                 new_op = make_join_op(op)
             elif op.method_name in _SELECTION_METHODS:

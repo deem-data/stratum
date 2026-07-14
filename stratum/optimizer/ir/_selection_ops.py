@@ -1,7 +1,7 @@
 from enum import Enum, auto
 from stratum.optimizer.ir._ops import (OperandRef, OutputType, GetItemOp,
                                        MethodCallOp, Op, _resolve_args, _resolve_kwargs)
-from stratum.optimizer.ir._column_expr import ColumnExpr, fold_column_expr
+from stratum.optimizer.ir._column_expr import ColumnExpr, EvalContext, fold_column_expr
 from stratum._config import FLAGS
 
 
@@ -64,8 +64,9 @@ class SelectionOp(Op):
     def process(self, mode: str, inputs: list):
         _obj = inputs[0]
         if self.kind is SelectionKind.MASK:
+            ctx = EvalContext(frame=_obj, inputs=inputs, mode=mode)
             if FLAGS.force_polars:
-                return _obj.filter(self.predicate.to_polars(inputs))
+                return _obj.filter(self.predicate.to_polars(ctx))
             else:
                 if FLAGS.pandas_query:
                     params = {}
@@ -74,7 +75,7 @@ class SelectionOp(Op):
                     # or str accessor); fall through to boolean masking in that case.
                     if query is not None:
                         return _obj.query(query, local_dict=params)
-                predicate = self.predicate.to_pandas(_obj, inputs)
+                predicate = self.predicate.to_pandas(ctx)
                 return _obj[predicate]
         _args = _resolve_args(self.args, inputs) if self.args else []
         _kwargs = _resolve_kwargs(self.kwargs, inputs) if self.kwargs else {}

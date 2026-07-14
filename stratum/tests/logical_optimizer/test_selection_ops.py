@@ -8,7 +8,7 @@ import polars as pl
 
 import stratum as st
 from stratum._config import FLAGS
-from stratum.optimizer._op_cse import _remap_refs
+from stratum.optimizer.ir._ops import remap_operand_refs
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.ir._dataframe_ops import SelectionKind, SelectionOp
 from stratum.optimizer.ir._ops import BinOp, GetItemOp, UnaryOp, Op, OperandRef, OutputType
@@ -454,11 +454,11 @@ class TestColumnExprMisc(unittest.TestCase):
             expr.remap_operand_refs({2: 1}))
 
     def test_remap_refs_descends_into_column_expr(self):
-        # _op_cse._remap_refs recognises a ColumnExpr and rebuilds it with remapped refs.
+        # remap_operand_refs recognises a ColumnExpr and rebuilds it with remapped refs.
         expr = BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(2)))
         self.assertEqual(
             BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(1))),
-            _remap_refs(expr, {2: 1}))
+            remap_operand_refs(expr, {2: 1}))
 
 
 class TestUnaryOpProcess(unittest.TestCase):

@@ -43,6 +43,17 @@ def run_op(op, *values, mode="fit_transform"):
 
 
 @contextmanager
+def make_map_op(enabled=True):
+    """Temporarily set `FLAGS.make_map_op`."""
+    orig = FLAGS.make_map_op
+    FLAGS.make_map_op = enabled
+    try:
+        yield
+    finally:
+        FLAGS.make_map_op = orig
+
+
+@contextmanager
 def force_polars(enabled=True):
     """Temporarily set `FLAGS.force_polars`."""
     orig = FLAGS.force_polars

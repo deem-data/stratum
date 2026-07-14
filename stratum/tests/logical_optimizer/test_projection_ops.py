@@ -9,11 +9,15 @@ from skrub import selectors
 from stratum.optimizer.ir._projection_ops import (
     ApplyUDFOp, AssignOp, ColumnSelectorOp, DatetimeConversionOp, DropOp,
     GetAttrProjectionOp, MetadataOp, ProjectionOp, StringMethodOp,
-    make_datetime_conversion_op)
-from stratum.optimizer.ir._ops import (CallOp, GetItemOp, MethodCallOp, OperandRef,
-                                       OutputType, TransformerOp)
+    make_datetime_conversion_op, make_frame_get_attr, make_string_method_op,
+    polars_datetime_kwargs)
+from stratum.optimizer.ir._map_ops import AssignMapOp
+from stratum.optimizer.ir._column_expr import Col, DtExpr
+from stratum.optimizer.ir._ops import (
+    CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType,
+    TransformerOp)
 from stratum.tests.logical_optimizer.test_dataframe_ops import (
-    PolarsTestCase, _inp, _inputs_for, force_polars, optimize, run_op)
+    PolarsTestCase, _inp, _inputs_for, force_polars, make_map_op, optimize, run_op)
 
 
 class TestProjectionRewrites(unittest.TestCase):
@@ -57,13 +61,13 @@ class TestProjectionRewrites(unittest.TestCase):
                            month=data["datetime"].dt.month)
         data = data.copy()
         ops = optimize(data)
-        self.assertEqual(8, len(ops))
-        op_iter = iter(ops[3:])
-        next(op_iter)
-        self.assertIsInstance(next(op_iter), GetAttrProjectionOp)
-        self.assertIsInstance(next(op_iter), GetAttrProjectionOp)
-        self.assertIsInstance(next(op_iter), AssignOp)
-        self.assertIsInstance(next(op_iter), MethodCallOp)
+        # The column getitem and both fused .dt accessors fold into the assign map.
+        self.assertEqual(5, len(ops))
+        map_op = next(o for o in ops if isinstance(o, AssignMapOp))
+        self.assertEqual({"year": DtExpr(Col("datetime"), "year"),
+                          "month": DtExpr(Col("datetime"), "month")},
+                         map_op.entries)
+        self.assertIsInstance(ops[-1], MethodCallOp)  # the trailing .copy()
 
 
 class TestMetadataOp(unittest.TestCase):
@@ -87,6 +91,10 @@ class TestProjectionOp(unittest.TestCase):
     def test_func_and_method_are_mutually_exclusive(self):
         with self.assertRaises(ValueError):
             ProjectionOp(func=lambda x: x, method="drop", args=(), kwargs={})
+
+    def test_kwargs_can_be_omitted(self):
+        op = ProjectionOp(method="copy", args=(), kwargs=None)
+        self.assertIsNone(op.kwargs)
 
     def test_no_func_no_method_raises(self):
         with self.assertRaises(TypeError):
@@ -186,6 +194,41 @@ class TestDatetimeConversionOp(unittest.TestCase):
             result = run_op(op, pl.Series("dt", ["2025-01-01", "2025-06-15"]))
             self.assertEqual(pl.Datetime, result.dtype)
 
+    def test_pandas_path_preserves_kwargs(self):
+        op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
+        result = run_op(op, pd.Series(["01/02/2020"]))
+        self.assertEqual(pd.Timestamp("2020-02-01"), result.iloc[0])
+
+    def test_polars_unsupported_kwargs_use_pandas_semantics(self):
+        with force_polars():
+            op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
+            result = run_op(op, pl.Series("dt", ["01/02/2020"]))
+        self.assertEqual([pd.Timestamp("2020-02-01")], result.to_list())
+
+    def test_polars_positional_options_use_pandas_semantics(self):
+        with force_polars():
+            op = DatetimeConversionOp(args=("coerce",), kwargs={})
+            result = run_op(op, pl.Series("dt", ["2025-01-01", "bad"]))
+        self.assertEqual([pd.Timestamp("2025-01-01"), None], result.to_list())
+
+    def test_polars_fallback_converts_datetime_index(self):
+        with force_polars():
+            op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
+            result = run_op(op, ["01/02/2020", "03/04/2021"])
+        self.assertEqual(
+            [pd.Timestamp("2020-02-01"), pd.Timestamp("2021-04-03")],
+            result.to_list())
+
+    def test_polars_fallback_keeps_scalar_result(self):
+        with force_polars():
+            op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
+            result = run_op(op, "01/02/2020")
+        self.assertEqual(pd.Timestamp("2020-02-01"), result)
+
+    def test_polars_datetime_kwargs_rejects_unsupported_errors(self):
+        self.assertIsNone(
+            polars_datetime_kwargs((), {"errors": "ignore"}))
+
 
 class TestGetAttrProjectionOp(unittest.TestCase):
     def test_init_with_none(self):
@@ -214,6 +257,27 @@ class TestGetAttrProjectionOp(unittest.TestCase):
                                   ["dt", "is_month_end"])
         self.assertEqual([True, False], result.to_list())
 
+    def test_polars_single_accessor_returns_namespace(self):
+        result = self._run_polars(["2025-01-15"], ["dt"])
+        self.assertEqual([2025], result.year().to_list())
+
+    def test_shared_accessor_keeps_original_edge_when_fused(self):
+        source = Op()
+        source.output_type = OutputType.SERIES
+        accessor = GetAttrProjectionOp(
+            attr_name=["dt"], inputs=[source], outputs=[])
+        current = GetAttrOp(attr_name="year")
+        current.inputs = [accessor]
+        other_consumer = Op(inputs=[accessor])
+        accessor.outputs = [current, other_consumer]
+        source.outputs = [accessor]
+
+        new_op = make_frame_get_attr(None, current)
+
+        self.assertEqual([other_consumer], accessor.outputs)
+        self.assertIn(accessor, source.outputs)
+        self.assertIn(new_op, source.outputs)
+
 
 class TestStringMethodOp(unittest.TestCase):
     """`col.str.<method>(...)` fuses the .str accessor and the call into one op."""
@@ -229,9 +293,12 @@ class TestStringMethodOp(unittest.TestCase):
     def test_str_method_fuses_accessor_away(self):
         # A str call used as a column projection (here assigned) becomes a single
         # StringMethodOp; the GetAttrProjectionOp(["str"]) accessor drops out.
+        # Map folding is disabled so the intermediate op stays observable (with it
+        # on, the assign absorbs the call into a StrExpr entry -- see test_map_ops).
         data = st.as_data_op(self.df)
-        ops = optimize(data.assign(c=data["s"].str.upper()),
-                       OptConfig(dataframe_ops=True))
+        with make_map_op(False):
+            ops = optimize(data.assign(c=data["s"].str.upper()),
+                           OptConfig(dataframe_ops=True))
         sm = self._one(ops, StringMethodOp)
         self.assertEqual("upper", sm.method)
         self.assertIs(OutputType.SERIES, sm.output_type)
@@ -243,8 +310,9 @@ class TestStringMethodOp(unittest.TestCase):
         # StringMethodOp and the accessor is removed once its last consumer is fused.
         data = st.as_data_op(self.df)
         acc = data["s"].str
-        ops = optimize(data.assign(a=acc.count("1"), b=acc.upper()),
-                       OptConfig(dataframe_ops=True))
+        with make_map_op(False):
+            ops = optimize(data.assign(a=acc.count("1"), b=acc.upper()),
+                           OptConfig(dataframe_ops=True))
         self.assertEqual(2, len([o for o in ops if isinstance(o, StringMethodOp)]))
         self.assertEqual([], [o for o in ops if isinstance(o, GetAttrProjectionOp)])
 
@@ -259,6 +327,24 @@ class TestStringMethodOp(unittest.TestCase):
             op = StringMethodOp(method="count", args=("1",))
             result = run_op(op, pl.Series(["a1", "bb", "c1"]))
         self.assertEqual([1, 0, 1], result.to_list())
+
+    def test_graph_argument_is_rewired_to_fused_method(self):
+        column = Op()
+        column.output_type = OutputType.SERIES
+        accessor = GetAttrProjectionOp(
+            attr_name=["str"], inputs=[column], outputs=[])
+        argument = Op()
+        call = MethodCallOp(
+            method_name="contains", args=(OperandRef(1),), kwargs={})
+        call.inputs = [accessor, argument]
+        accessor.outputs = [call]
+        argument.outputs = [call]
+        column.outputs = [accessor]
+
+        new_op = make_string_method_op(call)
+
+        self.assertIn(new_op, argument.outputs)
+        self.assertNotIn(call, argument.outputs)
 
 
 class TestColumnSelectorExtraction(unittest.TestCase):

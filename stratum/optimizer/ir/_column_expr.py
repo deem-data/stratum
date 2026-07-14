@@ -2,14 +2,26 @@
 
 Used by selections (boolean predicates) and maps (computed columns).
 Expressions are immutable value types and compare structurally.
+
+Every node maps 1:1 onto a polars expression (``pl.col``/``pl.lit``,
+arithmetic/boolean operators, the ``.str``/``.dt`` namespaces, datetime
+parsing), so a whole tree compiles into a single backend kernel. Anything
+outside the grammar (fitted transformers, UDFs, data from other frames) is
+referenced through an :class:`OperandLeaf`.
+
+Evaluation goes through an :class:`EvalContext` carrying the source frame, the
+op's resolved inputs and the execution mode.
 """
 from __future__ import annotations
 import operator
 
 import polars as pl
+import pandas as pd
 
 from stratum.optimizer.ir._ops import OperandRef, BinOp, UnaryOp, GetItemOp, Op
-from stratum.optimizer.ir._projection_ops import StringMethodOp, STR_POLARS_METHODS
+from stratum.optimizer.ir._projection_ops import (
+    DatetimeConversionOp, GetAttrProjectionOp, StringMethodOp, STR_POLARS_METHODS,
+    polars_datetime_kwargs)
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
 # corresponding map is not foldable into a column expression.
@@ -22,6 +34,21 @@ BINARY_SYMBOLS = {
     operator.pow: "**",
 }
 UNARY_SYMBOLS = {operator.invert: "~", operator.neg: "-", operator.pos: "+"}
+
+
+class EvalContext:
+    """Everything a column expression needs at evaluation time.
+
+    ``frame`` is evaluated against (the op's primary operand); ``inputs`` are the
+    op's resolved input values (read by :class:`OperandLeaf`); ``mode`` is
+    ``fit_transform`` or ``predict`` (unused by the current stateless grammar).
+    """
+    __slots__ = ("frame", "inputs", "mode")
+
+    def __init__(self, frame, inputs, mode: str = "fit_transform"):
+        self.frame = frame
+        self.inputs = inputs
+        self.mode = mode
 
 
 class ColumnExpr:
@@ -38,12 +65,12 @@ class ColumnExpr:
         return hash((type(self).__name__, self._key()))
 
     # TODO we should move this to the physical operator selection later
-    def to_pandas(self, frame, inputs):
-        """Evaluate the expression against a pandas frame."""
+    def to_pandas(self, ctx: EvalContext):
+        """Evaluate the expression against ``ctx.frame`` (a pandas frame)."""
         raise NotImplementedError
 
-    def to_polars(self, inputs):
-        """Convert the expression to a Polars expression."""
+    def to_polars(self, ctx: EvalContext):
+        """Evaluate on the polars backend, returning a lazy ``pl.Expr``."""
         raise NotImplementedError
 
     def to_pandas_query(self, params: dict) -> str | None:
@@ -76,10 +103,10 @@ class Col(ColumnExpr):
     def __repr__(self):
         return f"Col({self.name!r})"
 
-    def to_pandas(self, frame, inputs):
-        return frame[self.name]
+    def to_pandas(self, ctx):
+        return ctx.frame[self.name]
 
-    def to_polars(self, inputs):
+    def to_polars(self, ctx):
         return pl.col(self.name)
 
     def to_pandas_query(self, params):
@@ -104,10 +131,10 @@ class Const(ColumnExpr):
     def __repr__(self):
         return f"Const({self.value!r})"
 
-    def to_pandas(self, frame, inputs):
+    def to_pandas(self, ctx):
         return self.value
 
-    def to_polars(self, inputs):
+    def to_polars(self, ctx):
         return pl.lit(self.value)
 
     def to_pandas_query(self, params):
@@ -131,11 +158,11 @@ class OperandLeaf(ColumnExpr):
     def __repr__(self):
         return f"OperandLeaf({self.ref})"
 
-    def to_pandas(self, frame, inputs):
-        return inputs[self.ref.k]
+    def to_pandas(self, ctx):
+        return ctx.inputs[self.ref.k]
 
-    def to_polars(self, inputs):
-        return inputs[self.ref.k]
+    def to_polars(self, ctx):
+        return ctx.inputs[self.ref.k]
 
     def iter_operand_refs(self):
         yield self.ref
@@ -159,12 +186,11 @@ class BinOpExpr(ColumnExpr):
     def __repr__(self):
         return f"({self.left!r} {BINARY_SYMBOLS.get(self.op, self.op)} {self.right!r})"
 
-    def to_pandas(self, frame, inputs):
-        return self.op(self.left.to_pandas(frame, inputs),
-                       self.right.to_pandas(frame, inputs))
+    def to_pandas(self, ctx):
+        return self.op(self.left.to_pandas(ctx), self.right.to_pandas(ctx))
 
-    def to_polars(self, inputs):
-        return self.op(self.left.to_polars(inputs), self.right.to_polars(inputs))
+    def to_polars(self, ctx):
+        return self.op(self.left.to_polars(ctx), self.right.to_polars(ctx))
 
     def to_pandas_query(self, params):
         sym = BINARY_SYMBOLS.get(self.op)
@@ -199,11 +225,11 @@ class UnaryOpExpr(ColumnExpr):
     def __repr__(self):
         return f"{UNARY_SYMBOLS.get(self.op, self.op)}({self.operand!r})"
 
-    def to_pandas(self, frame, inputs):
-        return self.op(self.operand.to_pandas(frame, inputs))
+    def to_pandas(self, ctx):
+        return self.op(self.operand.to_pandas(ctx))
 
-    def to_polars(self, inputs):
-        return self.op(self.operand.to_polars(inputs))
+    def to_polars(self, ctx):
+        return self.op(self.operand.to_polars(ctx))
 
     def to_pandas_query(self, params):
         sym = UNARY_SYMBOLS.get(self.op)
@@ -240,12 +266,12 @@ class StrExpr(ColumnExpr):
                           + [f"{k}={v!r}" for k, v in self.kwargs.items()])
         return f"str.{self.method}({inner})"
 
-    def to_pandas(self, frame, inputs):
-        obj = self.operand.to_pandas(frame, inputs)
+    def to_pandas(self, ctx):
+        obj = self.operand.to_pandas(ctx)
         return getattr(obj.str, self.method)(*self.args, **self.kwargs)
 
-    def to_polars(self, inputs):
-        obj = self.operand.to_polars(inputs)
+    def to_polars(self, ctx):
+        obj = self.operand.to_polars(ctx)
         name = STR_POLARS_METHODS.get(self.method, self.method)
         return getattr(obj.str, name)(*self.args, **self.kwargs)
 
@@ -257,15 +283,96 @@ class StrExpr(ColumnExpr):
                        self.method, self.args, self.kwargs)
 
 
+class DtExpr(ColumnExpr):
+    """Datetime accessor attribute (``.dt.<attr>``).
+
+    pandas reads the attribute off ``.dt``; polars calls a method, remapping a
+    few names via ``GetAttrProjectionOp.POLARS_ATTR_NAME_MAP``.
+    """
+    __slots__ = ("operand", "attr")
+
+    def __init__(self, operand: ColumnExpr, attr: str):
+        self.operand = operand
+        self.attr = attr
+
+    def _key(self):
+        return (self.operand, self.attr)
+
+    def __repr__(self):
+        return f"dt.{self.attr}({self.operand!r})"
+
+    def to_pandas(self, ctx):
+        obj = self.operand.to_pandas(ctx)
+        return getattr(obj.dt, self.attr)
+
+    def to_polars(self, ctx):
+        obj = self.operand.to_polars(ctx)
+        if self.attr == "is_month_end":
+            return obj.dt.month_end() == obj
+        name = GetAttrProjectionOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
+        return getattr(obj.dt, name)()
+
+    def iter_operand_refs(self):
+        yield from self.operand.iter_operand_refs()
+
+    def remap_operand_refs(self, mapping):
+        return DtExpr(self.operand.remap_operand_refs(mapping), self.attr)
+
+
+class DatetimeExpr(ColumnExpr):
+    """Datetime conversion (``pd.to_datetime`` / ``.str.to_datetime``).
+
+    ``args``/``kwargs`` are literals; a graph-fed argument keeps the conversion
+    op as a leaf instead.
+    """
+    __slots__ = ("operand", "args", "kwargs")
+
+    def __init__(self, operand: ColumnExpr, args=(), kwargs=None):
+        self.operand = operand
+        self.args = tuple(args)
+        self.kwargs = kwargs or {}
+
+    def _key(self):
+        return (self.operand, self.args, frozenset(self.kwargs.items()))
+
+    def __repr__(self):
+        return f"to_datetime({self.operand!r})"
+
+    def to_pandas(self, ctx):
+        obj = self.operand.to_pandas(ctx)
+        return pd.to_datetime(obj, *self.args, **self.kwargs)
+
+    def to_polars(self, ctx):
+        obj = self.operand.to_polars(ctx)
+        translated = polars_datetime_kwargs(self.args, self.kwargs)
+        if translated is None:
+            raise NotImplementedError(
+                "DatetimeExpr contains options unsupported by Polars")
+        # TODO: Support already-datetime and numeric operands natively; the
+        # Polars string namespace only accepts string input.
+        return obj.str.to_datetime(**translated)
+
+    def iter_operand_refs(self):
+        yield from self.operand.iter_operand_refs()
+
+    def remap_operand_refs(self, mapping):
+        return DatetimeExpr(self.operand.remap_operand_refs(mapping),
+                            self.args, self.kwargs)
+
+
 # --- Conversion: op subgraph -> ColumnExpr -----------------------------------
 
 class _Folder:
-    """Fold an operator subgraph into a ``ColumnExpr``.
+    """Fold operator subgraphs into ``ColumnExpr`` trees.
 
-    Runs three passes: :meth:`_discover` collects the foldable subgraph,
-    :meth:`_absorbable` keeps only nodes without external consumers, and :meth:`_build`
-    materialises the tree, emitting an :class:`OperandLeaf` for the rest. The
-    new operator's inputs are ``[src, *leaf_ops]``.
+    Three passes: :meth:`_discover` collects the foldable subgraph,
+    :meth:`_absorbable` keeps nodes without external consumers, :meth:`_build`
+    materialises the tree (an :class:`OperandLeaf` for the rest). The new
+    operator's inputs are ``[src, *leaf_ops]``.
+
+    ``fold_many`` folds several roots against one shared cone and memo, so a
+    producer feeding two roots is absorbed once and both trees share the
+    sub-expression.
     """
 
     def __init__(self, src: Op):
@@ -276,10 +383,15 @@ class _Folder:
         self._leaf_index: dict[int, int] = {}
 
     def fold(self, root: Op, root_consumer: Op) -> ColumnExpr:
-        assert any(o is root_consumer for o in root.outputs)
-        subgraph, child_ops = self._discover(root)
-        absorbable = self._absorbable(root, root_consumer, subgraph, child_ops)
-        return self._build(root, absorbable, child_ops)
+        return self.fold_many([root], root_consumer)[0]
+
+    def fold_many(self, roots: list[Op], root_consumer: Op) -> list[ColumnExpr]:
+        for root in roots:
+            assert any(o is root_consumer for o in root.outputs)
+        subgraph, child_ops = self._discover(roots)
+        absorbable = self._absorbable(roots, root_consumer, subgraph, child_ops)
+        memo: dict[int, ColumnExpr] = {}
+        return [self._build(root, absorbable, child_ops, memo) for root in roots]
 
     # --- structural classification -------------------------------------------
 
@@ -295,11 +407,24 @@ class _Folder:
             return (isinstance(node.key, str) and bool(node.inputs)
                     and node.inputs[0] is self.src)
         if isinstance(node, StringMethodOp):
-            # A graph-fed arg isn't representable in StrExpr; such a call stays a leaf.
-            return (not any(isinstance(a, OperandRef) for a in (node.args or ()))
-                    and not any(isinstance(v, OperandRef)
-                                for v in (node.kwargs or {}).values()))
+            # A graph-fed arg isn't representable in the expr; such a call stays a leaf.
+            return self._has_literal_call_args(node)
+        if isinstance(node, DatetimeConversionOp):
+            # Only absorb calls whose pandas options have an equivalent Polars
+            # spelling. The unfused op handles the rest through pandas.
+            return (self._has_literal_call_args(node)
+                    and polars_datetime_kwargs(node.args, node.kwargs) is not None)
+        if isinstance(node, GetAttrProjectionOp):
+            # Only the fused datetime accessor (.dt.<attr>); .str is already fused
+            # into StringMethodOp during frame extraction.
+            return len(node.attr_name) == 2 and node.attr_name[0] == "dt"
         return False
+
+    @staticmethod
+    def _has_literal_call_args(node: Op) -> bool:
+        return (not any(isinstance(a, OperandRef) for a in (node.args or ()))
+                and not any(isinstance(v, OperandRef)
+                            for v in (node.kwargs or {}).values()))
 
     def _producer_ops(self, node: Op) -> list[Op]:
         """Return foldable operand producers for ``node``."""
@@ -310,17 +435,18 @@ class _Folder:
             if isinstance(node.operand, OperandRef):
                 return [node.inputs[node.operand.k]]
             return []
-        if isinstance(node, StringMethodOp):
+        if isinstance(node, (StringMethodOp, DatetimeConversionOp,
+                             GetAttrProjectionOp)):
             return [node.inputs[0]]
         return []
 
-    # --- pass 1: discover the foldable subgraph --------------------------------
+    # --- pass 1: discover the foldable subgraph -----------------------------------
 
-    def _discover(self, root: Op) -> tuple[dict[int, Op], dict[int, list[Op]]]:
-        """Collect the foldable subgraph rooted at ``root``."""
+    def _discover(self, roots: list[Op]) -> tuple[dict[int, Op], dict[int, list[Op]]]:
+        """Collect the foldable subgraph rooted at ``roots``."""
         subgraph: dict[int, Op] = {}
         child_ops: dict[int, list[Op]] = {}
-        stack = [root]
+        stack = list(roots)
         while stack:
             node = stack.pop()
             if id(node) in subgraph or not self._is_foldable(node):
@@ -334,16 +460,16 @@ class _Folder:
 
     # --- pass 2: which subgraph nodes have no external consumers ---------------
 
-    def _absorbable(self, root: Op, root_consumer: Op,
-                    subgraph: dict[int, Op],
-                    child_ops: dict[int, list[Op]]) -> set[int]:
+    def _absorbable(self, roots: list[Op], root_consumer: Op,
+                    subgraph: dict[int, Op], child_ops: dict[int, list[Op]]) -> set[int]:
         """Return foldable nodes with no external consumers."""
+        root_ids = {id(r) for r in roots}
         dropped: set[int] = set()
         stack: list[Op] = []
         for nid, node in subgraph.items():
             for consumer in node.outputs:
                 internal = (id(consumer) in subgraph
-                            or (node is root and consumer is root_consumer))
+                            or (nid in root_ids and consumer is root_consumer))
                 if not internal:
                     dropped.add(nid)
                     stack.append(node)
@@ -358,15 +484,18 @@ class _Folder:
 
     # --- pass 3: materialise the expression bottom-up -------------------------
 
-    def _build(self, root: Op, absorbable: set[int],
-               child_ops: dict[int, list[Op]]) -> ColumnExpr:
+    def _build(self, root: Op, absorbable: set[int], child_ops: dict[int, list[Op]],
+               memo: dict[int, ColumnExpr]) -> ColumnExpr:
         """Build the expression tree from absorbable nodes."""
         if id(root) not in absorbable:
             return self._leaf(root)
+        if id(root) in memo:
+            return memo[id(root)]
         # Iterative post-order over the absorbed sub-DAG: an operand is built (and
-        # memoised) before the node that consumes it, so shared nodes fold once.
+        # memoised) before the node that consumes it, so shared nodes fold once --
+        # also across roots, since the memo is shared by ``fold_many``.
         order: list[Op] = []
-        visited: set[int] = set()
+        visited: set[int] = set(memo)
         stack = [(root, False)]
         while stack:
             node, expanded = stack.pop()
@@ -380,7 +509,6 @@ class _Folder:
             for child in child_ops[id(node)]:
                 if id(child) in absorbable and id(child) not in visited:
                     stack.append((child, False))
-        memo: dict[int, ColumnExpr] = {}
         for node in order:
             memo[id(node)] = self._make_expr(node, absorbable, memo)
             self._absorb(node)
@@ -397,11 +525,20 @@ class _Folder:
                                self._operand(node.operand, node, absorbable, memo))
         if isinstance(node, GetItemOp):
             return Col(node.key)
-        # StringMethodOp: the .str accessor was fused away in frame extraction, so the
-        # column is just inputs[0]; args/kwargs are literals (checked in _is_foldable).
-        operand = self._resolve(node.inputs[0], absorbable, memo)
-        return StrExpr(operand, node.method,
-                       tuple(node.args or ()), dict(node.kwargs or {}))
+        if isinstance(node, StringMethodOp):
+            # The .str accessor was fused away in frame extraction, so the column is
+            # just inputs[0]; args/kwargs are literals (checked in _is_foldable).
+            operand = self._resolve(node.inputs[0], absorbable, memo)
+            return StrExpr(operand, node.method,
+                           tuple(node.args or ()), dict(node.kwargs or {}))
+        if isinstance(node, DatetimeConversionOp):
+            operand = self._resolve(node.inputs[0], absorbable, memo)
+            return DatetimeExpr(operand, tuple(node.args or ()),
+                                dict(node.kwargs or {}))
+        if isinstance(node, GetAttrProjectionOp):
+            operand = self._resolve(node.inputs[0], absorbable, memo)
+            return DtExpr(operand, node.attr_name[1])
+        raise AssertionError(f"unfoldable node reached _make_expr: {node!r}")
 
     def _operand(self, operand, parent: Op, absorbable: set[int],
                  memo: dict[int, ColumnExpr]) -> ColumnExpr:

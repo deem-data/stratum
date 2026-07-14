@@ -9,7 +9,9 @@ from stratum.optimizer._numeric_rewrites import (
     eliminate_abs_abs,
     eliminate_constant_folding,
     eliminate_add_zero,
-    eliminate_exp_minus_one
+    eliminate_exp_minus_one,
+    eliminate_identity_subtract,
+    eliminate_any_mul_zero,
 )
 from stratum.optimizer.ir._ops import Op
 from stratum.utils._utils import start_time, log_time
@@ -30,6 +32,8 @@ class AlgebraicRewritesConfig:
     constant_folding: bool = True
     add_zero: bool = True
     exp_minus_one: bool = True
+    identity_subtract: bool = True
+    any_mul_zero: bool = True
 
 
 def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
@@ -57,5 +61,9 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
         root = eliminate_identity_operation(root)
     if config.constant_folding:
         root = eliminate_constant_folding(root)
+    if config.identity_subtract:
+        root = eliminate_identity_subtract(root)
+    if config.any_mul_zero:
+        root = eliminate_any_mul_zero(root)
     log_time("algebraic_rewrite", start)
     return root

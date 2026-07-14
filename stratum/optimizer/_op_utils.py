@@ -17,10 +17,7 @@ FLAGS = IteratorFlags()
 def replace_op_in_outputs(op: Op, replacement: Op):
     """Replace op in all its outputs with a replacement op."""
     for out_ in op.outputs:
-        for i,in_ in enumerate(out_.inputs):
-            if in_ is op:
-                out_.inputs[i] = replacement
-                break
+        out_.replace_input(op, replacement)
         replacement.add_output(out_)
 
 

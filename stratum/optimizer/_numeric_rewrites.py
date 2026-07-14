@@ -14,11 +14,21 @@ def match_two_op_chain(op_cls, type1, type2):
     return match
 
 
-def match_identity_operation(op_cls, type1, const):
+def match_identity_operation(op_cls, type1, const, reversed=None):
+    """Match a var-const NumericOp that performs an identity transformation.
+
+    Parameters
+    ----------
+    reversed : bool or None
+        If None, the ``reversed`` flag is not checked (e.g. multiplication is
+        commutative so ``x*1`` and ``1*x`` are both identities).  Set to
+        ``True`` / ``False`` for non-commutative operations like subtraction.
+    """
     def match(op1):
         if isinstance(op1, op_cls) and op1.type == type1:
             if op1.opt_operand is None and op1.constant == const:
-                return (op1,)
+                if reversed is None or op1.reversed == reversed:
+                    return (op1,)
         return None
     return match
 
@@ -119,6 +129,21 @@ def match_exp_minus_one(op):
             return (op, op2)
     return None
 
+def fold_to_zero(op: Op, root: Op) -> Op:
+    """Constant-fold ``x * 0`` (or ``0 * x``) to ``0``.
+
+    Unlike the identity rewrites, the result is not the input but a constant, so
+    we drop the multiply and its now-dead operand edges and rewire downstream
+    consumers to a :class:`ValueOp` holding ``0.0``. A ValueOp is a source node
+    (no inputs) whose ``process`` returns the constant directly, so the whole
+    ``x`` subgraph is never computed.
+    """
+    zero_op = ValueOp(0.0)
+    for operand in op.inputs:
+        operand.outputs = [out for out in operand.outputs if out is not op]
+    replace_op_in_outputs(op, zero_op)
+    return zero_op if op is root else root
+
 
 eliminate_log_exp = rewrite_pass(
     match_two_op_chain(NumericOp, NumericOpType.LOG, NumericOpType.EXP),
@@ -173,3 +198,14 @@ _replace_with_expm1 = make_replace_two_op_chain_root_safe(
 )
 
 eliminate_exp_minus_one = rewrite_pass(match_exp_minus_one, _replace_with_expm1)
+
+eliminate_identity_subtract = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.SUBTRACT, 0, reversed=False),
+    eliminate_single_op_chain_root_safe,
+)
+
+
+eliminate_any_mul_zero = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.MULTIPLY, 0),
+    fold_to_zero,
+)

@@ -39,6 +39,43 @@ STR_POLARS_METHODS = {
 }
 
 
+_POLARS_DATETIME_KWARGS = frozenset({"format", "errors", "exact", "cache"})
+
+
+def polars_datetime_kwargs(args, kwargs) -> dict | None:
+    """Translate the pandas datetime options supported by Polars string parsing.
+
+    ``None`` means the call must stay unfused and use the pandas compatibility
+    path. Positional options are deliberately kept there because their ordering
+    differs between ``pd.to_datetime`` and ``Expr.str.to_datetime``.
+    """
+    if args:
+        return None
+    kwargs = dict(kwargs or {})
+    if not kwargs.keys() <= _POLARS_DATETIME_KWARGS:
+        return None
+    errors = kwargs.pop("errors", "raise")
+    if errors not in ("raise", "coerce"):
+        return None
+    translated = {key: kwargs[key] for key in ("format", "exact", "cache")
+                  if key in kwargs}
+    translated["strict"] = errors == "raise"
+    return translated
+
+
+def _to_datetime_via_pandas(obj, args, kwargs):
+    """Preserve pandas datetime semantics for options Polars cannot express."""
+    name = getattr(obj, "name", None)
+    if isinstance(obj, (pl.Series, pl.DataFrame)):
+        obj = obj.to_pandas()
+    result = pd.to_datetime(obj, *args, **kwargs)
+    if isinstance(result, (pd.Series, pd.DataFrame)):
+        return pl.from_pandas(result)
+    if isinstance(result, pd.Index):
+        return pl.Series(name, result)
+    return result
+
+
 class MetadataOp(Op):
     fields = ["func", "args", "kwargs"]
 
@@ -229,13 +266,14 @@ class DatetimeConversionOp(ProjectionOp):
                          outputs=outputs, columns=columns)
 
     def process(self, mode: str, inputs: list):
-        fmt = self.kwargs.get("format")
-        strict = self.kwargs.get("errors", "raise") == "raise"
         if FLAGS.force_polars:
-            return inputs[0].str.to_datetime(*self.args, strict=strict, format=fmt)
-        else:
-            return pd.to_datetime(inputs[0], *self.args,
-                                  errors="raise" if strict else "coerce", format=fmt)
+            translated = polars_datetime_kwargs(self.args, self.kwargs)
+            if translated is not None:
+                # TODO: Support already-datetime and numeric operands natively;
+                # the Polars string namespace only accepts string input.
+                return inputs[0].str.to_datetime(**translated)
+            return _to_datetime_via_pandas(inputs[0], self.args, self.kwargs)
+        return pd.to_datetime(inputs[0], *self.args, **self.kwargs)
 
 
 class StringMethodOp(ProjectionOp):

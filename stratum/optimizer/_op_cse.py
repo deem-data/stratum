@@ -22,7 +22,7 @@ two input slots collapsed into one, so such a merge is skipped (see ``_can_merge
 from __future__ import annotations
 
 from stratum.optimizer._op_utils import topological_iterator
-from stratum.optimizer.ir._ops import ChoiceOp, ImplOp, Op, OperandRef
+from stratum.optimizer.ir._ops import Op, remap_operand_refs
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,11 +30,6 @@ logger = logging.getLogger(__name__)
 # Attributes that are graph structure rather than configuration; never rewritten
 # when renumbering operand refs. Mirrors the exclusion set in `validate_operands`.
 _STRUCTURAL_ATTRS = frozenset({"inputs", "outputs", "remove_after"})
-
-# Consumers whose inputs are positional and *not* addressed by OperandRef:
-# ChoiceOp consumes its outcomes by position, ImplOp resolves inputs via a cached
-# id(DataOp)->index map. Their input slots cannot be collapsed by edge dedup.
-_POSITIONAL_CONSUMER_TYPES = (ChoiceOp, ImplOp)
 
 
 def apply_op_cse(root: Op) -> Op:
@@ -70,7 +65,7 @@ def _can_merge(op: Op, canonical: Op) -> bool:
     we refuse the merge and leave both ops in place.
     """
     for out in op.outputs:
-        if isinstance(out, _POSITIONAL_CONSUMER_TYPES) and any(i is canonical for i in out.inputs):
+        if out.consumes_inputs_positionally() and any(i is canonical for i in out.inputs):
             return False
     return True
 
@@ -117,21 +112,5 @@ def _rebind_consumer(out: Op, old_op: Op, new_op: Op) -> None:
     fields = getattr(type(out), "fields", None)
     attrs = fields if fields is not None else [a for a in out.__dict__ if a not in _STRUCTURAL_ATTRS]
     for attr in attrs:
-        setattr(out, attr, _remap_refs(getattr(out, attr), old_to_new))
+        setattr(out, attr, remap_operand_refs(getattr(out, attr), old_to_new))
     out.inputs = new_inputs
-
-
-def _remap_refs(value, mapping: dict):
-    """Return ``value`` with every nested OperandRef remapped via ``mapping``."""
-    if isinstance(value, OperandRef):
-        return OperandRef(mapping[value.k])
-    if isinstance(value, tuple):
-        return tuple(_remap_refs(v, mapping) for v in value)
-    if isinstance(value, list):
-        return [_remap_refs(v, mapping) for v in value]
-    if isinstance(value, dict):
-        return {k: _remap_refs(v, mapping) for k, v in value.items()}
-    if hasattr(value, "remap_operand_refs"):
-        # Column-expression tree (immutable) -> rebuild with remapped refs.
-        return value.remap_operand_refs(mapping)
-    return value

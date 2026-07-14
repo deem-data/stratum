@@ -5,6 +5,7 @@ from stratum.optimizer._optimize import  optimize
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
+from stratum.optimizer.ir._ops import OperandRef
 
 class TestCSE(unittest.TestCase):
 
@@ -279,6 +280,22 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(root)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].process("fit", [out[0].value]), 2)
+
+    def test_eliminate_identity_operation_dedups_repeated_input(self):
+        value = st.as_data_op(2)
+        a = value + (value * 1)
+        b = (value * 1) + value
+        root = a + b
+
+        out, *_ = optimize(root)
+
+        self.assertEqual(len(out), 4)
+        self.assertEqual(out[1].inputs, [out[0]])
+        self.assertEqual(out[2].inputs, [out[0]])
+        self.assertEqual(out[2].opt_operand, OperandRef(0))
+        left_sum = out[1].process("fit", [out[0].value])
+        right_sum = out[2].process("fit", [out[0].value])
+        self.assertEqual(out[3].process("fit", [left_sum, right_sum]), 8)
 
     def test_abs_abs_collapses_to_single_abs(self):
         df = st.as_data_op(-3)
@@ -604,3 +621,48 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 2)  # exp/log cancel -> x - 1
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.SUBTRACT)
+
+    def test_eliminate_identity_subtract(self):
+        """x - 0  →  x"""
+        df = st.as_data_op(5)
+        t1 = df - 0
+        t2 = t1 + 3
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 8)
+
+    def test_eliminate_identity_subtract_root_safe(self):
+        """When x - 0 is the root, the rewrite must not break the DAG."""
+        value = st.as_data_op(7)
+        root = value - 0
+
+        out, *_ = optimize(root)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].process("fit", [out[0].value]), 7)
+
+    def test_disable_eliminate_identity_subtract(self):
+        """Disabling identity_subtract must leave x - 0 untouched."""
+        df = st.as_data_op(5)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(identity_subtract=False),
+        )
+        t1 = df - 0
+        t2 = t1 + 3
+
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 3)
+        subtract_result = out[1].process("fit", [out[0].value])
+        self.assertEqual(subtract_result, 5)
+        self.assertEqual(out[2].process("fit", [subtract_result]), 8)
+
+    def test_no_rewrite_const_minus_var(self):
+        """0 - x  should NOT be rewritten (it is not an identity)."""
+        df = st.as_data_op(5)
+        t1 = 0 - df
+        t2 = t1 + 3
+
+        out, *_ = optimize(t2)
+        # x - 0 would collapse to 2 ops; 0 - x stays as 3 ops
+        self.assertEqual(len(out), 3)
