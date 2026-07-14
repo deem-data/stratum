@@ -509,3 +509,75 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(t2)
         # x - 0 would collapse to 2 ops; 0 - x stays as 3 ops
         self.assertEqual(len(out), 3)
+
+    # --- pow-zero annihilator --------------------------------------------
+
+    def test_pow_zero_annihilates_to_one(self):
+        """x ** 0  →  1"""
+        df = st.as_data_op(5)
+        t1 = df ** 0
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 1)
+
+    def test_pow_zero_with_trailing_op(self):
+        """(x ** 0) + 3  →  1 + 3  →  4"""
+        df = st.as_data_op(5)
+        t1 = df ** 0
+        t2 = t1 + 3
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 4)
+
+    def test_pow_zero_root_safe(self):
+        """When x ** 0 is the root, the DAG must not break."""
+        value = st.as_data_op(7)
+        root = value ** 0
+
+        out, *_ = optimize(root)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 1)
+
+    def test_pow_zero_disabled(self):
+        """Disabling pow_zero must leave x ** 0 untouched."""
+        df = st.as_data_op(5)
+        t1 = df ** 0
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(pow_zero=False),
+        )
+        out, *_ = optimize(t1, config=config)
+        self.assertEqual(len(out), 2)
+
+    def test_pow_nonzero_untouched(self):
+        """x ** 2 must not be affected by pow_zero."""
+        df = st.as_data_op(5)
+        t1 = df ** 2
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+
+    def test_pow_one_untouched(self):
+        """x ** 1 must not be affected (identity, not annihilator)."""
+        df = st.as_data_op(5)
+        t1 = df ** 1
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+
+    def test_disable_pow_zero_does_not_affect_log_exp(self):
+        """Disabling pow_zero must not suppress other rewrites."""
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(pow_zero=False),
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 1)

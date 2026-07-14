@@ -9,6 +9,7 @@ from stratum.optimizer._numeric_rewrites import (
     eliminate_abs_abs,
     eliminate_add_zero,
     eliminate_exp_minus_one,
+    eliminate_pow_zero,
     eliminate_identity_subtract,
     eliminate_any_mul_zero,
 )
@@ -30,6 +31,7 @@ class AlgebraicRewritesConfig:
     abs_abs: bool = True
     add_zero: bool = True
     exp_minus_one: bool = True
+    pow_zero: bool = True
     identity_subtract: bool = True
     any_mul_zero: bool = True
 
@@ -57,6 +59,8 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
         root = eliminate_expm1_log1p(root)
     if config.identity_subtract:
         root = eliminate_identity_subtract(root)
+    if config.pow_zero:
+        root = eliminate_pow_zero(root)
     if config.any_mul_zero:
         root = eliminate_any_mul_zero(root)
     log_time("algebraic_rewrite", start)
