@@ -75,3 +75,5 @@ truncated_svd_fit = getattr(native, "truncated_svd_fit_from_csr", None) if nativ
 truncated_svd_transform = getattr(native, "truncated_svd_transform_from_csr", None) if native else None
 ohe_transform = getattr(native, "ohe_transform_csr", None) if native else None
 csr_to_dense = getattr(native, "csr_to_dense", None) if native else None
+minmax_scale_fit = getattr(native, "minmax_scale_fit", None) if native else None
+minmax_scale_transform = (getattr(native, "minmax_scale_transform", None) if native else None)
