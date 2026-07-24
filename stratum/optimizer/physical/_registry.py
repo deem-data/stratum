@@ -3,51 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from stratum.optimizer.ir._aggregation_ops import AggregateOp, GroupedDataframeOp
 from stratum.optimizer.ir._base import IRNode
-from stratum.optimizer.ir._dataframe_ops import (
-    ApplyUDFOp,
-    AssignMapOp,
-    AssignOp,
-    ColumnProjectionOp,
-    ColumnSelectorOp,
-    ConcatOp,
-    DatetimeConversionOp,
-    DropOp,
-    GetAttrProjectionOp,
-    MapOp,
-    MetadataOp,
-    ProjectionOp,
-    SelectionOp,
-    SplitOp,
-    SplitOutput,
-    StringMethodOp,
-)
-from stratum.optimizer.ir._join_ops import JoinOp
-from stratum.optimizer.ir._numeric_ops import NumericOp
-from stratum.optimizer.ir._ops import (
-    BaseEstimatorOp,
-    BinOp,
-    CallOp,
-    ChoiceOp,
-    GetAttrOp,
-    GetItemOp,
-    ImplOp,
-    MethodCallOp,
-    Op,
-    SearchEvalOp,
-    ValueOp,
-    VariableOp,
-    PredictorOp,
-    TransformerOp,
-)
 BackendName = str
 
 
 """Descriptor for one physical implementation of a plannable operator.
 
 ``op_type`` is the type the implementation is registered under: an *abstract
-physical* op type for families already migrated to the physical layer (e.g.
+physical* op type for families already compiled to the physical layer (e.g.
 ``ReadCSV``), or a *logical* op type for families that still pass through
 lowering unchanged (e.g. ``TransformerOp``). ``supports``/``cost``/``exec_mem``
 form the fixed selector-facing API; ``impl_class`` names the concrete
@@ -55,9 +18,8 @@ form the fixed selector-facing API; ``impl_class`` names the concrete
 after which its ``on_impl_selected`` folds in any plan-time state.
 
 This is the shared, backend-agnostic schema. A backend that carries extra
-scheduling metadata *subclasses* this (see :class:`RustPhysicalImpl`) instead of
-widening the base, so the common schema stays small as more backends grow their
-own fields."""
+scheduling metadata *subclasses* this (e.g., :class:`RustPhysicalImpl`) instead of
+widening the base, so the common schema stays small."""
 @dataclass(frozen=True, slots=True)
 class PhysicalImpl:
     op_type: type[IRNode]
@@ -89,148 +51,54 @@ class RustPhysicalImpl(PhysicalImpl):
     data_parallel: bool = False
 
 
-"""Operator family used to keep the registry extensible."""
-@dataclass(frozen=True, slots=True)
-class OperatorFamily:
-    name: str
-    op_types: tuple[type[IRNode], ...]
-    default_backends: tuple[BackendName, ...] = ()
-    notes: str = ""
-
-
-"""A physical execution backend understood by the registry."""
-@dataclass(frozen=True, slots=True)
-class BackendSpec:
-    name: str
-    notes: str = ""
-
-
-# FIXME: Only list the stratum's logical operators after compilation from skrub IR
-# these will be replaced by the general physical operators (once they are here), and
-# will be lowered to specific physical op implementations. Types leave this list as
-# their family migrates to the physical layer (sources already have: DataSourceOp is
-# lowered away and its physical types live in the "sources" family instead).
-CURRENT_LOGICAL_OPERATOR_TYPES: tuple[type[Op], ...] = (
-    AggregateOp,
-    ApplyUDFOp,
-    AssignMapOp,
-    AssignOp,
-    BaseEstimatorOp,
-    BinOp,
-    CallOp,
-    ChoiceOp,
-    ColumnProjectionOp,
-    ColumnSelectorOp,
-    ConcatOp,
-    DatetimeConversionOp,
-    DropOp,
-    PredictorOp,
-    GetAttrOp,
-    GetAttrProjectionOp,
-    GetItemOp,
-    GroupedDataframeOp,
-    ImplOp,
-    JoinOp,
-    MapOp,
-    MetadataOp,
-    MethodCallOp,
-    NumericOp,
-    ProjectionOp,
-    SearchEvalOp,
-    SelectionOp,
-    SplitOp,
-    SplitOutput,
-    StringMethodOp,
-    TransformerOp,
-    ValueOp,
-    VariableOp,
-)
-
-
-CURRENT_BACKENDS: tuple[BackendSpec, ...] = (
-    BackendSpec("pandas", "Pandas dataframe implementation."),
-    BackendSpec("polars", "Polars dataframe implementation."),
-    BackendSpec("numpy", "NumPy array implementation."),
-    BackendSpec("sklearn-skrub", "Existing sklearn/skrub implementation."),
-    BackendSpec("rust", "Native Rust implementation selected like any other backend."),
-)
-
-
-CURRENT_OPERATOR_FAMILIES: tuple[OperatorFamily, ...] = (
-    OperatorFamily(
-        name="logical",
-        op_types=CURRENT_LOGICAL_OPERATOR_TYPES,
-        default_backends=tuple(backend.name for backend in CURRENT_BACKENDS),
-        notes="Current logical IR surface; backends are attached later by the planner.",
-    ),
-)
-
-
-def _unsupported_supports(op: Op, ctx: Any) -> bool:
+def _unsupported_supports(op: IRNode, ctx: Any) -> bool:
     return False
 
 
-def _unsupported_cost(op: Op, stats: Any) -> float:
+def _unsupported_cost(op: IRNode, stats: Any) -> float:
     raise NotImplementedError("No physical cost model has been registered for this operator yet.")
 
 
-def _unsupported_exec_mem(op: Op, stats: Any) -> int:
+def _unsupported_exec_mem(op: IRNode, stats: Any) -> int:
     raise NotImplementedError("No execution-memory model has been registered for this operator yet.")
 
 
-def _unsupported_execute(op: Op, mode: str, inputs: list[Any]) -> Any:
+def _unsupported_execute(op: IRNode, mode: str, inputs: list[Any]) -> Any:
     raise NotImplementedError("No physical implementation has been registered for this operator yet.")
 
 
-def _current_process_execute(op: Op, mode: str, inputs: list[Any]) -> Any:
+def _current_process_execute(op: IRNode, mode: str, inputs: list[Any]) -> Any:
     return op.process(mode, inputs)
 
 
-def _placeholder_cost(op: Op, stats: Any) -> float:
+def _placeholder_cost(op: IRNode, stats: Any) -> float:
     return 1.0
 
 
-def _placeholder_exec_mem(op: Op, stats: Any) -> int:
+def _placeholder_exec_mem(op: IRNode, stats: Any) -> int:
     return 0
 
 
-"""Container for physical implementations and their operator families."""
+"""Dictionary for physical implementations keyed by operator type.
+Extensibile to support new backends. """
 class PhysicalRegistry:
     def __init__(
         self,
-        families: Iterable[OperatorFamily] = (),
         implementations: Iterable[PhysicalImpl] = (),
     ) -> None:
-        self._families: list[OperatorFamily] = list(families)
         self._implementations: dict[type[IRNode], list[PhysicalImpl]] = {}
         self._implementations_by_backend: dict[BackendName, list[PhysicalImpl]] = {}
         for impl in implementations:
             self.register(impl)
-
-    def register_family(self, family: OperatorFamily) -> None:
-        self._families.append(family)
 
     def register(self, impl: PhysicalImpl) -> PhysicalImpl:
         self._implementations.setdefault(impl.op_type, []).append(impl)
         self._implementations_by_backend.setdefault(impl.backend_name, []).append(impl)
         return impl
 
-    def families(self) -> tuple[OperatorFamily, ...]:
-        return tuple(self._families)
-
     def op_types(self) -> tuple[type[IRNode], ...]:
-        types: list[type[IRNode]] = []
-        seen: set[type[IRNode]] = set()
-        for family in self._families:
-            for op_type in family.op_types:
-                if op_type not in seen:
-                    seen.add(op_type)
-                    types.append(op_type)
-        for op_type in self._implementations:
-            if op_type not in seen:
-                seen.add(op_type)
-                types.append(op_type)
-        return tuple(types)
+        """Return operator types with at least one registered implementation."""
+        return tuple(self._implementations)
 
     def candidates_for(
         self,
@@ -243,7 +111,6 @@ class PhysicalRegistry:
             candidates = [impl for impl in candidates if impl.backend_name == backend_name]
         return tuple(candidates)
 
-    """Return the physical implementations available for a given operator."""
     def candidates_for_op(
         self,
         op: IRNode,
@@ -351,6 +218,11 @@ sklearn_skrub_impl = _backend_impl("sklearn-skrub")
 
 
 def _register_current_estimator_impls(registry: PhysicalRegistry) -> None:
+    # These are transitional registrations for estimator families that do not
+    # have abstract physical operators yet. Once those lowerings land, their
+    # implementations should be keyed by the corresponding physical type.
+    from stratum.optimizer.ir._ops import PredictorOp, TransformerOp
+
     for op_type in (TransformerOp, PredictorOp):
         registry.register(
             PhysicalImpl(
@@ -368,12 +240,15 @@ def _register_current_estimator_impls(registry: PhysicalRegistry) -> None:
 
 """Create the default registry with every known implementation registered."""
 def build_default_physical_registry() -> PhysicalRegistry:
-    registry = PhysicalRegistry(families=CURRENT_OPERATOR_FAMILIES)
+    registry = PhysicalRegistry()
 
     # Imported lazily: the exec modules import back into this module (the
     # decorator / PhysicalImpl), so pulling them in at module level would cycle.
-    # Importing each exec module triggers its @physical_impl registrations
-    # (including the Rust kernels, now class-based @rust_impl impls).
+    # Importing each exec module triggers its lowering rules and
+    # @physical_impl/@rust_impl registrations. Keep this list complete so a
+    # standalone registry construction does not depend on optimizer imports.
+    from stratum.optimizer.physical import _source_execs  # noqa: F401
+    from stratum.optimizer.physical import _transform_execs  # noqa: F401
     from stratum.optimizer.physical import _concat_execs  # noqa: F401
     from stratum.optimizer.physical import _join_execs  # noqa: F401
     from stratum.optimizer.physical import _aggregation_execs  # noqa: F401
@@ -391,10 +266,9 @@ def build_default_physical_registry() -> PhysicalRegistry:
 _default_registry: PhysicalRegistry | None = None
 
 
+"""Shared default registry, built once on first use."""
 def get_default_physical_registry() -> PhysicalRegistry:
-    """Shared default registry, built once on first use.
-
-    The implementation-selection pass consults this unless a registry is
+    """The implementation-selection pass consults this unless a registry is
     injected explicitly (tests, custom planners)."""
     global _default_registry
     if _default_registry is None:

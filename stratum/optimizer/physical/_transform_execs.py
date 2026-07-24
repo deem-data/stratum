@@ -2,13 +2,12 @@
 
 Lowering turns a logical :class:`~stratum.optimizer.ir._ops.TransformerOp`
 wrapping a supported estimator into an *abstract* physical transformer op -- one
-per estimator kind -- mirroring how a ``DataSourceOp`` lowers to
-``ReadCSV``/``ReadParquet``/... (one logical op, many concrete shapes).
+per estimator kind.
 Implementation selection then swaps the abstract op to a concrete backend impl:
 the sklearn/skrub reference (``@physical_impl``) or the native Rust kernel
 (``@rust_impl``).
 
-Migration is incremental. Only estimators with a branch in
+Lowering is incremental. Only estimators with a branch in
 :func:`lower_transformer` move to a dedicated physical op; every other
 ``TransformerOp`` returns ``None`` from the rule, passes through lowering
 unchanged, and keeps running via the ``sklearn-skrub`` impl registered on
@@ -28,8 +27,7 @@ from stratum.adapters.string_encoder import (RustyStringEncoder,
 from stratum.optimizer.ir._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp
-from stratum.optimizer.physical._registry import (OperatorFamily, rust_impl,
-                                                 sklearn_skrub_impl)
+from stratum.optimizer.physical._registry import (rust_impl, sklearn_skrub_impl)
 
 
 class StringEncoderOp(TransformerOp, PhysicalOp):

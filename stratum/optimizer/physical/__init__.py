@@ -1,8 +1,4 @@
 from ._registry import (
-    CURRENT_BACKENDS,
-    CURRENT_LOGICAL_OPERATOR_TYPES,
-    BackendSpec,
-    OperatorFamily,
     PhysicalImpl,
     PhysicalRegistry,
     RustPhysicalImpl,
@@ -19,18 +15,18 @@ from ._physical_ops import PhysicalOp, RustPhysicalOp
 from ._plan_context import PlanContext
 from ._lowering import lower_to_physical, lowering_rule
 from ._impl_selection import (
+    DefaultImplementationSelector,
     FlagBasedSelector,
     ImplementationSelector,
+    get_implementation_selector,
     select_implementations,
 )
 
 __all__ = [
-    "CURRENT_BACKENDS",
-    "CURRENT_LOGICAL_OPERATOR_TYPES",
-    "BackendSpec",
+    "DefaultImplementationSelector",
     "FlagBasedSelector",
     "ImplementationSelector",
-    "OperatorFamily",
+    "get_implementation_selector",
     "PhysicalImpl",
     "PhysicalOp",
     "PhysicalRegistry",

@@ -54,30 +54,30 @@ class TestSourceImplSelection(unittest.TestCase):
     def _read_csv_ops(self):
         return csv_file(self.df)
 
-    def test_in_memory_frame_impls(self):
+    def test_default_selector_prefers_pandas_in_memory_frame(self):
         ops, *_ = optimize(st.as_data_op(self.df))
         self.assertIsInstance(ops[0], PandasInMemoryFrame)
         with force_polars(True):
             ops, *_ = optimize(st.as_data_op(self.df))
-        self.assertIsInstance(ops[0], PolarsInMemoryFrame)
+        self.assertIsInstance(ops[0], PandasInMemoryFrame)
 
-    def test_read_csv_impls(self):
+    def test_default_selector_prefers_pandas_read_csv(self):
         with self._read_csv_ops() as path:
             data = st.as_data_op(path).skb.apply_func(pd.read_csv)
             ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], PandasReadCSV)
             with force_polars(True):
                 ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
-            self.assertIsInstance(ops[-1], PolarsReadCSV)
+            self.assertIsInstance(ops[-1], PandasReadCSV)
 
-    def test_read_parquet_impls(self):
+    def test_default_selector_prefers_pandas_read_parquet(self):
         with parquet_file(self.df) as path:
             data = st.as_data_op(path).skb.apply_func(pd.read_parquet)
             ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], PandasReadParquet)
             with force_polars(True):
                 ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
-            self.assertIsInstance(ops[-1], PolarsReadParquet)
+            self.assertIsInstance(ops[-1], PandasReadParquet)
 
     def test_npy_is_single_impl(self):
         # np.load yields an ndarray; a single concrete impl serves both backends.
@@ -113,7 +113,7 @@ class TestSourcesInRegistry(unittest.TestCase):
             self.assertEqual({"pandas", "polars"},
                              {c.backend_name for c in candidates})
 
-    def test_numpy_load_is_catalogued(self):
+    def test_numpy_load_is_registered(self):
         candidates = self.registry.candidates_for(NumpyLoad)
         self.assertEqual(("numpy",), tuple(c.backend_name for c in candidates))
 
@@ -203,12 +203,12 @@ class TestExecutionIsBranchFree(unittest.TestCase):
             result = run_plan(ops)
         self.assertIsInstance(result, pd.DataFrame)
 
-    def test_in_memory_polars_plan_ignores_runtime_flag(self):
+    def test_default_in_memory_plan_ignores_backend_flag(self):
         with force_polars(True):
-            ops, *_ = optimize(st.as_data_op(self.df))  # planned as polars
-        with force_polars(False):                        # flag flipped back
+            ops, *_ = optimize(st.as_data_op(self.df))  # default still plans pandas
+        with force_polars(False):
             result = run_plan(ops)
-        self.assertIsInstance(result, pl.DataFrame)
+        self.assertIsInstance(result, pd.DataFrame)
 
     def test_read_csv_pandas_plan_ignores_runtime_flag(self):
         with csv_file(self.df) as path:
@@ -218,14 +218,14 @@ class TestExecutionIsBranchFree(unittest.TestCase):
                 result = run_plan(ops)
         self.assertIsInstance(result, pd.DataFrame)
 
-    def test_read_csv_polars_plan_ignores_runtime_flag(self):
+    def test_default_read_csv_plan_ignores_backend_flag(self):
         with csv_file(self.df) as path:
             data = st.as_data_op(path).skb.apply_func(pd.read_csv)
             with force_polars(True):
-                ops, *_ = optimize(data, OptConfig(dataframe_ops=True))  # polars plan
+                ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
             with force_polars(False):
                 result = run_plan(ops)
-        self.assertIsInstance(result, pl.DataFrame)
+        self.assertIsInstance(result, pd.DataFrame)
 
 
 if __name__ == "__main__":

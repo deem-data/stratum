@@ -3,7 +3,7 @@ compiling pass, exercised through one realistic supervised pipeline.
 
 A single e-commerce pipeline -- read a CSV, engineer features, encode the
 categoricals, fit a model -- chains everything the recent optimizer work
-introduced, over both frame backends:
+introduced into one default-selector pipeline:
 
 * a source **read** ``pd.read_csv`` lowered to a source op;
 * a **mask selection** ``df[predicate]`` that folds a boolean expression tree
@@ -14,18 +14,17 @@ introduced, over both frame backends:
 * a literal **column projection** ``df[[...]]`` -> :class:`ColumnProjectionOp`
   and two selector-driven ``skb.select(...)`` splits -> :class:`ColumnSelectorOp`
   (``stratum.optimizer.ir._projection_ops``);
-* a **transformer** (:class:`TransformerOp`) with *multiple* registered physical
-  implementations -- the sklearn/skrub ``StringEncoder`` and its ``rust`` kernel
-  -- and an **estimator** (:class:`EstimatorOp`) that fits the model.
+* a **transformer** (:class:`TransformerOp`) with multiple registered physical
+  implementations, where the default chooses the sklearn/skrub implementation,
+  and an **estimator** (:class:`EstimatorOp`) that fits the model.
 
 The tests assert three things:
 
 1. each backend-agnostic *logical* abstraction is recognised;
 2. the *compiling* pass binds the frame abstractions to concrete
-   :class:`PhysicalOp` implementations, and binds the transformer to the
-   backend implementation chosen by the plan context (skrub vs. Rust);
-3. the compiled plan trains and scores end-to-end via ``make_grid_search`` on
-   both backends.
+   :class:`PhysicalOp` implementations, and binds the transformer according to
+   the configured implementation selector;
+3. the compiled plan trains and scores end-to-end via ``make_grid_search``.
 """
 import pytest
 import pandas as pd
@@ -35,8 +34,6 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import make_scorer, r2_score
 
 import stratum as st
-from stratum.adapters.string_encoder import (RustyStringEncoder,
-                                             supports_rust_string_encoder)
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.ir._selection_ops import SelectionKind, SelectionOp
 from stratum.optimizer.ir._map_ops import AssignMapOp
@@ -101,8 +98,8 @@ def build_pipeline(file_path, model=None):
     X_num = X.skb.select(st.selectors.numeric())
     X_cat = X.skb.select(~st.selectors.numeric())
 
-    # (5) TRANSFORMER: encode the string columns. StringEncoder has both a
-    # sklearn/skrub and a Rust physical implementation; the plan context picks.
+    # (5) TRANSFORMER: encode the string columns. The default selector picks the
+    # sklearn/skrub physical implementation.
     X_cat_enc = X_cat.skb.apply(StringEncoder())
 
     # (6) CONCAT the numeric + encoded blocks, then (7) fit the ESTIMATOR.
@@ -144,16 +141,16 @@ def test_frame_ops_pipeline_plan(polars):
     assert any(isinstance(o, ConcatOp) for o in ops)
 
 
-def test_transformer_binds_selected_backend(polars):
-    """The *same* logical TransformerOp binds to different physical
-    implementations depending on the plan context: the sklearn/skrub encoder by
-    default, the Rust kernel when ``rust_backend`` is on."""
-    supported, reason = supports_rust_string_encoder(StringEncoder())
-    if not supported:
-        pytest.skip(f"Rust StringEncoder unavailable: {reason}")
+def test_transformer_binds_default_selector(polars):
+    """The configured default keeps the StringEncoder on the skrub backend.
+
+    The legacy ``rust_backend`` flag remains available to concrete adapters, but
+    it does not override the selected implementation policy.
+    """
 
     def encoder_estimator(rust):
-        with csv_file(make_orders()) as path, st.config(rust_backend=rust):
+        with csv_file(make_orders()) as path, st.config(
+                implementation_selector="default", rust_backend=rust):
             ops = _optimize(build_pipeline(path))
         transformers = [o for o in ops if isinstance(o, TransformerOp)]
         assert len(transformers) == 1
@@ -161,12 +158,11 @@ def test_transformer_binds_selected_backend(polars):
 
     # Default: the backend-agnostic sklearn/skrub implementation.
     default_est = encoder_estimator(rust=False)
-    assert not isinstance(default_est, RustyStringEncoder)
+    assert isinstance(default_est, StringEncoder)
 
-    # rust_backend on: the Rust kernel is bound in at plan time.
+    # The Rust flag does not override the configured default selector.
     rust_est = encoder_estimator(rust=True)
-    assert isinstance(rust_est, RustyStringEncoder)
-    assert rust_est._stratum_force_rust
+    assert type(rust_est) is type(default_est)
 
 
 def test_selection_binds_query_impl_under_flag():
@@ -211,8 +207,10 @@ def test_query_selection_trains_end_to_end():
 def test_frame_ops_pipeline_grid_search(polars):
     """The compiled plan trains and scores end-to-end through Stratum's
     scheduler, driven by ``make_grid_search`` -- the same entry point the other
-    application tests use. The pipeline carries a single candidate (no
-    ``choose_from``), which grid search handles as a one-pipeline search."""
+    application tests use. The legacy backend flag is varied by the fixture,
+    but the default selector still produces one pandas pipeline. The pipeline
+    carries a single candidate (no ``choose_from``), which grid search handles
+    as a one-pipeline search."""
     scorer = make_scorer(r2_score)
     with csv_file(make_orders()) as path:
         preds = build_pipeline(path)

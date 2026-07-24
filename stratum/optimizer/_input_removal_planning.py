@@ -1,14 +1,15 @@
 """Input removal planning for the linearized Op DAG.
 
-After linearization, each op produces an intermediate buffer stored in the
-BufferPool.  Removal planning decides *when* each buffer can be freed so
-that peak memory stays low while correctness is preserved.
+Removal planning marks the last use of each intermediate in the DAG. The list of
+intermediates to be removed is materialized in each op's ``op.remove_after`` attribute.
+Skrub/stratum's execution plan does not include control flow, so we can mark the last
+use of each intermediate in the compile time.
 
 How it works:
 - Each op starts with a consumer count equal to ``len(op.outputs)`` (min 1).
 - Walking the linearized order, every time an op appears as an input of
   another op, its remaining count is decremented.
-- When the count hits zero the buffer is scheduled for removal right after
+- When the count hits zero, the intermediate is scheduled for removal right after
   the current op finishes (set via ``op.remove_after``).
 - Pinned ops (pre-split ops that feed post-split / re-executed ops) are
   never removed by the schedule; they persist across CV folds.
@@ -29,7 +30,7 @@ def compute_pinned_ops(
     split_pos: int | None,
     recompute_ops: list[Op],
 ) -> set[Op]:
-    """Return pre-split ops whose buffers must persist across CV folds."""
+    """Return pre-split ops that must persist across CV folds."""
     start = start_time()
     if split_pos is None:
         return set()

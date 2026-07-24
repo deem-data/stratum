@@ -96,6 +96,7 @@ class PhysicalOp(IRNode):
             f"cloning happens in the logical phase, before lowering.")
 
 
+# FIXME: Why do we need this class?
 class RustPhysicalOp(PhysicalOp):
     """Base for native Rust physical ops.
 

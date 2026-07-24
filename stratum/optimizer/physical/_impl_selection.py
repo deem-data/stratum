@@ -1,5 +1,6 @@
-"""Implementation-selection pass (the third phase).
+"""Implementation-selection pass.
 
+# TODO: Rewrite all comments
 Lowering fixes the *shape* of the physical plan; this pass fixes the *impl* of
 each op: which concrete backend-specific implementation actually runs. For every
 op in the DAG it asks the :class:`~stratum.optimizer.physical._registry.PhysicalRegistry`
@@ -20,10 +21,6 @@ left**.
 Ops with no candidates (un-migrated logical families, ValueOp, ChoiceOp, ...)
 pass through and keep executing their own ``process``.
 
-Today's :class:`FlagBasedSelector` reproduces the legacy flag semantics from the
-plan context. This is the seam where a cost/memory-based selector plugs in later
-without touching lowering or the registry: candidates already expose ``cost`` and
-``exec_mem``, so a future selector only changes *which* candidate wins.
 """
 from __future__ import annotations
 
@@ -49,6 +46,49 @@ class ImplementationSelector:
     def choose(self, op: IRNode, candidates: list[PhysicalImpl],
                ctx: PlanContext) -> PhysicalImpl | None:
         raise NotImplementedError
+
+
+class DefaultImplementationSelector(ImplementationSelector):
+    """Choose implementations using the stable default backend preference.
+
+    The selector is intentionally local to one operator.  Candidates have
+    already been filtered through ``supports(op, ctx)`` by :func:`bind_op`, so
+    this policy only ranks the supported implementations and falls back to
+    registration order when none of the preferred backends is available.
+    """
+
+    _PREFERRED_BACKENDS = ("pandas", "sklearn-skrub", "numpy")
+
+    # FIXME: PandasInMemoryFrame may fail if the in-memory dataframe is Polars
+    def choose(self, op: IRNode, candidates: list[PhysicalImpl],
+               ctx: PlanContext) -> PhysicalImpl | None:
+        if not candidates:
+            return None
+        for backend_name in self._PREFERRED_BACKENDS:
+            for impl in candidates:
+                if impl.backend_name == backend_name:
+                    return impl
+        return candidates[0]
+
+
+_IMPLEMENTATION_SELECTOR_FACTORIES: dict[str, type[ImplementationSelector]] = {
+    "default": DefaultImplementationSelector,
+}
+
+
+def get_implementation_selector(mode: str) -> ImplementationSelector:
+    """Get the configured implementation-selection policy.
+
+    Keeping construction in one place makes adding a future selector a small,
+    explicit change while preserving selector injection for focused tests.
+    """
+    try:
+        selector_type = _IMPLEMENTATION_SELECTOR_FACTORIES[mode]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown implementation selector {mode!r}; available selectors "
+            f"are {sorted(_IMPLEMENTATION_SELECTOR_FACTORIES)}.") from exc
+    return selector_type()
 
 
 class FlagBasedSelector(ImplementationSelector):
@@ -97,7 +137,7 @@ def bind_op(op: IRNode, ctx: PlanContext,
     if registry is None:
         registry = get_default_physical_registry()
     if selector is None:
-        selector = FlagBasedSelector()
+        selector = get_implementation_selector(ctx.implementation_selector)
 
     candidates = [c for c in registry.candidates_for(type(op)) if c.supports(op, ctx)]
     impl = selector.choose(op, candidates, ctx)
@@ -105,7 +145,7 @@ def bind_op(op: IRNode, ctx: PlanContext,
         return op
     logger.debug(f"Selected {impl.backend_name} implementation for {op}")
     if impl.impl_class is not None and impl.impl_class is not type(op):
-        op.__class__ = impl.impl_class
+        op.__class__ = impl.impl_class #late-binding
     if isinstance(op, PhysicalOp):
         op.on_impl_selected(ctx)
     return op
@@ -124,7 +164,7 @@ def select_implementations(root: IRNode, ctx: PlanContext,
     if registry is None:
         registry = get_default_physical_registry()
     if selector is None:
-        selector = FlagBasedSelector()
+        selector = get_implementation_selector(ctx.implementation_selector)
 
     for op in topological_iterator(root):
         bind_op(op, ctx, registry=registry, selector=selector)

@@ -20,13 +20,28 @@ def _env_int(name, default=0):
     return int(v) if v is not None else int(default)
 
 
-#: IR levels the optimizer can print a linear plan for, in pipeline order:
+#: IR levels the optimizer can print a linear plan for:
 #: ``logical`` (after logical rewrites), ``physical`` (after lowering) and
-#: ``physical_impl`` (after implementation selection -- the executable plan).
+#: ``physical_impl`` (after implementation selection, i.e.,  the executable plan).
 EXPLAIN_LEVELS = ("logical", "physical", "physical_impl")
+IMPLEMENTATION_SELECTOR_MODES = ("default",)
 
 
-def _normalize_explain(value) -> tuple[str, ...]:
+def _read_implementation_selector(value: str) -> str:
+    """Read and validate the configured implementation-selector mode."""
+    if not isinstance(value, str):
+        raise ValueError(
+            "implementation_selector must be one of "
+            f"{list(IMPLEMENTATION_SELECTOR_MODES)}, got {value!r}.")
+    mode = value.strip().lower()
+    if mode not in IMPLEMENTATION_SELECTOR_MODES:
+        raise ValueError(
+            "Invalid implementation_selector "
+            f"{value!r}; valid modes are {list(IMPLEMENTATION_SELECTOR_MODES)}.")
+    return mode
+
+
+def _read_explain_levels(value) -> tuple[str, ...]:
     """Coerce the ``explain`` config into a tuple of IR levels to print.
 
     ``None``/``False`` -> off; ``True`` -> the executable plan only
@@ -44,6 +59,7 @@ def _normalize_explain(value) -> tuple[str, ...]:
     return levels
 
 
+# FIXME: Not all flags need environment variables, only the ones that are shared across backends
 @dataclass
 class _Flags:
     rust_backend: bool = _env_bool("SKRUB_RUST", False)
@@ -59,6 +75,8 @@ class _Flags:
     cse: bool = True
     DEBUG: bool = False
     force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
+    implementation_selector: str = _read_implementation_selector(
+        os.getenv("STRATUM_IMPLEMENTATION_SELECTOR", "default"))
     pandas_query: bool = _env_bool("STRATUM_PANDAS_QUERY", False)
     fast_dataops_convert: bool = True
     validate_dag: bool = True
@@ -90,7 +108,8 @@ def set_config(rust_backend: bool | None = None,
     make_map_op: bool = True,
     make_column_projection: bool = True,
     rechunk: bool = True,
-buffer_pool_memory_budget: int = 0
+    buffer_pool_memory_budget: int = 0,
+    implementation_selector: str = "default",
                ) -> None:
     """Runtime toggles (synced env for Rust to read).
 
@@ -134,13 +153,20 @@ buffer_pool_memory_budget: int = 0
             Enable/disable debug mode.
 
         force_polars: bool, default false
-            Force use of Polars instead of Pandas for dataframe operations.
+            Legacy frame-backend flag. It does not override the configured
+            implementation selector.
+
+        implementation_selector: str, default "default"
+            Implementation-selection policy. Only ``"default"`` is available
+            until additional selector strategies are implemented.
 
         pandas_query: bool, default false
             Evaluate MASK selections on the pandas backend via ``DataFrame.query()``
             when the predicate is expressible as a query string (no OperandLeaf / str
             accessor); otherwise fall back to boolean-mask indexing.
     """
+    implementation_selector = _read_implementation_selector(implementation_selector)
+
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
         os.environ["SKRUB_RUST"] = "1" if FLAGS.rust_backend else "0"
@@ -164,10 +190,11 @@ buffer_pool_memory_budget: int = 0
     if DEBUG is not None:
         FLAGS.DEBUG = bool(DEBUG)
         os.environ["STRATUM_DEBUG"] = "1" if FLAGS.DEBUG else "0"
-    #FIXME: This is a temporary flag. Remove once we have the operator selector.
     if force_polars is not None:
         FLAGS.force_polars = bool(force_polars)
         os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
+    FLAGS.implementation_selector = implementation_selector
+    os.environ["STRATUM_IMPLEMENTATION_SELECTOR"] = implementation_selector
     FLAGS.pandas_query = bool(pandas_query)
     os.environ["STRATUM_PANDAS_QUERY"] = "1" if FLAGS.pandas_query else "0"
     # TODO: Select between multiple schedulers in the future.
@@ -176,7 +203,7 @@ buffer_pool_memory_budget: int = 0
     FLAGS.debug_graph = bool(debug_graph)
     FLAGS.open_graph = bool(open_graph)
     FLAGS.buffer_pool_memory_budget = int(buffer_pool_memory_budget)
-    FLAGS.explain = _normalize_explain(explain)
+    FLAGS.explain = _read_explain_levels(explain)
     FLAGS.make_selection_op = bool(make_selection_op)
     FLAGS.make_map_op = bool(make_map_op)
     FLAGS.make_column_projection = bool(make_column_projection)

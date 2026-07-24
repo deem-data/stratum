@@ -41,6 +41,9 @@ class PlanContext:
         Legacy soft kill-switch for non-sklearn backends; gates Rust selection
         together with ``rust_backend`` to preserve the pre-registry semantics
         (``allow_patch and rust_backend``).
+    implementation_selector:
+        Name of the implementation-selection policy to use during physical
+        planning.
     """
 
     backend: str
@@ -49,6 +52,7 @@ class PlanContext:
     parallelism: int
     rust_backend: bool
     allow_patch: bool
+    implementation_selector: str = "default"
 
     @property
     def is_polars(self) -> bool:
@@ -68,4 +72,5 @@ class PlanContext:
             parallelism=os.cpu_count(),
             rust_backend=bool(FLAGS.rust_backend),
             allow_patch=bool(FLAGS.allow_patch),
+            implementation_selector=FLAGS.implementation_selector,
         )

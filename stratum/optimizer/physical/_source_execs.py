@@ -19,7 +19,7 @@ from stratum.optimizer.ir._base import (OperandRef, OutputType, _resolve_args,
 from stratum.optimizer.ir._source_ops import DataSourceOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._lowering import lowering_rule
-from stratum.optimizer.physical._registry import OperatorFamily, physical_impl
+from stratum.optimizer.physical._registry import physical_impl
 
 
 def rechunk_pl_frame(df, rows_per_chunk=128_000):
@@ -114,8 +114,8 @@ class NumpyLoad(FileReadOp):
         return np.load(file_path, *read_args, **read_kwargs)
 
 
-# Registered as its own implementation so the catalog lists it; selection is a
-# no-op (the class is already concrete and backend-agnostic).
+# Registered as its own implementation so the default registry includes it;
+# selection is a no-op (the class is already concrete and backend-agnostic).
 physical_impl(of=NumpyLoad, backend="numpy", input_format="value",
               output_format="matrix")(NumpyLoad)
 
