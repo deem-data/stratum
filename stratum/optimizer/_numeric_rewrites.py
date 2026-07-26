@@ -164,6 +164,23 @@ _replace_with_log1p = make_replace_two_op_chain_root_safe(
     lambda: NumericOp(inputs=[], outputs=[], type=NumericOpType.LOG1P)
 )
 
+def match_self_subtract(op):
+    """Match ``x - x`` where both operands reference the same input.
+
+    The SUBTRACT must be var-var (``opt_operand is not None``) and both the
+    primary operand and the referenced operand must resolve to the same op.
+    """
+    if not isinstance(op, NumericOp):
+        return None
+    if op.type is not NumericOpType.SUBTRACT:
+        return None
+    if op.opt_operand is None:
+        return None
+    if op.inputs[0] is op.inputs[op.opt_operand.k]:
+        return (op,)
+    return None
+
+
 eliminate_log_exp = rewrite_pass(
     match_two_op_chain(NumericOp, NumericOpType.LOG, NumericOpType.EXP),
     eliminate_two_op_chain_root_safe,
@@ -232,3 +249,8 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+eliminate_self_subtract = rewrite_pass(
+    match_self_subtract,
+    fold_to_zero,
+)

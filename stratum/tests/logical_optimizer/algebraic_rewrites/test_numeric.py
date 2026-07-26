@@ -655,5 +655,75 @@ class TestCSE(unittest.TestCase):
             algebraic_rewrite_config=AlgebraicRewritesConfig(pow_zero=False),
         )
         out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)  # log(exp(x)) still eliminated
+        self.assertEqual(out[0].value, 1)
+
+    # --- self-subtract annihilator ---------------------------------------
+
+    def test_self_subtract_annihilates_to_zero(self):
+        """x - x  →  0"""
+        df = st.as_data_op(5)
+        t1 = df - df
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 0)
+
+    def test_self_subtract_with_trailing_op(self):
+        """(x - x) + 3  →  0 + 3"""
+        df = st.as_data_op(5)
+        t1 = df - df
+        t2 = t1 + 3
+
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0].value, 0.0)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.ADD)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 3)
+
+    def test_self_subtract_root_safe(self):
+        """When x - x is the root, DAG must not break."""
+        value = st.as_data_op(7)
+        root = value - value
+
+        out, *_ = optimize(root)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 0)
+
+    def test_self_subtract_disabled(self):
+        """Disabling self_subtract must leave x - x untouched."""
+        df = st.as_data_op(5)
+        t1 = df - df
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(self_subtract=False),
+        )
+        out, *_ = optimize(t1, config=config)
+        self.assertEqual(len(out), 2)
+
+    def test_no_rewrite_x_minus_y_different_values(self):
+        """x - y with different values must NOT be rewritten."""
+        x = st.as_data_op(5)
+        y = st.as_data_op(3)
+        t1 = x - y
+        t2 = t1 + 1
+
+        out, *_ = optimize(t2)
+        subtract_ops = [op for op in out if isinstance(op, NumericOp) and op.type == NumericOpType.SUBTRACT]
+        self.assertEqual(len(subtract_ops), 1)
+
+    def test_disable_self_subtract_does_not_affect_log_exp(self):
+        """Disabling self_subtract must not suppress other rewrites."""
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(self_subtract=False),
+        )
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
