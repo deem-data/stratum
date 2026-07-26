@@ -121,8 +121,13 @@ class SearchTest(RuntimeTest):
         out = stdout.getvalue()
         out = out.split("\n")
         self.assertIn("Heavy hitters", out[2])
+        # Header exposes the runtime-distribution column.
+        self.assertIn("%", out[4])
+        # Row: Op, Count, Time, %  (the lambda sleeps 10x so it dominates).
         self.assertIn("CallOp(<lambda>)", out[5])
-        assert(out[5].split(" ")[-1] == "10")
+        fields = out[5].split()
+        self.assertEqual(fields[1], "10")          # invocation count
+        self.assertTrue(fields[-1].endswith("%"))  # share of total runtime
 
 
     def test_fused_attr(self):

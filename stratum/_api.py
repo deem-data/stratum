@@ -46,9 +46,17 @@ def stats_printer(sched: SequentialScheduler):
         table = table.groupby("Op").aggregate(["sum", "count"])
         table.columns = ["Time", "Count"]
         table = table.reset_index().sort_values(by="Time", ascending=False)
+        # Share of total DataOp evaluation time, so heavy hitters stand out
+        # relative to the whole run rather than only by absolute seconds.
+        total_time = table["Time"].sum()
+        table["%"] = 100 * table["Time"] / total_time if total_time else 0.0
+        table = table[["Op", "Count", "Time", "%"]]
         print("\n" + "=" * 80)
         print(f"Heavy hitters (sorted by time spent in DataOp evaluation):\n")
-        print(table.head(FLAGS.stats_top_k).to_string(index=False))
+        print(table.head(FLAGS.stats_top_k).to_string(
+            index=False,
+            formatters={"Time": "{:.4f}".format, "%": "{:.1f}%".format},
+        ))
         print("=" * 80)
         print("Total BufferPool overhead during execution:", sched.buffer_pool_overhead)
         print("=" * 80 + "\n")
