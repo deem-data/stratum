@@ -1,0 +1,4 @@
+  DataSourceOp(Frame)
+    → [NumericOp]
+  NumericOp(abs)
+    ← [DataSourceOp]

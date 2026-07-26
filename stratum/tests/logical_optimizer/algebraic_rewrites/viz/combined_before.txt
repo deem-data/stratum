@@ -1,0 +1,19 @@
+  DataSourceOp(Frame)
+    → [NumericOp]
+  NumericOp(log)
+    ← [DataSourceOp]
+    → [NumericOp]
+  NumericOp(exp)
+    ← [NumericOp]
+    → [NumericOp]
+  NumericOp(multiply)
+    ← [NumericOp]
+    → [NumericOp]
+  NumericOp(add)
+    ← [NumericOp]
+    → [NumericOp]
+  NumericOp(square)
+    ← [NumericOp]
+    → [NumericOp]
+  NumericOp(sqrt)
+    ← [NumericOp]
