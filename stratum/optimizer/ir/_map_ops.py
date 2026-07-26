@@ -26,6 +26,7 @@ from stratum.optimizer.ir._ops import (CallOp, MethodCallOp, Op, OperandRef,
 MISSING_METHODS = ("isna", "isnull", "notna", "notnull")
 POSITIVE_MISSING_METHODS = ("isna", "isnull")
 MISSING_FUNCTIONS = (pd.isna, pd.isnull, pd.notna, pd.notnull)
+POSITIVE_MISSING_FUNCTIONS = (pd.isna, pd.isnull)
 
 
 class MapOp(Op):
@@ -137,10 +138,7 @@ def make_assign_map_op(op: MethodCallOp) -> AssignMapOp | None:
     return new_op
 
 
-def _make_method_missing_mask_op(
-    op: MethodCallOp,
-    positive: bool,
-) -> MissingMaskOp | None:
+def _make_method_missing_mask_op(op: MethodCallOp, positive: bool) -> MissingMaskOp | None:
     """Build a mask from a bound call such as ``series.isna()``.
 
     The object before the method is stored as the call's only input.
@@ -148,14 +146,12 @@ def _make_method_missing_mask_op(
     if op.args or op.kwargs or len(op.inputs) != 1:
         return None
 
-    new_op = MissingMaskOp(
-        positive=positive, inputs=[op.inputs[0]], outputs=list(op.outputs))
+    new_op = MissingMaskOp(positive=positive, inputs=[op.inputs[0]], outputs=list(op.outputs))
     op.replace_output_of_inputs(new_op)
     return new_op
 
 
-def _make_call_missing_mask_op(
-        op: CallOp, positive: bool) -> MissingMaskOp | None:
+def _make_call_missing_mask_op(op: CallOp, positive: bool) -> MissingMaskOp | None:
     """Build a missing mask from ``pd.isna(obj)`` or ``pd.isna(obj=obj)``."""
     args = tuple(op.args or ())
     kwargs = dict(op.kwargs or {})
@@ -170,17 +166,12 @@ def _make_call_missing_mask_op(
     if not isinstance(operand_ref, OperandRef):
         return None
 
-    new_op = MissingMaskOp(
-        positive=positive,
-        inputs=[op.inputs[operand_ref.k]],
-        outputs=list(op.outputs),
-    )
+    new_op = MissingMaskOp(positive=positive, inputs=[op.inputs[operand_ref.k]], outputs=list(op.outputs))
     op.replace_output_of_inputs(new_op)
     return new_op
 
 
-def make_missing_mask_op(
-        op: MethodCallOp | CallOp) -> MissingMaskOp | None:
+def make_missing_mask_op(op: MethodCallOp | CallOp) -> MissingMaskOp | None:
     """Extract bound-method and standalone pandas missing-value calls."""
     if isinstance(op, MethodCallOp):
         method_name = op.method_name
@@ -192,11 +183,7 @@ def make_missing_mask_op(
     if isinstance(op, CallOp):
         if op.func not in MISSING_FUNCTIONS:
             return None
-        if op.func in (pd.isna, pd.isnull):
-            method_name = "isna"
-        else:
-            method_name = "notna"
-        positive = method_name in POSITIVE_MISSING_METHODS
+        positive = op.func in POSITIVE_MISSING_FUNCTIONS
         return _make_call_missing_mask_op(op, positive)
 
     return None

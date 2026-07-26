@@ -45,6 +45,7 @@ class PolarsAssignMapOp(AssignMapOp, PhysicalOp):
         # broadcasting the latter just like pandas.DataFrame.assign.
         return ctx.frame.with_columns(**columns)
 
+
 # Polars treats native NaN values separately from null values.
 @physical_impl(of=MissingMaskOp, backend="pandas")
 class PandasMissingMaskOp(MissingMaskOp, PhysicalOp):

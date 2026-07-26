@@ -250,23 +250,18 @@ class UnaryOpExpr(ColumnExpr):
 class MissingMaskExpr(ColumnExpr):
     """Missing-value-mask predicate applied to a frame-like object expression."""
 
-    __slots__ = ("operand", "method", "positive")
+    __slots__ = ("operand", "positive")
 
-    def __init__(self, operand: ColumnExpr, method: str):
+    def __init__(self, operand: ColumnExpr, positive: bool):
         self.operand = operand
-        self.method = method
-        if method in ("isnull", "isna"):
-            self.positive = True
-        elif method in ("notnull", "notna"):
-            self.positive = False
-        else:
-            raise ValueError(f"Unsupported missing-value method: {method!r}")
+        self.positive = positive
 
     def _key(self):
-        return (self.operand, self.method)
+        return (self.operand, self.positive)
 
     def __repr__(self):
-        return f"{self.method}({self.operand!r})"
+        name = "isnull" if self.positive else "notnull"
+        return f"{name}({self.operand!r})"
 
     def to_pandas(self, ctx):
         obj = self.operand.to_pandas(ctx)
@@ -283,7 +278,7 @@ class MissingMaskExpr(ColumnExpr):
 
     def remap_operand_refs(self, mapping):
         return MissingMaskExpr(
-            self.operand.remap_operand_refs(mapping), self.method)
+            self.operand.remap_operand_refs(mapping), self.positive)
 
 
 class StrExpr(ColumnExpr):
@@ -591,8 +586,7 @@ class _Folder:
             return DtExpr(operand, node.attr_name[1])
         if isinstance(node, MissingMaskOp):
             operand = self._resolve(node.inputs[0], absorbable, memo)
-            method = "isnull" if node.positive else "notnull"
-            return MissingMaskExpr(operand, method)
+            return MissingMaskExpr(operand, node.positive)
         raise AssertionError(f"unfoldable node reached _make_expr: {node!r}")
 
     def _operand(self, operand, parent: Op, absorbable: set[int],
