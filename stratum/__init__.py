@@ -26,11 +26,13 @@ __skrub_version__ = _dist_version("skrub")
 # Expose our subclasses under the same names
 from .adapters.string_encoder import RustyStringEncoder as StringEncoder
 from .adapters.one_hot_encoder import RustyOneHotEncoder as OneHotEncoder
+from .adapters.elastic_net import RustyElasticNet as ElasticNet
 
 # __all__ passthrough. Keep __all__ minimal
 __all__ = [
     "StringEncoder",
     "OneHotEncoder",
+    "ElasticNet",
     "config",
     "__version__",
     "__skrub_version__",
