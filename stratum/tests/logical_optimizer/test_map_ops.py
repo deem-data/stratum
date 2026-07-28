@@ -419,9 +419,10 @@ def test_datetime_unsupported_kwargs_preserved(polars, values, kwargs, expected)
     assert expected == [pd.Timestamp(value) for value in result["parsed"]]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="TODO: DatetimeExpr.to_polars only supports string operands")
+# FIXME: Fix this test
+#@pytest.mark.xfail(
+#    strict=True,
+#    reason="TODO: DatetimeExpr.to_polars only supports string operands")
 def test_datetime_conversion_existing_datetime_polars():
     df = pd.DataFrame({"ts": pd.to_datetime(["2020-01-01", "2021-02-03"])})
     src = st.as_data_op(df)

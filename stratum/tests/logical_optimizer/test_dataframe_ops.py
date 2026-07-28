@@ -15,6 +15,7 @@ from stratum._config import FLAGS
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.ir._dataframe_ops import ConcatOp
 from stratum.optimizer.ir._ops import OperandRef, OutputType, Op
+from stratum.optimizer.physical import FlagBasedSelector
 from stratum.optimizer.physical._impl_selection import bind_op
 from stratum.optimizer.physical._plan_context import PlanContext
 
@@ -46,7 +47,7 @@ def run_op(op, *values, mode="fit_transform"):
     each test having to construct the concrete class itself.
     """
     op.inputs = [_inp(v) for v in values]
-    bind_op(op, PlanContext.from_flags())
+    bind_op(op, PlanContext.from_flags(), selector=FlagBasedSelector())
     return op.process(mode, _inputs_for(op))
 
 
