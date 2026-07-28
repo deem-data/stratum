@@ -23,8 +23,23 @@ def _matches_scalar_const(op, const, reversed=None):
     )
 
 
-def match_two_op_chain(op_cls, type1, type2, *, match1=None, match2=None):
-    """Match a typed two-op chain with optional per-operation predicates."""
+def match_two_op_chain(op_cls, type1, type2, *, match1=None, match2=None,
+                       innermost_first=False):
+    """Match a typed two-op chain with optional per-operation predicates.
+
+    ``innermost_first`` guards self-inverse chains that are collapsed by
+    *elimination* (``eliminate_two_op_chain``): if op1's own input is already a
+    matching op, the match is declined so the inner pair collapses first. Without
+    it, an odd-length chain (n >= 3) matches an overlapping pair and the action
+    rewires through a node the pass has already detached, so
+    ``topological_iterator`` raises "Encountered op ... which should not exist in
+    the DAG".
+
+    Left ``False`` by default: rewrites using a *replacement* action
+    (``make_replace_two_op_chain_root_safe``, e.g. ``abs(abs(x)) -> abs(x)``)
+    consume the chain outermost-first and would stop collapsing entirely under
+    this guard.
+    """
     def match(op1):
         if (
             isinstance(op1, op_cls)
@@ -32,6 +47,10 @@ def match_two_op_chain(op_cls, type1, type2, *, match1=None, match2=None):
             and len(op1.outputs) == 1
             and (match1 is None or match1(op1))
         ):
+            if innermost_first and op1.inputs:
+                inner = op1.inputs[0]
+                if isinstance(inner, op_cls) and inner.type is type1:
+                    return None  # not the innermost pair
             op2 = op1.outputs[0]
             if (
                 isinstance(op2, op_cls)
@@ -232,3 +251,15 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+
+# `neg(neg(x)) -> x`. NEGATIVE is a NumericOpType (this PR), so the pair is matched
+# with the shared `match_two_op_chain` helper, exactly like `abs(abs(x))`. Before
+# NEGATIVE was in the enum, `np.negative` fell through to GENERIC and matching it
+# needed two conditions (`type is GENERIC and func is np.negative`) plus a bespoke
+# `match_two_op_chain_by_func` helper; promoting it to the enum removes both.
+eliminate_neg_neg = rewrite_pass(
+    match_two_op_chain(NumericOp, NumericOpType.NEGATIVE, NumericOpType.NEGATIVE,
+                       innermost_first=True),
+    eliminate_two_op_chain_root_safe,
+)
