@@ -50,16 +50,28 @@ def print_timing(msg, start_time):
         print(f"[python] {msg}: {(end_time - start_time):8.3f}s")
 
 
-# pandas or polars series -> list (best-effort, minimal overhead)
+# Container -> list (best-effort, minimal overhead).
+# Prefer pandas/NumPy ``.tolist()`` and Polars ``.to_list()`` over generic
+# ``list(...)`` iteration, which is much slower for large Series/arrays.
 def _to_list(col):
-    try:
-        return col.tolist()
-    except Exception:
-        pass
-    try:
-        return col.to_list()
-    except Exception:
-        pass
+    if isinstance(col, list):
+        return list(col)
+    tolist = getattr(col, "tolist", None)
+    if callable(tolist):
+        try:
+            materialized = tolist()
+            if isinstance(materialized, list):
+                return materialized
+        except Exception:
+            pass
+    to_list = getattr(col, "to_list", None)
+    if callable(to_list):
+        try:
+            materialized = to_list()
+            if isinstance(materialized, list):
+                return materialized
+        except Exception:
+            pass
     return list(col)
 
 #---------------------------------------------
@@ -69,6 +81,11 @@ hashing_tfidf_fit = getattr(native, "hashing_tfidf_csr", None) if native else No
 hashing_tfidf_transform = getattr(native, "hashing_tfidf_csr_with_idf", None) if native else None
 tfidf_fit = getattr(native, "tfidf_fit_csr", None) if native else None
 tfidf_transform = getattr(native, "tfidf_transform_csr", None) if native else None
+tfidf_vectorizer_fit = getattr(native, "tfidf_vectorizer_fit", None) if native else None
+tfidf_vectorizer_transform = getattr(native, "tfidf_vectorizer_transform", None) if native else None
+TfidfVectorizerFallback = (
+    getattr(native, "TfidfVectorizerFallback", ()) if native else ()
+)
 fd_fit= getattr(native, "fd_fit_from_csr", None) if native else None
 fd_transform= getattr(native, "fd_transform_from_csr", None) if native else None
 truncated_svd_fit = getattr(native, "truncated_svd_fit_from_csr", None) if native else None

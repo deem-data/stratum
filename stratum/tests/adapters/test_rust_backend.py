@@ -346,3 +346,51 @@ class TestToList:
         result = _rust_backend._to_list(series)
         assert result == [1, 2, 3, 4, 5]
 
+    def test_to_list_falls_back_when_tolist_raises(self):
+        """Prefer to_list when tolist exists but fails."""
+        from stratum import _rust_backend
+
+        class TolistFails:
+            def tolist(self):
+                raise RuntimeError("tolist failed")
+
+            def to_list(self):
+                return ["via", "to_list"]
+
+            def __iter__(self):
+                raise AssertionError("list() iteration should not run")
+
+        assert _rust_backend._to_list(TolistFails()) == ["via", "to_list"]
+
+    def test_to_list_ignores_non_list_helper_results(self):
+        """Invalid scalar helper results preserve normal iteration errors."""
+        from stratum import _rust_backend
+
+        class ScalarTolist:
+            def tolist(self):
+                return "not a materialized document collection"
+
+            def to_list(self):
+                return 42
+
+            def __iter__(self):
+                raise TypeError("source is not iterable")
+
+        with pytest.raises(TypeError, match="source is not iterable"):
+            _rust_backend._to_list(ScalarTolist())
+
+    def test_to_list_falls_back_to_list_when_both_helpers_raise(self):
+        """Fall through to list() when tolist and to_list both fail."""
+        from stratum import _rust_backend
+
+        class BothFail:
+            def tolist(self):
+                raise RuntimeError("tolist failed")
+
+            def to_list(self):
+                raise RuntimeError("to_list failed")
+
+            def __iter__(self):
+                return iter(("a", "b"))
+
+        assert _rust_backend._to_list(BothFail()) == ["a", "b"]

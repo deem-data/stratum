@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use ndarray::{Array2, Axis};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+use pyo3::create_exception;
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedStr;
 use pyo3::types::{PyAny, PyIterator, PyList, PyModule};
-use pyo3::{PyErr, exceptions::PyValueError};
+use pyo3::PyErr;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
 use crate::threads::{get_thread_pool};
@@ -13,6 +16,7 @@ use crate::util::{start_timing, print_timing};
 mod tokenize;   //n-gram extraction for char/char_wb
 mod hashing;    //stable fast hashing to [0, n_features)
 mod tfidf;      //DF counting, IDF vector, TF*IDF, per-row L2 norm
+mod tfidf_vectorizer; //sklearn TfidfVectorizer (word analyzer, learned vocabulary)
 mod csr;
 mod fd;         //Frequent Directions
 mod truncated_svd;  //TruncatedSVD using randomized SVD
@@ -22,11 +26,18 @@ mod one_hot_encoder;
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
+create_exception!(_rust_backend_native, TfidfVectorizerFallback, PyException);
+
 // TODO (refactor): Move functions to corresponding modules
 // TODO (perf): Test with blas/mkl. Accordingly move from faer
 
 // ---- Global registry for models (TODO: Return pointer to Python) ----
 static TFIDF_MODELS: Lazy<Mutex<Vec<tfidf::TfidfModel>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[pyclass(frozen, module = "stratum._rust_backend_native")]
+struct RustTfidfVectorizerModel {
+    inner: Arc<tfidf_vectorizer::Model>,
+}
 
 struct TruncatedSvdModel {
     n_cols: usize,
@@ -61,6 +72,30 @@ fn to_pyerr(err: tfidf::Error) -> PyErr {
         Internal => "Internal error".to_string()
     };
     PyErr::new::<PyValueError, _>(msg)
+}
+
+fn tfidf_vectorizer_to_pyerr(err: tfidf_vectorizer::Error) -> PyErr {
+    use tfidf_vectorizer::Error::*;
+    let message = match err {
+        EmptyDocuments => "empty document collection",
+        EmptyVocabulary => "empty vocabulary; perhaps the documents only contain stop words",
+        NoTermsAfterPruning => {
+            "After pruning, no terms remain. Try a lower min_df or a higher max_df."
+        }
+        TooManyFeatures => {
+            return PyValueError::new_err(
+                "vocabulary size exceeds the i32 feature-index limit",
+            );
+        }
+        AmbiguousMaxFeatures => "ambiguous max_features tie requires sklearn fallback",
+        InvalidMaxFeatures => {
+            return PyValueError::new_err("max_features must be greater than zero");
+        }
+        DuplicateVocabularyTerm(term) => {
+            return PyValueError::new_err(format!("Duplicate term in vocabulary: {term:?}"));
+        }
+    };
+    TfidfVectorizerFallback::new_err(message)
 }
 
 // Helper: CSR × Omega matmul: X @ Ω -> Y
@@ -558,6 +593,200 @@ fn hashing_tfidf_csr_with_idf(
 
 }
 
+// ---- sklearn TfidfVectorizer (word analyzer) ----
+
+/// Borrow document strings from Python without copying into Rust `String`.
+fn extract_tfidf_documents(seq: &Bound<'_, PyAny>) -> PyResult<Vec<PyBackedStr>> {
+    if let Ok(list) = seq.cast::<PyList>() {
+        let mut documents = Vec::with_capacity(list.len());
+        for index in 0..list.len() {
+            documents.push(list.get_item(index)?.extract::<PyBackedStr>()?);
+        }
+        return Ok(documents);
+    }
+
+    let mut documents = Vec::new();
+    let iterator = PyIterator::from_object(seq)?;
+    for item in iterator {
+        documents.push(item?.extract::<PyBackedStr>()?);
+    }
+    Ok(documents)
+}
+
+fn ensure_ascii_tfidf_documents(documents: &[PyBackedStr]) -> PyResult<()> {
+    if documents.iter().all(|document| document.is_ascii()) {
+        return Ok(());
+    }
+    Err(TfidfVectorizerFallback::new_err(
+        "non-ASCII documents require sklearn fallback",
+    ))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[pyo3(signature = (
+    seq,
+    ngram_min,
+    ngram_max,
+    lowercase,
+    binary,
+    norm,
+    use_idf,
+    smooth_idf,
+    sublinear_tf,
+    min_document_count,
+    max_document_count,
+    max_features=None,
+    fixed_terms=None,
+    output_dtype="float64"
+))]
+fn tfidf_vectorizer_fit(
+    py: Python<'_>,
+    seq: Bound<PyAny>,
+    ngram_min: usize,
+    ngram_max: usize,
+    lowercase: bool,
+    binary: bool,
+    norm: &str,
+    use_idf: bool,
+    smooth_idf: bool,
+    sublinear_tf: bool,
+    min_document_count: f64,
+    max_document_count: f64,
+    max_features: Option<usize>,
+    fixed_terms: Option<Vec<String>>,
+    output_dtype: &str,
+) -> PyResult<(
+    Py<RustTfidfVectorizerModel>,
+    Py<PyArray1<f64>>,
+    Py<PyArray1<i32>>,
+    Py<PyArray1<i64>>,
+    usize,
+    usize,
+    Vec<String>,
+    Vec<i32>,
+    Py<PyArray1<f64>>,
+)> {
+    if ngram_min == 0 || ngram_min > ngram_max {
+        return Err(PyValueError::new_err("invalid ngram_range"));
+    }
+    if fixed_terms.is_none() && min_document_count > max_document_count {
+        return Err(PyValueError::new_err(
+            "max_df corresponds to < documents than min_df",
+        ));
+    }
+    if max_features == Some(0) {
+        return Err(PyValueError::new_err("max_features must be greater than zero"));
+    }
+
+    let norm = match norm {
+        "none" => tfidf_vectorizer::Norm::None,
+        "l1" => tfidf_vectorizer::Norm::L1,
+        "l2" => tfidf_vectorizer::Norm::L2,
+        _ => return Err(PyValueError::new_err("norm must be None, 'l1', or 'l2'")),
+    };
+    let output_dtype = match output_dtype {
+        "float32" => tfidf_vectorizer::OutputDtype::Float32,
+        "float64" => tfidf_vectorizer::OutputDtype::Float64,
+        _ => return Err(PyValueError::new_err("dtype must be float32 or float64")),
+    };
+
+    let t_extract = start_timing();
+    let documents = extract_tfidf_documents(&seq)?;
+    ensure_ascii_tfidf_documents(&documents)?;
+    print_timing("tv ffi_extract", t_extract);
+    let n_rows = documents.len();
+
+    let options = tfidf_vectorizer::Options {
+        nmin: ngram_min,
+        nmax: ngram_max,
+        lowercase,
+        binary,
+        norm,
+        use_idf,
+        smooth_idf,
+        sublinear_tf,
+        output_dtype,
+    };
+
+    // Heavy work without the GIL.
+    let output = py
+        .detach(|| {
+            tfidf_vectorizer::fit(
+                &documents,
+                options,
+                fixed_terms,
+                min_document_count,
+                max_document_count,
+                max_features,
+            )
+        })
+        .map_err(tfidf_vectorizer_to_pyerr)?;
+
+    let n_cols = output.model.n_features();
+    let terms = output.model.terms().to_vec();
+    let idf = output.model.idf().to_vec();
+    let vocabulary_order = output.vocabulary_order;
+    let model = Py::new(py, RustTfidfVectorizerModel { inner: output.model })?;
+    let t_numpy = start_timing();
+    let py_data = PyArray1::<f64>::from_vec(py, output.data).to_owned();
+    let py_indices = PyArray1::<i32>::from_vec(py, output.indices).to_owned();
+    let py_indptr = PyArray1::<i64>::from_vec(py, output.indptr).to_owned();
+    let py_idf = PyArray1::<f64>::from_vec(py, idf).to_owned();
+    print_timing("tv numpy_handoff", t_numpy);
+
+    Ok((
+        model,
+        Py::from(py_data),
+        Py::from(py_indices),
+        Py::from(py_indptr),
+        n_rows,
+        n_cols,
+        terms,
+        vocabulary_order,
+        Py::from(py_idf),
+    ))
+}
+
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+#[pyo3(signature = (model, seq))]
+fn tfidf_vectorizer_transform(
+    py: Python<'_>,
+    model: PyRef<'_, RustTfidfVectorizerModel>,
+    seq: Bound<PyAny>,
+) -> PyResult<(
+    Py<PyArray1<f64>>,
+    Py<PyArray1<i32>>,
+    Py<PyArray1<i64>>,
+    usize,
+    usize,
+)> {
+    let t_extract = start_timing();
+    let documents = extract_tfidf_documents(&seq)?;
+    ensure_ascii_tfidf_documents(&documents)?;
+    print_timing("tv ffi_extract", t_extract);
+    let n_rows = documents.len();
+    let model = Arc::clone(&model.inner);
+    let n_cols = model.n_features();
+
+    // Heavy work without the GIL.
+    let (data, indices, indptr) = py.detach(|| model.transform(&documents));
+    let t_numpy = start_timing();
+    let py_data = PyArray1::<f64>::from_vec(py, data).to_owned();
+    let py_indices = PyArray1::<i32>::from_vec(py, indices).to_owned();
+    let py_indptr = PyArray1::<i64>::from_vec(py, indptr).to_owned();
+    print_timing("tv numpy_handoff", t_numpy);
+
+    Ok((
+        Py::from(py_data),
+        Py::from(py_indices),
+        Py::from(py_indptr),
+        n_rows,
+        n_cols,
+    ))
+}
+
 // ---- Fit TF-IDF vocabulary + return CSR ----
 #[pyfunction]
 #[pyo3(signature = (seq, analyzer, ngram_min, ngram_max))]
@@ -656,7 +885,7 @@ fn tfidf_transform_csr(
 
 // ---- Expose module ----
 #[pymodule]
-fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
+fn _rust_backend_native(py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hashing_tfidf_csr, m)?)?;
     m.add_function(wrap_pyfunction!(hashing_tfidf_csr_with_idf, m)?)?;
     m.add_function(wrap_pyfunction!(fd_fit_from_csr, m)?)?;
@@ -667,5 +896,12 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_hot_encoder::csr_to_dense, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_fit_csr, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_transform_csr, m)?)?;
+    m.add_function(wrap_pyfunction!(tfidf_vectorizer_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(tfidf_vectorizer_transform, m)?)?;
+    m.add_class::<RustTfidfVectorizerModel>()?;
+    m.add(
+        "TfidfVectorizerFallback",
+        py.get_type::<TfidfVectorizerFallback>(),
+    )?;
     Ok(())
 }

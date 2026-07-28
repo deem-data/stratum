@@ -3,6 +3,10 @@
 Rust estimator implementations are registered with the physical operator
 registry. They are no longer installed by replacing upstream skrub or sklearn
 classes at import time.
+
+TfidfVectorizer is an exception: it is a sklearn class used directly by
+skrub (e.g. StringEncoder) and by user pipelines, so we still swap in the
+Rusty adapter at import time.
 """
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ import threading
 from types import ModuleType
 from typing import Dict, Tuple, List
 
+from stratum.adapters.tfidf_vectorizer import RustyTfidfVectorizer
 from stratum.patching._gridsearch import make_grid_search as StratumMakeGridSearch
 
 # ------------------------
@@ -18,6 +23,7 @@ from stratum.patching._gridsearch import make_grid_search as StratumMakeGridSear
 # ------------------------
 # Definition: (module, symbol) -> adapter
 _DEFINITION_REPLACEMENTS: Dict[Tuple[str, str], object] = {
+    ("sklearn.feature_extraction.text", "TfidfVectorizer"): RustyTfidfVectorizer,
 }
 
 # Method-level replacements (for methods on classes)
@@ -29,11 +35,13 @@ _METHOD_REPLACEMENTS: Dict[Tuple[str, str, str], object] = {
 # Replace/override names in these upstream usage modules if present.
 # Keep this list manually maintained. Add to it if skrub adds new direct imports.
 _USAGE_MODULES: List[str] = [
+    "skrub._string_encoder",  # imports TfidfVectorizer directly
 ]
 
 # Symbol-level overrides for usage modules and top-level exposure on `skrub`
 # (symbol name) -> adapter
 _SYMBOL_OVERRIDES: Dict[str, object] = {
+    "TfidfVectorizer": RustyTfidfVectorizer,
 }
 
 # Idempotence sentinel + lock
