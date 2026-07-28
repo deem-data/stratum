@@ -1,3 +1,5 @@
+import numbers
+
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
 from stratum.optimizer.ir._ops import Op, ValueOp
@@ -9,8 +11,14 @@ def _is_scalar_const(value) -> bool:
     Guards against ndarray constants (e.g. ``df * np.array([...])``), whose
     ``== const`` yields an array and raises "truth value of an array is
     ambiguous" when used in a boolean context.
+
+    ``numbers.Real`` rather than ``(int, float)`` so numpy scalars match too:
+    ``df ** np.int64(1)`` keeps its exponent as ``np.int64``, which is not an
+    ``int`` subclass and would otherwise skip every identity rewrite. (``np.float64``
+    *is* a ``float`` subclass, so only the integer types were affected.) ``Real``
+    still excludes ndarray and ``complex``, which is what the guard is for.
     """
-    return isinstance(value, (int, float))
+    return isinstance(value, numbers.Real)
 
 
 def _matches_scalar_const(op, const, reversed=None):
@@ -220,6 +228,16 @@ eliminate_any_mul_zero = rewrite_pass(
 eliminate_pow_zero = rewrite_pass(
     match_identity_operation(NumericOp, NumericOpType.POW, 0, reversed=False),
     fold_to_one,
+)
+
+# `x ** 1 -> x`. Matched as a first-class identity on `NumericOpType.POW`, reusing the
+# same helper as `x * 1` / `x / 1`. An earlier version of this rewrite matched a raw
+# `BinOp` with `operator.pow` because POW was not yet a NumericOpType; once #135 added
+# it, `x ** 1` lowers to `NumericOp(POW, constant=1)` and the BinOp matcher stopped
+# firing. `reversed=False` keeps `1 ** x` (which is 1, not x) untouched.
+eliminate_pow_by_one = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.POW, 1, reversed=False),
+    eliminate_single_op_chain_root_safe,
 )
 
 # TODO(dtype): unlike the other identity rewrites (`x*1`, `x+0`, `x-0`), dropping

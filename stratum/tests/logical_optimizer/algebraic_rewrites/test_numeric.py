@@ -636,12 +636,20 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(t1)
         self.assertEqual(len(out), 2)
 
-    def test_pow_one_untouched(self):
-        """x ** 1 must not be affected (identity, not annihilator)."""
+    def test_pow_one_untouched_by_pow_zero(self):
+        """x ** 1 is an identity, not an annihilator: `pow_zero` must not touch it.
+
+        `pow_by_one` *does* eliminate it (see TestPowByOne), so this test disables
+        that rewrite to isolate `pow_zero`'s behaviour.
+        """
         df = st.as_data_op(5)
         t1 = df ** 1
 
-        out, *_ = optimize(t1)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(pow_by_one=False),
+        )
+        out, *_ = optimize(t1, config=config)
         self.assertEqual(len(out), 2)
 
     def test_disable_pow_zero_does_not_affect_log_exp(self):
@@ -655,5 +663,152 @@ class TestCSE(unittest.TestCase):
             algebraic_rewrite_config=AlgebraicRewritesConfig(pow_zero=False),
         )
         out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 1)
+
+
+class TestPowByOne(unittest.TestCase):
+    """`x ** 1 -> x`, matched on NumericOpType.POW.
+
+    An earlier version matched a raw `BinOp` with `operator.pow`, because POW was
+    not a NumericOpType yet. Once #135 added POW, `x ** 1` lowered to
+    `NumericOp(POW, constant=1)` and that matcher stopped firing; these tests pin
+    the current representation so a future IR change fails loudly instead of
+    silently disabling the rewrite.
+    """
+
+    def test_pow_by_one_eliminated(self):
+        """x ** 1  ->  x"""
+        df = st.as_data_op(5)
+        t1 = df ** 1
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 5)
+
+    def test_pow_by_one_lowers_to_numeric_pow(self):
+        """Pin the representation the matcher depends on: `x ** 1` must become a
+        NumericOp(POW) with a scalar constant, not a raw BinOp."""
+        df = st.as_data_op(5)
+        t1 = df ** 1
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(pow_by_one=False),
+        )
+        out, *_ = optimize(t1, config=config)
+        pow_op = out[-1]
+        self.assertIsInstance(pow_op, NumericOp)
+        self.assertIs(pow_op.type, NumericOpType.POW)
+        self.assertEqual(pow_op.constant, 1)
+        self.assertFalse(pow_op.reversed)
+
+    def test_pow_by_numpy_int_exponent(self):
+        """`df ** np.int64(1)` must be eliminated too.
+
+        np.int64 is not an `int` subclass, so the old `isinstance(value, (int, float))`
+        guard skipped it and the rewrite silently did not fire.
+        """
+        df = st.as_data_op(5)
+        t1 = df ** np.int64(1)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 5)
+
+    def test_pow_by_numpy_float_exponent(self):
+        """`df ** np.float64(1.0)` must be eliminated (np.float64 *is* a float
+        subclass, so this worked before too -- pinned to prevent regressions)."""
+        df = st.as_data_op(5)
+        t1 = df ** np.float64(1.0)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 5)
+
+    def test_div_by_numpy_int_one(self):
+        """`_is_scalar_const` is shared, so widening it to numbers.Real also fixes
+        `x / np.int64(1)`, which previously did not fire."""
+        df = st.as_data_op(6)
+        t1 = df / np.int64(1)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 6)
+
+    def test_mul_by_numpy_int_one(self):
+        """Same shared-helper fix for `x * np.int64(1)`."""
+        df = st.as_data_op(6)
+        t1 = df * np.int64(1)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 6)
+
+    def test_pow_by_one_with_trailing_op(self):
+        """(x ** 1) + 3  ->  x + 3"""
+        df = st.as_data_op(5)
+        t1 = (df ** 1) + 3
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 8)
+
+    def test_pow_by_one_root_safe(self):
+        """When x ** 1 is the root, the DAG must not break."""
+        value = st.as_data_op(7)
+        root = value ** 1
+
+        out, *_ = optimize(root)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 7)
+
+    def test_pow_by_one_disabled(self):
+        """Disabling pow_by_one must leave x ** 1 untouched."""
+        df = st.as_data_op(5)
+        t1 = df ** 1
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(pow_by_one=False),
+        )
+        out, *_ = optimize(t1, config=config)
+        self.assertEqual(len(out), 2)
+
+    def test_pow_by_two_untouched(self):
+        """x ** 2 is not an identity and must survive."""
+        df = st.as_data_op(5)
+        t1 = df ** 2
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+
+    def test_one_pow_x_untouched(self):
+        """`1 ** x` is 1, not x: the reversed=False guard must reject it."""
+        df = st.as_data_op(5)
+        t1 = 1 ** df
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+
+    def test_no_crash_pow_by_ndarray_constant(self):
+        """`df ** ndarray` must neither crash nor rewrite: numbers.Real still
+        excludes ndarray, so the ambiguous-truth-value guard is preserved."""
+        df = st.as_data_op(np.array([6.0, 8.0]))
+        t1 = df ** np.array([1.0, 1.0])
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)                        # ValueOp + POW survive
+
+    def test_disable_pow_by_one_does_not_affect_pow_zero(self):
+        """The two pow rewrites are independent."""
+        df = st.as_data_op(5)
+        t1 = df ** 0
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(pow_by_one=False),
+        )
+        out, *_ = optimize(t1, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
