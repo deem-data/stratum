@@ -43,7 +43,8 @@ class PlanContext:
         (``allow_patch and rust_backend``).
     implementation_selector:
         Name of the implementation-selection policy to use during physical
-        planning.
+        planning: ``"default"`` (pandas/sklearn-skrub-first) or ``"greedy"``
+        (rust/polars-first).
     """
 
     backend: str

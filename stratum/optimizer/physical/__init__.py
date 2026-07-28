@@ -17,6 +17,7 @@ from ._lowering import lower_to_physical, lowering_rule
 from ._impl_selection import (
     DefaultImplementationSelector,
     FlagBasedSelector,
+    GreedyImplementationSelector,
     ImplementationSelector,
     get_implementation_selector,
     select_implementations,
@@ -25,6 +26,7 @@ from ._impl_selection import (
 __all__ = [
     "DefaultImplementationSelector",
     "FlagBasedSelector",
+    "GreedyImplementationSelector",
     "ImplementationSelector",
     "get_implementation_selector",
     "PhysicalImpl",

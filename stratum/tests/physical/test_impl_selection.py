@@ -19,6 +19,7 @@ from stratum.optimizer.ir._ops import TransformerOp
 from stratum.optimizer.physical._impl_selection import (
     DefaultImplementationSelector,
     FlagBasedSelector,
+    GreedyImplementationSelector,
     get_implementation_selector,
     select_implementations,
 )
@@ -27,7 +28,11 @@ from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry,
                                                   _current_process_execute,
                                                   _placeholder_cost,
-                                                  _placeholder_exec_mem)
+                                                  _placeholder_exec_mem,
+                                                  get_default_physical_registry)
+from stratum.optimizer.physical._source_execs import (InMemoryFrame,
+                                                       PandasInMemoryFrame,
+                                                       PolarsInMemoryFrame)
 from stratum.optimizer.physical._transform_execs import StringEncoderOp
 from stratum.optimizer.ir._ops import Op, ValueOp
 
@@ -109,6 +114,114 @@ class TestDefaultImplementationSelector(unittest.TestCase):
         self.assertIsNone(selector.choose(DummyOp(), [], _ctx()))
 
 
+class TestGreedyImplementationSelector(unittest.TestCase):
+    def test_greedy_selector_is_configurable_and_snapshotted(self):
+        with st.config(implementation_selector="greedy"):
+            self.assertEqual(
+                "greedy", PlanContext.from_flags().implementation_selector)
+            self.assertIsInstance(
+                get_implementation_selector("greedy"),
+                GreedyImplementationSelector)
+
+    def test_preference_order_is_independent_of_plan_backend(self):
+        selector = GreedyImplementationSelector()
+        pandas = _impl(DummyOp, "pandas")
+        polars = _impl(DummyOp, "polars")
+        sklearn = _impl(DummyOp, "sklearn-skrub")
+        numpy = _impl(DummyOp, "numpy")
+        rust = _impl(DummyOp, "rust")
+
+        self.assertIs(rust, selector.choose(
+            DummyOp(), [pandas, sklearn, numpy, polars, rust], _ctx("pandas")))
+        self.assertIs(polars, selector.choose(
+            DummyOp(), [pandas, sklearn, numpy, polars], _ctx()))
+        self.assertIs(numpy, selector.choose(
+            DummyOp(), [pandas, sklearn, numpy], _ctx()))
+        self.assertIs(sklearn, selector.choose(
+            DummyOp(), [pandas, sklearn], _ctx()))
+
+    def test_falls_back_to_first_supported_candidate(self):
+        selector = GreedyImplementationSelector()
+        other_a = _impl(DummyOp, "some-other-backend")
+        other_b = _impl(DummyOp, "yet-another-backend")
+        self.assertIs(other_a, selector.choose(DummyOp(), [other_a, other_b], _ctx()))
+        self.assertIsNone(selector.choose(DummyOp(), [], _ctx()))
+
+    def test_does_not_consult_impl_cost(self):
+        # The greedy ranking must stay a static backend preference: it must
+        # not call the placeholder PhysicalImpl.cost.
+        def _boom(op, stats):
+            raise AssertionError("greedy selector must not call cost()")
+
+        rust = PhysicalImpl(op_type=DummyOp, backend_name="rust",
+                            input_format="frame", output_format="frame",
+                            supports=lambda op, ctx: True, cost=_boom,
+                            exec_mem=_placeholder_exec_mem,
+                            execute=_current_process_execute)
+        selector = GreedyImplementationSelector()
+        self.assertIs(rust, selector.choose(DummyOp(), [rust], _ctx()))
+
+    def test_supports_filter_runs_before_either_policy(self):
+        # bind_op filters through supports() before the selector runs; a
+        # selector never sees an unsupported candidate.
+        rust = _impl(DummyOp, "rust", supports=lambda op, ctx: False)
+        pandas = _impl(DummyOp, "pandas")
+        registry = PhysicalRegistry()
+        registry.register(rust)
+        registry.register(pandas)
+        candidates = [c for c in registry.candidates_for(DummyOp)
+                     if c.supports(DummyOp(), _ctx())]
+        self.assertEqual([pandas], candidates)
+        self.assertIs(pandas, GreedyImplementationSelector().choose(
+            DummyOp(), candidates, _ctx()))
+
+    def test_greedy_selector_prefers_polars_for_dataframe_source(self):
+        registry = get_default_physical_registry()
+        candidates = list(registry.candidates_for(InMemoryFrame))
+        op = InMemoryFrame(data=None)
+        chosen = GreedyImplementationSelector().choose(op, candidates, _ctx())
+        self.assertIs(PolarsInMemoryFrame, chosen.impl_class)
+
+    def test_small_dag_binds_independent_backends_per_operator(self):
+        # No global backend or conversion optimization: two ops in one DAG
+        # each bind to a different backend under greedy selection, purely
+        # from their own candidate lists -- there is no plan-wide reasoning
+        # about mixing backends.
+        class UpstreamOp(DummyOp, PhysicalOp):
+            is_abstract = False
+            def on_impl_selected(self, ctx):
+                pass
+
+        class DownstreamOp(DummyOp, PhysicalOp):
+            is_abstract = False
+            def on_impl_selected(self, ctx):
+                pass
+
+        class PolarsUpstream(UpstreamOp):
+            pass
+
+        class SklearnDownstream(DownstreamOp):
+            pass
+
+        registry = PhysicalRegistry()
+        # Rust is registered but unsupported here (filtered before selection
+        # runs), so polars -- next in the greedy ranking -- wins for Upstream.
+        registry.register(_impl(UpstreamOp, "rust", supports=lambda op, ctx: False))
+        registry.register(_impl(UpstreamOp, "polars", impl_class=PolarsUpstream))
+        registry.register(_impl(DownstreamOp, "sklearn-skrub",
+                                impl_class=SklearnDownstream))
+
+        upstream = UpstreamOp(inputs=[])
+        downstream = DownstreamOp(inputs=[upstream])
+        upstream.add_output(downstream)
+
+        select_implementations(downstream, _ctx(), registry=registry,
+                               selector=GreedyImplementationSelector())
+
+        self.assertIsInstance(upstream, PolarsUpstream)
+        self.assertIsInstance(downstream, SklearnDownstream)
+
+
 class TestPlanTimeBinding(unittest.TestCase):
     def test_on_impl_selected_runs_at_plan_time(self):
         """Choosing an impl swaps the op to its class and runs on_impl_selected."""
@@ -174,6 +287,14 @@ class TestTransformerPlanTimeBinding(unittest.TestCase):
         self.assertIsInstance(op.estimator, RustyStringEncoder)
         self.assertIsInstance(op.original_estimator, RustyStringEncoder)
         self.assertTrue(op.original_estimator._stratum_force_rust)
+
+    def test_greedy_selector_binds_rust_for_supported_transformer(self):
+        # Greedy ranks rust first; unlike the default selector it does not
+        # need rust_backend/allow_patch enabled -- support already gates it.
+        op = StringEncoderOp(estimator=self.encoder, cols=["a"])
+        select_implementations(op, _ctx(), selector=GreedyImplementationSelector())
+        self.assertIsInstance(op.estimator, RustyStringEncoder)
+        self.assertIsInstance(op.original_estimator, RustyStringEncoder)
 
     def test_no_swap_when_rust_disabled(self):
         df = pd.DataFrame({"a": ["apple", "banana", "cherry", "orange"]})

@@ -1,4 +1,5 @@
 import io
+import sys
 import numpy as np
 import pandas as pd
 from contextlib import redirect_stdout
@@ -7,18 +8,29 @@ from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 
 import stratum as st
+from stratum.adapters.string_encoder import supports_rust_string_encoder
 from stratum.optimizer._optimize import OptConfig, optimize
-from stratum.optimizer.physical._concat_execs import PandasConcatOp
-from stratum.optimizer.physical._map_execs import PandasAssignMapOp
+from stratum.optimizer.physical._concat_execs import PandasConcatOp, PolarsConcatOp
+from stratum.optimizer.physical._map_execs import PandasAssignMapOp, PolarsAssignMapOp
 from stratum.optimizer.physical._projection_execs import (
     PandasColumnProjectionOp,
     PandasColumnSelectorOp,
+    PolarsColumnProjectionOp,
+    PolarsColumnSelectorOp,
 )
-from stratum.optimizer.physical._source_execs import PandasReadCSV
-from stratum.optimizer.physical._transform_execs import SkrubStringEncoder
+from stratum.optimizer.physical._source_execs import PandasReadCSV, PolarsReadCSV
+from stratum.optimizer.physical._transform_execs import (RustStringEncoder,
+                                                          SkrubStringEncoder)
 from stratum.tests._helpers import csv_file
 
 # TODO: Add tests to match results with vanilla skrub
+
+
+def capture_std_out(capfd):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    captured = capfd.readouterr()
+    return (captured.out or "") + (captured.err or "")
 
 def make_small_table(n: int = 24) -> pd.DataFrame:
     rng = np.random.RandomState(7)
@@ -76,7 +88,29 @@ def test_default_selector_compiles_registered_pipeline():
     assert any(isinstance(op, SkrubStringEncoder) for op in ops)
 
 
-def test_default_selector_pipeline_scores_end_to_end():
+def test_greedy_selector_compiles_registered_pipeline():
+    encoder = StringEncoder()
+    rust_supported, _ = supports_rust_string_encoder(encoder)
+
+    with csv_file(make_small_table()) as path:
+        with st.config(implementation_selector="greedy"):
+            ops, *_ = optimize(
+                build_pipeline(path),
+                OptConfig(dataframe_ops=True),
+            )
+
+    assert any(isinstance(op, PolarsReadCSV) for op in ops)
+    assert any(isinstance(op, PolarsAssignMapOp) for op in ops)
+    assert any(isinstance(op, PolarsColumnProjectionOp) for op in ops)
+    assert any(isinstance(op, PolarsColumnSelectorOp) for op in ops)
+    assert any(isinstance(op, PolarsConcatOp) for op in ops)
+    # The StringEncoder transformer binds Rust when the estimator supports it,
+    # and falls back to the skrub reference impl (there is no polars kernel)
+    encoder_impl = RustStringEncoder if rust_supported else SkrubStringEncoder
+    assert any(isinstance(op, encoder_impl) for op in ops)
+
+
+def test_default_selector_pipeline_scores_end_to_end(capfd):
     with csv_file(make_small_table()) as path:
         predictions = build_pipeline(path)
         
@@ -84,7 +118,8 @@ def test_default_selector_pipeline_scores_end_to_end():
         captured_output = io.StringIO()
         with redirect_stdout(captured_output):
             # Enable scheduler mode to trigger optimizer and get explain output
-            with st.config(implementation_selector="default", scheduler=True, explain=("physical_impl")):
+            with st.config(rust_backend=True, implementation_selector="default",
+                           scheduler=True, explain=("physical_impl"), debug_timing=True):
                 search = predictions.skb.make_grid_search(
                     n_jobs=1,
                     fitted=True,
@@ -101,3 +136,44 @@ def test_default_selector_pipeline_scores_end_to_end():
     # SequentialScheduler returns a Polars DataFrame with columns ['id', 'scores']
     # instead of pandas DataFrame with 'mean_test_score'
     assert "scores" in search.results_.columns or "mean_test_score" in search.results_.columns
+
+    # Verify the StringEncoder transformer did not execute on Rust
+    combined_output = capture_std_out(capfd)
+    assert "[rust]" not in combined_output
+
+
+def test_greedy_selector_pipeline_scores_end_to_end(capfd):
+    encoder = StringEncoder()
+    rust_supported, _ = supports_rust_string_encoder(encoder)
+
+    with csv_file(make_small_table()) as path:
+        predictions = build_pipeline(path)
+
+        # Capture explain output using redirect_stdout
+        captured_output = io.StringIO()
+        with redirect_stdout(captured_output):
+            with st.config(rust_backend=True, implementation_selector="greedy",
+                           scheduler=True, explain=("physical_impl"), debug_timing=True):
+                search = predictions.skb.make_grid_search(
+                    n_jobs=1,
+                    fitted=True,
+                    refit=False,
+                    scoring="r2",
+                )
+
+    # Print the captured explain output
+    output_str = captured_output.getvalue()
+    if output_str:
+        print(output_str)
+
+    assert search.results_ is not None
+    # SequentialScheduler returns a Polars DataFrame with columns ['id', 'scores']
+    # instead of pandas DataFrame with 'mean_test_score'
+    assert "scores" in search.results_.columns or "mean_test_score" in search.results_.columns
+
+    # Verify the StringEncoder transformer actually executed on the Rust
+    combined_output = capture_std_out(capfd)
+    if rust_supported:
+        assert "[rust]" in combined_output
+    else:
+        assert "[rust]" not in combined_output

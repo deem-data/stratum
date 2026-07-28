@@ -24,7 +24,7 @@ def _env_int(name, default=0):
 #: ``logical`` (after logical rewrites), ``physical`` (after lowering) and
 #: ``physical_impl`` (after implementation selection, i.e.,  the executable plan).
 EXPLAIN_LEVELS = ("logical", "physical", "physical_impl")
-IMPLEMENTATION_SELECTOR_MODES = ("default",)
+IMPLEMENTATION_SELECTOR_MODES = ("default", "greedy")
 
 
 def _read_implementation_selector(value: str) -> str:
@@ -157,8 +157,9 @@ def set_config(rust_backend: bool | None = None,
             implementation selector.
 
         implementation_selector: str, default "default"
-            Implementation-selection policy. Only ``"default"`` is available
-            until additional selector strategies are implemented.
+            Implementation-selection policy. ``"default"`` prefers pandas/
+            sklearn-skrub; ``"greedy"`` prefers efficient backends
+            (rust/polars) first.
 
         pandas_query: bool, default false
             Evaluate MASK selections on the pandas backend via ``DataFrame.query()``

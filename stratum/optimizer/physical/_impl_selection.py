@@ -71,8 +71,32 @@ class DefaultImplementationSelector(ImplementationSelector):
         return candidates[0]
 
 
+class GreedyImplementationSelector(ImplementationSelector):
+    """Choose implementations using an efficient-backend-first preference.
+
+    Like DefaultImplementationSelector, this policy only ranks the
+    already ``supports``-filtered candidates for one operator at a time. It
+    does not call :meth:`PhysicalImpl.cost` (still a placeholder) and does not
+    look at neighboring operators, formats, conversion costs, or plan-wide
+    costs. This is a baseline.
+    """
+
+    _PREFERRED_BACKENDS = ("rust", "polars", "numpy", "sklearn-skrub", "pandas")
+
+    def choose(self, op: IRNode, candidates: list[PhysicalImpl],
+               ctx: PlanContext) -> PhysicalImpl | None:
+        if not candidates:
+            return None
+        for backend_name in self._PREFERRED_BACKENDS:
+            for impl in candidates:
+                if impl.backend_name == backend_name:
+                    return impl
+        return candidates[0]
+
+
 _IMPLEMENTATION_SELECTOR_FACTORIES: dict[str, type[ImplementationSelector]] = {
     "default": DefaultImplementationSelector,
+    "greedy": GreedyImplementationSelector,
 }
 
 
@@ -145,7 +169,7 @@ def bind_op(op: IRNode, ctx: PlanContext,
         return op
     logger.debug(f"Selected {impl.backend_name} implementation for {op}")
     if impl.impl_class is not None and impl.impl_class is not type(op):
-        op.__class__ = impl.impl_class #late-binding
+        op.__class__ = impl.impl_class # late-binding
     if isinstance(op, PhysicalOp):
         op.on_impl_selected(ctx)
     return op
