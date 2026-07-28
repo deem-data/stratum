@@ -22,7 +22,9 @@ from stratum.optimizer.ir._projection_ops import (
     StringMethodOp, make_column_projection_op, make_column_selector_op,
     make_datetime_conversion_op, make_frame_get_attr, make_string_method_op,
     resolve_selector_columns)
-from stratum.optimizer.ir._map_ops import MapOp, AssignMapOp, make_assign_map_op
+from stratum.optimizer.ir._map_ops import (
+    MISSING_FUNCTIONS, MISSING_METHODS, AssignMapOp, MapOp, MissingMaskOp,
+    make_assign_map_op, make_missing_mask_op)
 from stratum.optimizer.ir._join_ops import (
     JoinOp, _MERGE_POSITIONAL, _JOIN_POSITIONAL, _JOIN_OP_FIELDS, make_join_op,
     _make_chained_join_op)
@@ -106,12 +108,16 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
     # input is frame-world data (a frame or a series): this is a dataframe op
     else:
         if isinstance(op, CallOp):
+            if map_op and op.func in MISSING_FUNCTIONS:
+                new_op = make_missing_mask_op(op)
             # Datetime conversion detection
-            if op.func is pd.to_datetime:
+            elif op.func is pd.to_datetime:
                 new_op = make_datetime_conversion_op(op)
 
         elif isinstance(op, MethodCallOp):
-            if isinstance(op.inputs[0], GetAttrProjectionOp) and op.inputs[0].attr_name == ["str"]:
+            if map_op and op.method_name in MISSING_METHODS:
+                new_op = make_missing_mask_op(op)
+            elif isinstance(op.inputs[0], GetAttrProjectionOp) and op.inputs[0].attr_name == ["str"]:
                 # `col.str.<method>(...)` -> fuse the .str accessor and the method
                 # call into a single StringMethodOp (a SERIES-typed projection). An
                 # enclosing `df[...]` then sees a mask and folds the chain into a
@@ -136,7 +142,7 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 # keep the input's kind (ProjectionOp defaults to FRAME).
                 new_op.output_type = op.inputs[0].output_type
                 op.replace_output_of_inputs(new_op)
-            elif op.method_name in ["assign"]:
+            elif op.method_name == "assign":
                 if map_op:
                     new_op = make_assign_map_op(op)
                 if new_op is None:

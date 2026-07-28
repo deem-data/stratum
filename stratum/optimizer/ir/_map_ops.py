@@ -7,8 +7,10 @@ restricted to natively-lazy computations (arithmetic, boolean logic,
 into one ``with_columns`` kernel. Anything outside the grammar stays in the
 graph and feeds the map through an ``OperandLeaf`` input.
 
-:class:`AssignMapOp` -- from ``df.assign(...)`` -- is the only map kind so far:
-named, series-valued entries, with input columns passing through.
+The concrete map kinds currently are:
+
+* :class:`AssignMapOp` for named, series-valued ``df.assign(...)`` entries.
+* :class:`MissingMaskOp` for pandas missing-value predicates.
 """
 from __future__ import annotations
 
@@ -17,7 +19,14 @@ import polars as pl
 
 from stratum.optimizer.ir._column_expr import (ColumnExpr, Const, EvalContext,
                                                _Folder)
-from stratum.optimizer.ir._ops import (MethodCallOp, Op, OperandRef, OutputType)
+from stratum.optimizer.ir._ops import (CallOp, MethodCallOp, Op, OperandRef,
+                                       OutputType)
+
+
+MISSING_METHODS = ("isna", "isnull", "notna", "notnull")
+POSITIVE_MISSING_METHODS = ("isna", "isnull")
+MISSING_FUNCTIONS = (pd.isna, pd.isnull, pd.notna, pd.notnull)
+POSITIVE_MISSING_FUNCTIONS = (pd.isna, pd.isnull)
 
 
 class MapOp(Op):
@@ -30,6 +39,20 @@ class MapOp(Op):
 
     def make_context(self, mode: str, inputs: list) -> EvalContext:
         return EvalContext(frame=inputs[0], inputs=inputs, mode=mode)
+
+
+class MissingMaskOp(MapOp):
+    """A missing-value predicate such as .isnull()/isna() on a frame or series."""
+
+    fields = ["positive"]
+
+    def __init__(self, positive: bool,
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="isnull" if positive else "notnull",
+                         inputs=inputs, outputs=outputs)
+        self.positive = positive
+        if inputs:
+            self.output_type = inputs[0].output_type
 
 
 class AssignMapOp(MapOp):
@@ -113,3 +136,54 @@ def make_assign_map_op(op: MethodCallOp) -> AssignMapOp | None:
                          inputs=[src, *folder.leaf_ops], outputs=list(op.outputs))
     _detach_absorbed_and_rewire(op, new_op, folder)
     return new_op
+
+
+def _make_method_missing_mask_op(op: MethodCallOp, positive: bool) -> MissingMaskOp | None:
+    """Build a mask from a bound call such as ``series.isna()``.
+
+    The object before the method is stored as the call's only input.
+    """
+    if op.args or op.kwargs or len(op.inputs) != 1:
+        return None
+
+    new_op = MissingMaskOp(positive=positive, inputs=[op.inputs[0]], outputs=list(op.outputs))
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+
+def _make_call_missing_mask_op(op: CallOp, positive: bool) -> MissingMaskOp | None:
+    """Build a missing mask from ``pd.isna(obj)`` or ``pd.isna(obj=obj)``."""
+    args = tuple(op.args or ())
+    kwargs = dict(op.kwargs or {})
+
+    if len(args) == 1 and not kwargs:
+        operand_ref = args[0]
+    elif not args and set(kwargs) == {"obj"}:
+        operand_ref = kwargs["obj"]
+    else:
+        return None
+
+    if not isinstance(operand_ref, OperandRef):
+        return None
+
+    new_op = MissingMaskOp(positive=positive, inputs=[op.inputs[operand_ref.k]], outputs=list(op.outputs))
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+
+def make_missing_mask_op(op: MethodCallOp | CallOp) -> MissingMaskOp | None:
+    """Extract bound-method and standalone pandas missing-value calls."""
+    if isinstance(op, MethodCallOp):
+        method_name = op.method_name
+        if method_name not in MISSING_METHODS:
+            return None
+        positive = method_name in POSITIVE_MISSING_METHODS
+        return _make_method_missing_mask_op(op, positive)
+
+    if isinstance(op, CallOp):
+        if op.func not in MISSING_FUNCTIONS:
+            return None
+        positive = op.func in POSITIVE_MISSING_FUNCTIONS
+        return _make_call_missing_mask_op(op, positive)
+
+    return None
