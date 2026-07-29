@@ -1,24 +1,26 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::threads::get_thread_pool;
+use crate::util::{print_timing, start_timing};
 use ndarray::{Array2, Axis};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedStr;
 use pyo3::types::{PyAny, PyIterator, PyList, PyModule};
-use pyo3::{PyErr, exceptions::PyValueError};
+use pyo3::{exceptions::PyValueError, PyErr};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rayon::prelude::*;
-use crate::threads::{get_thread_pool};
-use crate::util::{start_timing, print_timing};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-mod tokenize;   //n-gram extraction for char/char_wb
-mod hashing;    //stable fast hashing to [0, n_features)
-mod tfidf;      //DF counting, IDF vector, TF*IDF, per-row L2 norm
 mod csr;
-mod fd;         //Frequent Directions
-mod truncated_svd;  //TruncatedSVD using randomized SVD
-mod util;
-mod threads;
+mod fd; //Frequent Directions
+mod hashing; //stable fast hashing to [0, n_features) + MurmurHash3 (sklearn-exact)
+mod hashing_vectorizer; //sklearn HashingVectorizer (word analyzer, stateless hashing trick)
 mod one_hot_encoder;
+mod tfidf; //DF counting, IDF vector, TF*IDF, per-row L2 norm
+mod threads;
+mod tokenize; //n-gram extraction for char/char_wb + word tokenizer
+mod truncated_svd; //TruncatedSVD using randomized SVD
+mod util;
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +30,7 @@ use std::sync::{Arc, Mutex};
 // ---- Global registry for models (TODO: Return pointer to Python) ----
 static TFIDF_MODELS: Lazy<Mutex<Vec<tfidf::TfidfModel>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+#[allow(dead_code)]
 struct TruncatedSvdModel {
     n_cols: usize,
     k: usize,
@@ -36,8 +39,10 @@ struct TruncatedSvdModel {
     singular_values: Vec<f32>,
 }
 static TSVD_NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static TSVD_MODELS: Lazy<Mutex<HashMap<u64, TruncatedSvdModel>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static TSVD_MODELS: Lazy<Mutex<HashMap<u64, TruncatedSvdModel>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[allow(dead_code)]
 struct FdEmbedModel {
     n_cols: usize,
     k: usize,
@@ -47,10 +52,11 @@ struct FdEmbedModel {
     // Random matrix Ω: (n_cols × m) stored column-major for efficient CSR matmul
     // omega[j * m + t] = Ω[j, t]
     omega: Arc<Vec<f32>>,
-    m: usize,  // m = k + oversample, width of reduced space
+    m: usize, // m = k + oversample, width of reduced space
 }
 static FD_EMBED_NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static FD_EMBED_MODELS: Lazy<Mutex<HashMap<u64, FdEmbedModel>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static FD_EMBED_MODELS: Lazy<Mutex<HashMap<u64, FdEmbedModel>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 // Simple mapping from domain error to PyErr
 fn to_pyerr(err: tfidf::Error) -> PyErr {
@@ -58,7 +64,7 @@ fn to_pyerr(err: tfidf::Error) -> PyErr {
     let msg = match err {
         InvalidAnalyzer => "Invalid analyzer".to_string(),
         InvalidNgramRange => "Invalid ngram_range".to_string(),
-        Internal => "Internal error".to_string()
+        Internal => "Internal error".to_string(),
     };
     PyErr::new::<PyValueError, _>(msg)
 }
@@ -66,6 +72,7 @@ fn to_pyerr(err: tfidf::Error) -> PyErr {
 // Helper: CSR × Omega matmul: X @ Ω -> Y
 // Omega is stored column-major: omega[j * m + t] = Ω[j, t]
 // Result Y is (n_rows × m)
+#[allow(clippy::too_many_arguments, unused_variables)]
 fn csr_matmul_omega(
     data: &[f32],
     indices: &[i32],
@@ -102,9 +109,17 @@ fn csr_matmul_omega(
     y
 }
 
-fn compute_fd_embed(data: &[f32], indices: &[i32], indptr: &[i64],
-    n_rows: usize, n_cols: usize, k: usize, oversample: usize, seed: Option<u64>) -> Result<Array2<f32>, PyErr>
-{
+#[allow(clippy::too_many_arguments)]
+fn compute_fd_embed(
+    data: &[f32],
+    indices: &[i32],
+    indptr: &[i64],
+    n_rows: usize,
+    n_cols: usize,
+    k: usize,
+    oversample: usize,
+    seed: Option<u64>,
+) -> Result<Array2<f32>, PyErr> {
     // Step 2: Gather the parameters
     let out_w = k + oversample; //k+p
     let s = seed.unwrap_or(0xC0FFEE); //I love coffee :)
@@ -137,7 +152,7 @@ fn compute_fd_embed(data: &[f32], indices: &[i32], indptr: &[i64],
             .enumerate()
             .for_each(|(row, mut yrow)| {
                 let start = indptr[row] as usize;
-                let end   = indptr[row + 1] as usize;
+                let end = indptr[row + 1] as usize;
                 for t in 0..out_w {
                     let mut acc = 0.0f32;
                     for p in start..end {
@@ -151,7 +166,7 @@ fn compute_fd_embed(data: &[f32], indices: &[i32], indptr: &[i64],
     };
     match pool {
         Some(p) => p.install(build_y), //use custom threadpool
-        None => build_y() //use global threadpool
+        None => build_y(),             //use global threadpool
     }
     print_timing("build y", t0);
 
@@ -165,10 +180,18 @@ fn compute_fd_embed(data: &[f32], indices: &[i32], indptr: &[i64],
 
 #[pyfunction]
 #[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, oversample=16, seed=None))]
-fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<PyArray1<i32>>,
-    indptr: Bound<PyArray1<i64>>, n_rows: usize, n_cols: usize, k: usize,
-    oversample: usize, seed: Option<u64>) -> PyResult<Py<PyArray2<f32>>>
-{
+#[allow(dead_code, clippy::too_many_arguments)]
+fn fd_embed_from_csr(
+    py: Python<'_>,
+    data: Bound<PyArray1<f32>>,
+    indices: Bound<PyArray1<i32>>,
+    indptr: Bound<PyArray1<i64>>,
+    n_rows: usize,
+    n_cols: usize,
+    k: usize,
+    oversample: usize,
+    seed: Option<u64>,
+) -> PyResult<Py<PyArray2<f32>>> {
     // Step 1: Zero-copy view of NumPy arrays
     let data = unsafe { data.as_slice()? };
     let indices = unsafe { indices.as_slice()? };
@@ -183,6 +206,7 @@ fn fd_embed_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<
     Ok(Py::from(py_z))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_fd_fit(
     data: &[f32],
     indices: &[i32],
@@ -238,6 +262,8 @@ fn compute_fd_fit(
 
 #[pyfunction]
 #[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, oversample=16, seed=None))]
+// The arguments are the stable Python API; grouping them would be a breaking change.
+#[allow(clippy::too_many_arguments)]
 fn fd_fit_from_csr(
     py: Python<'_>,
     data: Bound<PyArray1<f32>>,
@@ -273,13 +299,13 @@ fn compute_fd_transform(
 ) -> Result<Array2<f32>, PyErr> {
     // Fetch model
     let (projection, omega, model_n_cols, m) = {
-        let guard = FD_EMBED_MODELS
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("FD_EMBED_MODELS mutex poisoned"))?;
+        let guard = FD_EMBED_MODELS.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("FD_EMBED_MODELS mutex poisoned")
+        })?;
 
-        let model = guard
-            .get(&model_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("Unknown model_id {model_id}")))?;
+        let model = guard.get(&model_id).ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!("Unknown model_id {model_id}"))
+        })?;
 
         (
             Arc::clone(&model.projection),
@@ -355,20 +381,22 @@ fn fd_transform_from_csr(
     Ok(Py::from(py_z))
 }
 
-fn compute_truncated_svd_fit(data: &[f32], indices: &[i32], indptr: &[i64],
-    n_rows: usize, n_cols: usize, k: usize, seed: Option<u64>) -> Result<(u64, Array2<f32>), PyErr>
-{
+fn compute_truncated_svd_fit(
+    data: &[f32],
+    indices: &[i32],
+    indptr: &[i64],
+    n_rows: usize,
+    n_cols: usize,
+    k: usize,
+    seed: Option<u64>,
+) -> Result<(u64, Array2<f32>), PyErr> {
     // Hardcoded sklearn defaults: n_iter = 5 or 7, oversample=10
     const N_ITER: usize = 5;
     const OVERSAMPLE: usize = 10;
     let pool = get_thread_pool();
 
     let (z, components_t, s) = truncated_svd::truncated_svd_csr(
-        data, indices, indptr,
-        n_rows, n_cols,
-        k, N_ITER, OVERSAMPLE,
-        seed,
-        pool,
+        data, indices, indptr, n_rows, n_cols, k, N_ITER, OVERSAMPLE, seed, pool,
     )?;
 
     let model_id = TSVD_NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -389,10 +417,18 @@ fn compute_truncated_svd_fit(data: &[f32], indices: &[i32], indptr: &[i64],
 
 #[pyfunction]
 #[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, seed=None))]
-fn truncated_svd_fit_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<PyArray1<i32>>,
-    indptr: Bound<PyArray1<i64>>, n_rows: usize, n_cols: usize, k: usize,
-    seed: Option<u64>) -> PyResult<(u64, Py<PyArray2<f32>>)>
-{
+// The arguments are the stable Python API; grouping them would be a breaking change.
+#[allow(clippy::too_many_arguments)]
+fn truncated_svd_fit_from_csr(
+    py: Python<'_>,
+    data: Bound<PyArray1<f32>>,
+    indices: Bound<PyArray1<i32>>,
+    indptr: Bound<PyArray1<i64>>,
+    n_rows: usize,
+    n_cols: usize,
+    k: usize,
+    seed: Option<u64>,
+) -> PyResult<(u64, Py<PyArray2<f32>>)> {
     // Step 1: Zero-copy view of NumPy arrays
     let data = unsafe { data.as_slice()? };
     let indices = unsafe { indices.as_slice()? };
@@ -417,13 +453,13 @@ fn compute_truncated_svd_transform(
 ) -> Result<Array2<f32>, PyErr> {
     // Fetch model
     let (components_t, model_n_cols) = {
-        let guard = TSVD_MODELS
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("TSVD model cache mutex poisoned"))?;
+        let guard = TSVD_MODELS.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("TSVD model cache mutex poisoned")
+        })?;
 
-        let m = guard
-            .get(&model_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("Unknown model_id {model_id}")))?;
+        let m = guard.get(&model_id).ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!("Unknown model_id {model_id}"))
+        })?;
 
         (Arc::clone(&m.components_t), m.n_cols)
     };
@@ -437,7 +473,15 @@ fn compute_truncated_svd_transform(
     }
 
     let pool = get_thread_pool();
-    truncated_svd::truncated_svd_transform_csr(data, indices, indptr, n_rows, n_cols, &components_t, pool)
+    truncated_svd::truncated_svd_transform_csr(
+        data,
+        indices,
+        indptr,
+        n_rows,
+        n_cols,
+        &components_t,
+        pool,
+    )
 }
 
 #[pyfunction]
@@ -465,18 +509,21 @@ fn truncated_svd_transform_from_csr(
 
 #[pyfunction]
 #[pyo3(signature = (seq, analyzer, ngram_min, ngram_max, n_features))]
+#[allow(clippy::type_complexity, clippy::let_and_return)]
 fn hashing_tfidf_csr(
     py: Python<'_>,
-    seq: Bound<PyAny>,    //iterable of strings (empty for nulls)
-    analyzer: &str, //"char"/"char_wb"
-    ngram_min: usize, ngram_max: usize, n_features: usize
+    seq: Bound<PyAny>, //iterable of strings (empty for nulls)
+    analyzer: &str,    //"char"/"char_wb"
+    ngram_min: usize,
+    ngram_max: usize,
+    n_features: usize,
 ) -> PyResult<(
-    Py<PyArray1<f32>>,  //data
-    Py<PyArray1<i32>>,  //indices
-    Py<PyArray1<i64>>,  //indptr
-    usize,              //n_rows
-    usize,              //n_cols (n_features)
-    Py<PyArray1<f32>>   //idf (length of n_features)
+    Py<PyArray1<f32>>,
+    Py<PyArray1<i32>>,
+    Py<PyArray1<i64>>,
+    usize,
+    usize,
+    Py<PyArray1<f32>>,
 )> {
     // Collect input into a vector. TODO: zero-copy
     let mut docs: Vec<String> = Vec::new();
@@ -484,7 +531,11 @@ fn hashing_tfidf_csr(
     for item in iter {
         let obj = item?;
         // Treat none as empty string. Python pre-fill should already do this.
-        let s: String = if obj.is_none() {String::new()} else {obj.extract()?};
+        let s: String = if obj.is_none() {
+            String::new()
+        } else {
+            obj.extract()?
+        };
         docs.push(s);
     }
     let n_rows = docs.len();
@@ -503,24 +554,33 @@ fn hashing_tfidf_csr(
     let py_indptr = PyArray1::<i64>::from_vec(py, indptr).to_owned();
     let py_idf = idf.into_pyarray(py).to_owned();
 
-    Ok((Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_features, Py::from(py_idf)))
-
+    Ok((
+        Py::from(py_data),
+        Py::from(py_indices),
+        Py::from(py_indptr),
+        n_rows,
+        n_features,
+        Py::from(py_idf),
+    ))
 }
 
 #[pyfunction]
 #[pyo3(signature = (seq, analyzer, ngram_min, ngram_max, n_features, idf))]
+#[allow(clippy::type_complexity, clippy::let_and_return)]
 fn hashing_tfidf_csr_with_idf(
     py: Python<'_>,
-    seq: Bound<PyAny>,    //iterable of strings (empty for nulls)
-    analyzer: &str, //"char"/"char_wb"
-    ngram_min: usize, ngram_max: usize, n_features: usize,
-    idf: PyReadonlyArray1<f32>  //pre-computed IDF vector
+    seq: Bound<PyAny>, //iterable of strings (empty for nulls)
+    analyzer: &str,    //"char"/"char_wb"
+    ngram_min: usize,
+    ngram_max: usize,
+    n_features: usize,
+    idf: PyReadonlyArray1<f32>, //pre-computed IDF vector
 ) -> PyResult<(
-    Py<PyArray1<f32>>,  //data
-    Py<PyArray1<i32>>,  //indices
-    Py<PyArray1<i64>>,  //indptr
-    usize,              //n_rows
-    usize,              //n_cols (n_features)
+    Py<PyArray1<f32>>,
+    Py<PyArray1<i32>>,
+    Py<PyArray1<i64>>,
+    usize,
+    usize,
 )> {
     // Collect input into a vector. TODO: zero-copy
     let mut docs: Vec<String> = Vec::new();
@@ -528,7 +588,11 @@ fn hashing_tfidf_csr_with_idf(
     for item in iter {
         let obj = item?;
         // Treat none as empty string. Python pre-fill should already do this.
-        let s: String = if obj.is_none() {String::new()} else {obj.extract()?};
+        let s: String = if obj.is_none() {
+            String::new()
+        } else {
+            obj.extract()?
+        };
         docs.push(s);
     }
     let n_rows = docs.len();
@@ -536,9 +600,11 @@ fn hashing_tfidf_csr_with_idf(
     // Get IDF slice (zero-copy read)
     let idf_slice = idf.as_slice()?;
     if idf_slice.len() != n_features {
-        return Err(PyErr::new::<PyValueError, _>(
-            format!("IDF length {} does not match n_features {}", idf_slice.len(), n_features)
-        ));
+        return Err(PyErr::new::<PyValueError, _>(format!(
+            "IDF length {} does not match n_features {}",
+            idf_slice.len(),
+            n_features
+        )));
     }
 
     // Work buffers to be produced by tfidf::build_csr_with_idf
@@ -554,13 +620,126 @@ fn hashing_tfidf_csr_with_idf(
     let py_indices = PyArray1::<i32>::from_vec(py, indices).to_owned();
     let py_indptr = PyArray1::<i64>::from_vec(py, indptr).to_owned();
 
-    Ok((Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_features))
+    Ok((
+        Py::from(py_data),
+        Py::from(py_indices),
+        Py::from(py_indptr),
+        n_rows,
+        n_features,
+    ))
+}
 
+// ---- HashingVectorizer (word analyzer): stateless transform -> CSR ----
+/// Extract documents into Python-backed UTF-8 views without copying their
+/// contents into Rust-owned `String`s. Lists use indexed access to avoid the
+/// generic iterator protocol on the adapter's hot path.
+fn extract_hashing_documents(seq: &Bound<'_, PyAny>) -> PyResult<Vec<PyBackedStr>> {
+    if let Ok(list) = seq.cast::<PyList>() {
+        let mut documents = Vec::with_capacity(list.len());
+        for index in 0..list.len() {
+            documents.push(list.get_item(index)?.extract::<PyBackedStr>()?);
+        }
+        return Ok(documents);
+    }
+
+    let mut documents = Vec::new();
+    let iterator = PyIterator::from_object(seq)?;
+    for item in iterator {
+        documents.push(item?.extract::<PyBackedStr>()?);
+    }
+    Ok(documents)
+}
+
+fn ensure_ascii_hashing_documents(documents: &[PyBackedStr]) -> PyResult<()> {
+    if documents.iter().all(|document| document.is_ascii()) {
+        return Ok(());
+    }
+    Err(PyValueError::new_err(
+        "non-ASCII documents require sklearn fallback",
+    ))
+}
+
+#[pyfunction]
+#[pyo3(signature = (seq, n_features, ngram_min, ngram_max, binary=false, alternate_sign=true, lowercase=true, norm="l2"))]
+// The arguments are the stable Python API; grouping them would be a breaking change.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn hashing_vectorizer_transform(
+    py: Python<'_>,
+    seq: Bound<PyAny>, // iterable of strings, normalized by the Python adapter
+    n_features: usize,
+    ngram_min: usize,
+    ngram_max: usize,
+    binary: bool,
+    alternate_sign: bool,
+    lowercase: bool,
+    norm: &str,
+) -> PyResult<(
+    Py<PyArray1<f64>>,
+    Py<PyArray1<i32>>,
+    Py<PyArray1<i64>>,
+    usize,
+    usize,
+)> {
+    let t_extract = start_timing();
+    if n_features == 0 {
+        return Err(PyValueError::new_err("n_features must be > 0"));
+    }
+    if n_features > i32::MAX as usize {
+        return Err(PyValueError::new_err(
+            "n_features must be at most 2147483647",
+        ));
+    }
+    if ngram_min == 0 || ngram_min > ngram_max {
+        return Err(PyValueError::new_err("invalid ngram_range"));
+    }
+    let norm = match norm {
+        "none" => hashing_vectorizer::Norm::None,
+        "l1" => hashing_vectorizer::Norm::L1,
+        "l2" => hashing_vectorizer::Norm::L2,
+        _ => {
+            return Err(PyValueError::new_err(
+                "norm must be 'none', 'l1', or 'l2'",
+            ))
+        }
+    };
+
+    let docs = extract_hashing_documents(&seq)?;
+    ensure_ascii_hashing_documents(&docs)?;
+    print_timing("hv ffi_extract", t_extract);
+    let n_rows = docs.len();
+
+    let opts = hashing_vectorizer::HashingOptions {
+        n_features,
+        nmin: ngram_min,
+        nmax: ngram_max,
+        binary,
+        alternate_sign,
+        lowercase,
+        norm,
+    };
+
+    // Heavy work without the GIL.
+    let (data, indices, indptr) = py.detach(|| hashing_vectorizer::transform(&docs, &opts));
+
+    let t_numpy = start_timing();
+    let py_data = PyArray1::<f64>::from_vec(py, data).to_owned();
+    let py_indices = PyArray1::<i32>::from_vec(py, indices).to_owned();
+    let py_indptr = PyArray1::<i64>::from_vec(py, indptr).to_owned();
+    print_timing("hv numpy_handoff", t_numpy);
+
+    Ok((
+        Py::from(py_data),
+        Py::from(py_indices),
+        Py::from(py_indptr),
+        n_rows,
+        n_features,
+    ))
 }
 
 // ---- Fit TF-IDF vocabulary + return CSR ----
 #[pyfunction]
 #[pyo3(signature = (seq, analyzer, ngram_min, ngram_max))]
+#[allow(clippy::type_complexity)]
 fn tfidf_fit_csr(
     py: Python<'_>,
     seq: Vec<String>, //Fixme: reference (&PyList) instead of copying
@@ -568,12 +747,12 @@ fn tfidf_fit_csr(
     ngram_min: usize,
     ngram_max: usize,
 ) -> PyResult<(
-    u64,               // model_id
-    Py<PyArray1<f32>>, // data
-    Py<PyArray1<i32>>, // indices
-    Py<PyArray1<i64>>, // indptr
-    usize,             // n_rows
-    usize,             // n_cols (vocab size)
+    u64,
+    Py<PyArray1<f32>>,
+    Py<PyArray1<i32>>,
+    Py<PyArray1<i64>>,
+    usize,
+    usize,
 )> {
     let docs = seq;
     let n_rows = docs.len();
@@ -607,22 +786,30 @@ fn tfidf_fit_csr(
     let py_indices = PyArray1::<i32>::from_vec(py, indices).to_owned();
     let py_indptr = PyArray1::<i64>::from_vec(py, indptr).to_owned();
 
-    Ok((model_id, Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_cols))
+    Ok((
+        model_id,
+        Py::from(py_data),
+        Py::from(py_indices),
+        Py::from(py_indptr),
+        n_rows,
+        n_cols,
+    ))
 }
 
 // ---- Transform using stored vocab/idf + return CSR ----
 #[pyfunction]
 #[pyo3(signature = (model_id, seq))]
+#[allow(clippy::type_complexity)]
 fn tfidf_transform_csr(
     py: Python<'_>,
     model_id: u64,
     seq: Vec<String>,
 ) -> PyResult<(
-    Py<PyArray1<f32>>, // data
-    Py<PyArray1<i32>>, // indices
-    Py<PyArray1<i64>>, // indptr
-    usize,             // n_rows
-    usize,             // n_cols
+    Py<PyArray1<f32>>,
+    Py<PyArray1<i32>>,
+    Py<PyArray1<i64>>,
+    usize,
+    usize,
 )> {
     let docs = seq;
     let n_rows = docs.len();
@@ -636,7 +823,9 @@ fn tfidf_transform_csr(
         })?;
         let idx = model_id as usize;
         if idx >= guard.len() {
-            return Err(PyValueError::new_err(format!("Invalid model_id {model_id}")));
+            return Err(PyValueError::new_err(format!(
+                "Invalid model_id {model_id}"
+            )));
         }
         guard[idx].clone()
     };
@@ -651,7 +840,13 @@ fn tfidf_transform_csr(
     let py_indices = PyArray1::<i32>::from_vec(py, indices).to_owned();
     let py_indptr = PyArray1::<i64>::from_vec(py, indptr).to_owned();
 
-    Ok((Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_cols))
+    Ok((
+        Py::from(py_data),
+        Py::from(py_indices),
+        Py::from(py_indptr),
+        n_rows,
+        n_cols,
+    ))
 }
 
 // ---- Expose module ----
@@ -667,5 +862,6 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_hot_encoder::csr_to_dense, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_fit_csr, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_transform_csr, m)?)?;
+    m.add_function(wrap_pyfunction!(hashing_vectorizer_transform, m)?)?;
     Ok(())
 }

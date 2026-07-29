@@ -50,16 +50,28 @@ def print_timing(msg, start_time):
         print(f"[python] {msg}: {(end_time - start_time):8.3f}s")
 
 
-# pandas or polars series -> list (best-effort, minimal overhead)
+# Container -> list (best-effort, minimal overhead).
+# Prefer pandas/NumPy ``.tolist()`` and Polars ``.to_list()`` over generic
+# iteration, which is much slower for large containers.
 def _to_list(col):
-    try:
-        return col.tolist()
-    except Exception:
-        pass
-    try:
-        return col.to_list()
-    except Exception:
-        pass
+    if isinstance(col, list):
+        return list(col)
+    tolist = getattr(col, "tolist", None)
+    if callable(tolist):
+        try:
+            materialized = tolist()
+            if isinstance(materialized, list):
+                return materialized
+        except Exception:
+            pass
+    to_list = getattr(col, "to_list", None)
+    if callable(to_list):
+        try:
+            materialized = to_list()
+            if isinstance(materialized, list):
+                return materialized
+        except Exception:
+            pass
     return list(col)
 
 #---------------------------------------------
@@ -67,6 +79,7 @@ def _to_list(col):
 # Re-export compiled rust functions
 hashing_tfidf_fit = getattr(native, "hashing_tfidf_csr", None) if native else None
 hashing_tfidf_transform = getattr(native, "hashing_tfidf_csr_with_idf", None) if native else None
+hashing_vectorizer_transform = getattr(native, "hashing_vectorizer_transform", None) if native else None
 tfidf_fit = getattr(native, "tfidf_fit_csr", None) if native else None
 tfidf_transform = getattr(native, "tfidf_transform_csr", None) if native else None
 fd_fit= getattr(native, "fd_fit_from_csr", None) if native else None
