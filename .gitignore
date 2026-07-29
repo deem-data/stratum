@@ -93,6 +93,7 @@ benchmarks/**/input/
 benchmarks-staging
 
 # Ignore any data files
+
 *.zip
 *.csv
 *.pdf
