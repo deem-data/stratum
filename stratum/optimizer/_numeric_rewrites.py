@@ -143,14 +143,18 @@ def fold_to_one(op: Op, root: Op) -> Op:
     replace_op_in_outputs(op, one_op)
     return one_op if op is root else root
 
-def match_self_multiply(op):
-    """Match a multiply whose two operands are the same node (x * x)."""
-    return (op,) if (
-        isinstance(op, NumericOp)
-        and op.type is NumericOpType.MULTIPLY
-        and isinstance(op.opt_operand, OperandRef)
-        and op.inputs[op.opt_operand.k] is op.inputs[0]
-    ) else None
+def match_self_operation(op_cls, type1):
+    """Match a var-var operation whose two operands are the same node (x <op> x)."""
+    def match(op):
+        if (
+            isinstance(op, op_cls)
+            and op.type is type1
+            and isinstance(op.opt_operand, OperandRef)
+            and op.inputs[op.opt_operand.k] is op.inputs[0]
+        ):
+            return (op,)
+        return None
+    return match
 
 
 
@@ -252,4 +256,7 @@ eliminate_div_by_one = rewrite_pass(
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
 
-fold_self_multiply = rewrite_pass(match_self_multiply, fold_to_square)
+fold_self_multiply = rewrite_pass(
+    match_self_operation(NumericOp, NumericOpType.MULTIPLY),
+    fold_to_square,
+)
