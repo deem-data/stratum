@@ -14,6 +14,7 @@ from stratum.optimizer._numeric_rewrites import (
     eliminate_any_mul_zero,
     eliminate_div_by_one,
     fold_log_plus_one,
+    fold_add_chain,
 )
 from stratum.optimizer.ir._ops import Op
 from stratum.utils._utils import start_time, log_time
@@ -38,6 +39,7 @@ class AlgebraicRewritesConfig:
     any_mul_zero: bool = True
     div_by_one: bool = True
     log_plus_one: bool = True
+    add_chain: bool = True
 
 
 def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
@@ -45,6 +47,8 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
     start = start_time()
     if config.identity_op:
         root = eliminate_identity_operation(root)
+    if config.add_chain:
+        root = fold_add_chain(root)
     if config.add_zero:
         root = eliminate_add_zero(root)
     if config.div_by_one:
