@@ -20,6 +20,7 @@ mod util;
 mod threads;
 mod one_hot_encoder;
 mod logistic_regression;
+mod quantile_transformer;
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
@@ -742,6 +743,25 @@ fn binary_lbfgs_fit<'py>(
     Ok(w.into_pyarray(py))
 }
 
+// Quantile Transformer
+
+#[pyfunction]
+fn rust_fit_dense<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f64>,
+    references: PyReadonlyArray1<f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+
+    let x_asarr = x.as_array();
+    let references_asarr = references.as_array();
+
+    let quantiles = quantile_transformer::nanpercentile(
+        x_asarr,
+        references_asarr,
+    );
+    Ok(quantiles.into_pyarray(py))
+}
+
 
 // ---- Expose module ----
 #[pymodule]
@@ -761,6 +781,9 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(binary_predict, m)?)?;
     m.add_function(wrap_pyfunction!(binary_predict_proba, m)?)?;
     m.add_function(wrap_pyfunction!(binary_lbfgs_fit, m)?)?;
-    
+
+    // Quantile Transformer
+    m.add_function(wrap_pyfunction!(rust_fit_dense, m)?)?;
+
     Ok(())
 }
