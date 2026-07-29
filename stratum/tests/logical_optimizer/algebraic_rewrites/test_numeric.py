@@ -657,3 +657,125 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
+
+
+class TestNegNeg(unittest.TestCase):
+    """`neg(neg(x)) -> x`, matched on NumericOpType.NEGATIVE.
+
+    NEGATIVE is promoted to a NumericOpType by this PR, so the matcher is the
+    shared `match_two_op_chain` keyed on one type, rather than the two-condition
+    GENERIC + `func is np.negative` form it needed while `np.negative` fell
+    through to GENERIC.
+    """
+
+    def test_neg_neg_eliminated(self):
+        """neg(neg(x)) -> x"""
+        df = st.as_data_op(5)
+        t1 = df.skb.apply_func(np.negative).skb.apply_func(np.negative)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 5)
+
+    def test_negative_lowers_to_typed_op(self):
+        """Pin the representation: np.negative must extract to NumericOp(NEGATIVE),
+        not to a GENERIC op wrapping the func."""
+        df = st.as_data_op(5)
+        t1 = df.skb.apply_func(np.negative)
+
+        out, *_ = optimize(t1)
+        neg_op = out[-1]
+        self.assertIsInstance(neg_op, NumericOp)
+        self.assertIs(neg_op.type, NumericOpType.NEGATIVE)
+
+    def test_single_neg_untouched(self):
+        """A lone negation must survive."""
+        df = st.as_data_op(5)
+        t1 = df.skb.apply_func(np.negative)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [5]), -5)
+
+    def test_odd_length_chain_collapses_to_single_neg(self):
+        """neg^3 -> neg. Regression for the overlapping-pair bug: without the
+        innermost-first guard the pass rewires through an already-detached node
+        and topological_iterator raises "Encountered op ... should not exist"."""
+        df = st.as_data_op(5)
+        t1 = df
+        for _ in range(3):
+            t1 = t1.skb.apply_func(np.negative)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [5]), -5)
+
+    def test_even_length_chain_collapses_fully(self):
+        """neg^4 -> x"""
+        df = st.as_data_op(5)
+        t1 = df
+        for _ in range(4):
+            t1 = t1.skb.apply_func(np.negative)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 5)
+
+    def test_long_odd_chain(self):
+        """neg^5 -> neg (the guard must hold for longer chains too)."""
+        df = st.as_data_op(5)
+        t1 = df
+        for _ in range(5):
+            t1 = t1.skb.apply_func(np.negative)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [5]), -5)
+
+    def test_neg_neg_with_trailing_op(self):
+        """neg(neg(x)) + 3 -> x + 3"""
+        df = st.as_data_op(5)
+        t1 = df.skb.apply_func(np.negative).skb.apply_func(np.negative) + 3
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 8)
+
+    def test_neg_neg_root_safe(self):
+        """When neg(neg(x)) is the root, the DAG must not break."""
+        value = st.as_data_op(7)
+        root = value.skb.apply_func(np.negative).skb.apply_func(np.negative)
+
+        out, *_ = optimize(root)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 7)
+
+    def test_neg_neg_disabled(self):
+        """Disabling neg_neg must leave the pair untouched."""
+        df = st.as_data_op(5)
+        t1 = df.skb.apply_func(np.negative).skb.apply_func(np.negative)
+
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(neg_neg=False),
+        )
+        out, *_ = optimize(t1, config=config)
+        self.assertEqual(len(out), 3)
+
+    def test_neg_then_abs_untouched(self):
+        """Mixed chains must not collapse: abs(neg(x)) != x."""
+        df = st.as_data_op(5)
+        t1 = df.skb.apply_func(np.negative).skb.apply_func(np.abs)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 3)
+
+    def test_neg_neg_numeric_result(self):
+        """End-to-end value check on an array."""
+        arr = np.array([1.0, -2.0, 3.0])
+        df = st.as_data_op(arr)
+        t1 = df.skb.apply_func(np.negative).skb.apply_func(np.negative)
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 1)
+        np.testing.assert_allclose(out[0].value, arr)
