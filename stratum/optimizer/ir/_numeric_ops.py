@@ -97,7 +97,7 @@ class NumericOp(Op):
         elif self.type == NumericOpType.EXPM1:
             return np.expm1(inputs[0])
         elif self.type == NumericOpType.SUM:
-            return np.sum(inputs[0])
+            return np.sum(inputs[0], *self.args, **self.kwargs)
         elif self.type in _BINARY_TYPES:
             # The primary operand is always input 0 (bound first); the optional
             # second operand is referenced explicitly so x op x (single edge) works.
