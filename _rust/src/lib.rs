@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use ndarray::{Array2, Axis};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyList, PyModule};
 use pyo3::{PyErr, exceptions::PyValueError};
@@ -19,6 +19,7 @@ mod truncated_svd;  //TruncatedSVD using randomized SVD
 mod util;
 mod threads;
 mod one_hot_encoder;
+mod quantile_transformer;
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
@@ -654,6 +655,26 @@ fn tfidf_transform_csr(
     Ok((Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_cols))
 }
 
+// Quantile Transformer
+
+
+#[pyfunction]
+fn rust_fit_dense<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f64>,
+    references: PyReadonlyArray1<f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+
+    let x_asarr = x.as_array();
+    let references_asarr = references.as_array();
+
+    let quantiles = quantile_transformer::nanpercentile(
+        x_asarr,
+        references_asarr,
+    );
+    Ok(quantiles.into_pyarray(py))
+}
+
 // ---- Expose module ----
 #[pymodule]
 fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
@@ -667,5 +688,8 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_hot_encoder::csr_to_dense, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_fit_csr, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_transform_csr, m)?)?;
+
+    // Quantile Transformer
+    m.add_function(wrap_pyfunction!(rust_fit_dense, m)?)?;
     Ok(())
 }
