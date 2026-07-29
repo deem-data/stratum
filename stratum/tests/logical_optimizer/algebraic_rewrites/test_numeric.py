@@ -657,3 +657,78 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
+
+    # x * x -> square(x)
+    def test_self_multiply_to_square(self):
+        """x * x  →  square(x)"""
+        df = st.as_data_op(5)
+        out, *_ = optimize(df * df)
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.SQUARE)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 25)
+
+    def test_self_multiply_negative_operand(self):
+        """(-5) * (-5)  →  square(-5) = 25."""
+        df = st.as_data_op(-5)
+        out, *_ = optimize(df * df)
+        self.assertEqual(out[1].type, NumericOpType.SQUARE)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 25)
+
+    def test_self_multiply_root_safe(self):
+        """x * x as the root DAG node must not break."""
+        value = st.as_data_op(7)
+        out, *_ = optimize(value * value)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].type, NumericOpType.SQUARE)
+
+    def test_self_multiply_disabled(self):
+        """self_multiply=False leaves x * x as a MULTIPLY."""
+        df = st.as_data_op(5)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(self_multiply=False),
+        )
+        out, *_ = optimize(df * df, config=config)
+        self.assertEqual(out[1].type, NumericOpType.MULTIPLY)
+
+    def test_no_rewrite_multiply_different_operands(self):
+        """x * y (different operands) must not become square."""
+        x = st.as_data_op(5)
+        y = st.as_data_op(3)
+        out, *_ = optimize(x * y)
+        self.assertFalse(any(isinstance(o, NumericOp) and o.type is NumericOpType.SQUARE for o in out))
+
+    def test_no_rewrite_multiply_by_constant(self):
+        """x * 3 (constant operand) must not become square."""
+        df = st.as_data_op(5)
+        out, *_ = optimize(df * 3)
+        self.assertFalse(any(isinstance(o, NumericOp) and o.type is NumericOpType.SQUARE for o in out))
+
+    def test_self_multiply_with_trailing_op(self):
+        """(x * x) + 3  →  square(x) + 3, keeping the trailing op."""
+        df = st.as_data_op(5)
+        out, *_ = optimize((df * df) + 3)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[1].type, NumericOpType.SQUARE)
+        self.assertEqual(out[2].process("fit", [out[1].process("fit", [out[0].value])]), 28)
+
+    def test_self_multiply_then_sqrt_is_abs(self):
+        """sqrt(x * x) → sqrt(square(x)) → abs(x): composes with sqrt_square."""
+        df = st.as_data_op(-5)
+        out, *_ = optimize((df * df).skb.apply_func(np.sqrt))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].type, NumericOpType.ABS)
+
+    def test_disable_self_multiply_does_not_affect_log_exp(self):
+        """Disabling self_multiply must not suppress other rewrites."""
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(self_multiply=False),
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 1)

@@ -1,6 +1,6 @@
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
-from stratum.optimizer.ir._ops import Op, ValueOp
+from stratum.optimizer.ir._ops import Op, ValueOp, OperandRef
 
 
 def _is_scalar_const(value) -> bool:
@@ -143,6 +143,25 @@ def fold_to_one(op: Op, root: Op) -> Op:
     replace_op_in_outputs(op, one_op)
     return one_op if op is root else root
 
+def match_self_multiply(op):
+    """Match a multiply whose two operands are the same node (x * x)."""
+    return (op,) if (
+        isinstance(op, NumericOp)
+        and op.type is NumericOpType.MULTIPLY
+        and isinstance(op.opt_operand, OperandRef)
+        and op.inputs[op.opt_operand.k] is op.inputs[0]
+    ) else None
+
+
+
+def fold_to_square(op: Op, root: Op) -> Op:
+    """Rewrite a self-multiply into a square op, keeping its operand (x * x -> square(x))."""
+    x = op.inputs[0]
+    square_op = NumericOp(inputs=[], outputs=[], type=NumericOpType.SQUARE)
+    x.replace_output(op, square_op)
+    square_op.add_input(x)
+    replace_op_in_outputs(op, square_op)
+    return square_op if op is root else root
 
 match_exp_minus_one = match_two_op_chain(NumericOp, NumericOpType.EXP, NumericOpType.SUBTRACT,
     match2=lambda op: _matches_scalar_const(op, 1, reversed=False),
@@ -232,3 +251,5 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+fold_self_multiply = rewrite_pass(match_self_multiply, fold_to_square)
