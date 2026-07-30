@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use ndarray::{Array2, Axis};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
@@ -19,15 +17,19 @@ mod truncated_svd;  //TruncatedSVD using randomized SVD
 mod util;
 mod threads;
 mod one_hot_encoder;
-use once_cell::sync::Lazy;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // TODO (refactor): Move functions to corresponding modules
 // TODO (perf): Test with blas/mkl. Accordingly move from faer
 
-// ---- Global registry for models (TODO: Return pointer to Python) ----
-static TFIDF_MODELS: Lazy<Mutex<Vec<tfidf::TfidfModel>>> = Lazy::new(|| Mutex::new(Vec::new()));
+/// Python-owned fitted TF-IDF state.
+#[pyclass(name = "_TfidfModelHandle", frozen)]
+struct TfidfModelHandle {
+    model: Arc<tfidf::TfidfModel>,
+}
 
+/// Python-owned fitted randomized-TSVD state.
+#[pyclass(name = "_TruncatedSvdModelHandle", frozen)]
 struct TruncatedSvdModel {
     n_cols: usize,
     k: usize,
@@ -35,9 +37,9 @@ struct TruncatedSvdModel {
     components_t: Arc<ndarray::Array2<f32>>,
     singular_values: Vec<f32>,
 }
-static TSVD_NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static TSVD_MODELS: Lazy<Mutex<HashMap<u64, TruncatedSvdModel>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Python-owned fitted Frequent-Directions state.
+#[pyclass(name = "_FdEmbedModelHandle", frozen)]
 struct FdEmbedModel {
     n_cols: usize,
     k: usize,
@@ -49,8 +51,6 @@ struct FdEmbedModel {
     omega: Arc<Vec<f32>>,
     m: usize,  // m = k + oversample, width of reduced space
 }
-static FD_EMBED_NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static FD_EMBED_MODELS: Lazy<Mutex<HashMap<u64, FdEmbedModel>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 // Simple mapping from domain error to PyErr
 fn to_pyerr(err: tfidf::Error) -> PyErr {
@@ -192,7 +192,7 @@ fn compute_fd_fit(
     k: usize,
     oversample: usize,
     seed: Option<u64>,
-) -> Result<(u64, Array2<f32>), PyErr> {
+) -> Result<(FdEmbedModel, Array2<f32>), PyErr> {
     let m = k + oversample;
     let s = seed.unwrap_or(0xC0FFEE);
 
@@ -217,8 +217,7 @@ fn compute_fd_fit(
     let (z, projection) = fd::fd_fit(y.view(), k, pool)?;
     print_timing("fd_fit", t0);
 
-    // Store model
-    let model_id = FD_EMBED_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    // The model is allocated and remains in the Rust heap
     let model = FdEmbedModel {
         n_cols,
         k,
@@ -228,12 +227,7 @@ fn compute_fd_fit(
         m,
     };
 
-    FD_EMBED_MODELS
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("FD_EMBED_MODELS mutex poisoned"))?
-        .insert(model_id, model);
-
-    Ok((model_id, z))
+    Ok((model, z))
 }
 
 #[pyfunction]
@@ -248,47 +242,33 @@ fn fd_fit_from_csr(
     k: usize,
     oversample: usize,
     seed: Option<u64>,
-) -> PyResult<(u64, Py<PyArray2<f32>>)> {
+) -> PyResult<(Py<FdEmbedModel>, Py<PyArray2<f32>>)> {
     // Zero-copy view of NumPy arrays
     let data = unsafe { data.as_slice()? };
     let indices = unsafe { indices.as_slice()? };
     let indptr = unsafe { indptr.as_slice()? };
 
-    let (model_id, z) = py
+    let (model, z) = py
         .detach(|| compute_fd_fit(data, indices, indptr, n_rows, n_cols, k, oversample, seed))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("fd_fit failed: {e}")))?;
 
-    // Return NumPy (zero-copy)
+    // The fitted state (wrapper) is owned by Python and released with its last reference.
+    let model = Py::new(py, model)?;
     let py_z = z.into_pyarray(py).to_owned();
-    Ok((model_id, Py::from(py_z)))
+    Ok((model, Py::from(py_z)))
 }
 
 fn compute_fd_transform(
-    model_id: u64,
+    projection: Arc<Array2<f32>>,
+    omega: Arc<Vec<f32>>,
+    model_n_cols: usize,
+    m: usize,
     data: &[f32],
     indices: &[i32],
     indptr: &[i64],
     n_rows: usize,
     n_cols: usize,
 ) -> Result<Array2<f32>, PyErr> {
-    // Fetch model
-    let (projection, omega, model_n_cols, m) = {
-        let guard = FD_EMBED_MODELS
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("FD_EMBED_MODELS mutex poisoned"))?;
-
-        let model = guard
-            .get(&model_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("Unknown model_id {model_id}")))?;
-
-        (
-            Arc::clone(&model.projection),
-            Arc::clone(&model.omega),
-            model.n_cols,
-            model.m,
-        )
-    };
-
     // Validate cols match
     if n_cols != model_n_cols {
         return Err(PyErr::new::<PyValueError, _>(format!(
@@ -336,7 +316,7 @@ fn compute_fd_transform(
 #[pyo3(signature = (model_id, data, indices, indptr, n_rows, n_cols))]
 fn fd_transform_from_csr(
     py: Python<'_>,
-    model_id: u64,
+    model_id: PyRef<'_, FdEmbedModel>,
     data: Bound<PyArray1<f32>>,
     indices: Bound<PyArray1<i32>>,
     indptr: Bound<PyArray1<i64>>,
@@ -346,9 +326,26 @@ fn fd_transform_from_csr(
     let data = unsafe { data.as_slice()? };
     let indices = unsafe { indices.as_slice()? };
     let indptr = unsafe { indptr.as_slice()? };
+    let projection = Arc::clone(&model_id.projection);
+    let omega = Arc::clone(&model_id.omega);
+    let model_n_cols = model_id.n_cols;
+    let m = model_id.m;
+    drop(model_id);
 
     let z = py
-        .detach(|| compute_fd_transform(model_id, data, indices, indptr, n_rows, n_cols))
+        .detach(|| {
+            compute_fd_transform(
+                projection,
+                omega,
+                model_n_cols,
+                m,
+                data,
+                indices,
+                indptr,
+                n_rows,
+                n_cols,
+            )
+        })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("fd_transform failed: {e}")))?;
 
     let py_z = z.into_pyarray(py).to_owned();
@@ -356,7 +353,7 @@ fn fd_transform_from_csr(
 }
 
 fn compute_truncated_svd_fit(data: &[f32], indices: &[i32], indptr: &[i64],
-    n_rows: usize, n_cols: usize, k: usize, seed: Option<u64>) -> Result<(u64, Array2<f32>), PyErr>
+    n_rows: usize, n_cols: usize, k: usize, seed: Option<u64>) -> Result<(TruncatedSvdModel, Array2<f32>), PyErr>
 {
     // Hardcoded sklearn defaults: n_iter = 5 or 7, oversample=10
     const N_ITER: usize = 5;
@@ -371,7 +368,6 @@ fn compute_truncated_svd_fit(data: &[f32], indices: &[i32], indptr: &[i64],
         pool,
     )?;
 
-    let model_id = TSVD_NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let model = TruncatedSvdModel {
         n_cols,
         k: components_t.ncols(),
@@ -379,55 +375,39 @@ fn compute_truncated_svd_fit(data: &[f32], indices: &[i32], indptr: &[i64],
         singular_values: s,
     };
 
-    TSVD_MODELS
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("TSVD model cache mutex poisoned"))?
-        .insert(model_id, model);
-
-    Ok((model_id, z))
+    Ok((model, z))
 }
 
 #[pyfunction]
 #[pyo3(signature = (data, indices, indptr, n_rows, n_cols, k, seed=None))]
 fn truncated_svd_fit_from_csr(py: Python<'_>, data: Bound<PyArray1<f32>>, indices: Bound<PyArray1<i32>>,
     indptr: Bound<PyArray1<i64>>, n_rows: usize, n_cols: usize, k: usize,
-    seed: Option<u64>) -> PyResult<(u64, Py<PyArray2<f32>>)>
+    seed: Option<u64>) -> PyResult<(Py<TruncatedSvdModel>, Py<PyArray2<f32>>)>
 {
     // Step 1: Zero-copy view of NumPy arrays
     let data = unsafe { data.as_slice()? };
     let indices = unsafe { indices.as_slice()? };
     let indptr = unsafe { indptr.as_slice()? };
 
-    let (model_id, z) = py.detach(||
+    let (model, z) = py.detach(||
         compute_truncated_svd_fit(data, indices, indptr, n_rows, n_cols, k, seed))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("truncated_svd_fit failed: {e}")))?;
 
-    // Step 2: Return NumPy (zero-copy)
+    // Step 2: Return Python-owned state and NumPy output (zero-copy).
+    let model = Py::new(py, model)?;
     let py_z = z.into_pyarray(py).to_owned();
-    Ok((model_id, Py::from(py_z)))
+    Ok((model, Py::from(py_z)))
 }
 
 fn compute_truncated_svd_transform(
-    model_id: u64,
+    components_t: Arc<Array2<f32>>,
+    model_n_cols: usize,
     data: &[f32],
     indices: &[i32],
     indptr: &[i64],
     n_rows: usize,
     n_cols: usize,
 ) -> Result<Array2<f32>, PyErr> {
-    // Fetch model
-    let (components_t, model_n_cols) = {
-        let guard = TSVD_MODELS
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("TSVD model cache mutex poisoned"))?;
-
-        let m = guard
-            .get(&model_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("Unknown model_id {model_id}")))?;
-
-        (Arc::clone(&m.components_t), m.n_cols)
-    };
-
     // Validate cols match
     if n_cols != model_n_cols {
         return Err(PyErr::new::<PyValueError, _>(format!(
@@ -444,7 +424,7 @@ fn compute_truncated_svd_transform(
 #[pyo3(signature = (model_id, data, indices, indptr, n_rows, n_cols))]
 fn truncated_svd_transform_from_csr(
     py: Python<'_>,
-    model_id: u64,
+    model_id: PyRef<'_, TruncatedSvdModel>,
     data: Bound<PyArray1<f32>>,
     indices: Bound<PyArray1<i32>>,
     indptr: Bound<PyArray1<i64>>,
@@ -454,9 +434,22 @@ fn truncated_svd_transform_from_csr(
     let data = unsafe { data.as_slice()? };
     let indices = unsafe { indices.as_slice()? };
     let indptr = unsafe { indptr.as_slice()? };
+    let components_t = Arc::clone(&model_id.components_t);
+    let model_n_cols = model_id.n_cols;
+    drop(model_id);
 
     let z = py
-        .detach(|| compute_truncated_svd_transform(model_id, data, indices, indptr, n_rows, n_cols))
+        .detach(|| {
+            compute_truncated_svd_transform(
+                components_t,
+                model_n_cols,
+                data,
+                indices,
+                indptr,
+                n_rows,
+                n_cols,
+            )
+        })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("truncated_svd_transform failed: {e}")))?;
 
     let py_z = z.into_pyarray(py).to_owned();
@@ -568,7 +561,7 @@ fn tfidf_fit_csr(
     ngram_min: usize,
     ngram_max: usize,
 ) -> PyResult<(
-    u64,               // model_id
+    Py<TfidfModelHandle>, // Python-owned fitted model
     Py<PyArray1<f32>>, // data
     Py<PyArray1<i32>>, // indices
     Py<PyArray1<i64>>, // indptr
@@ -585,37 +578,28 @@ fn tfidf_fit_csr(
         })
         .map_err(to_pyerr)?;
 
-    // Store model for transform and get id
-    // TODO: Delete the model (memory leaks) or use pyclass to return pointer to Python
-    let model_id: u64 = {
-        let mut guard = TFIDF_MODELS.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("TFIDF_MODELS mutex poisoned")
-        })?;
-        guard.push(model);
-        (guard.len() - 1) as u64
-    };
-
-    let n_cols = {
-        let guard = TFIDF_MODELS.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("TFIDF_MODELS mutex poisoned")
-        })?;
-        guard[model_id as usize].n_cols
-    };
+    let n_cols = model.n_cols;
+    let model = Py::new(
+        py,
+        TfidfModelHandle {
+            model: Arc::new(model),
+        },
+    )?;
 
     // Convert to NumPy (Vec -> NumPy is zero-copy for from_vec)
     let py_data = PyArray1::<f32>::from_vec(py, data).to_owned();
     let py_indices = PyArray1::<i32>::from_vec(py, indices).to_owned();
     let py_indptr = PyArray1::<i64>::from_vec(py, indptr).to_owned();
 
-    Ok((model_id, Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_cols))
+    Ok((model, Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_cols))
 }
 
-// ---- Transform using stored vocab/idf + return CSR ----
+// ---- Transform using Python-owned vocab/idf + return CSR ----
 #[pyfunction]
 #[pyo3(signature = (model_id, seq))]
 fn tfidf_transform_csr(
     py: Python<'_>,
-    model_id: u64,
+    model_id: PyRef<'_, TfidfModelHandle>,
     seq: Vec<String>,
 ) -> PyResult<(
     Py<PyArray1<f32>>, // data
@@ -627,21 +611,11 @@ fn tfidf_transform_csr(
     let docs = seq;
     let n_rows = docs.len();
 
-    // Clone only small metadata if needed; simplest: borrow model under lock then compute
-    // Note: For perf, avoid holding lock during heavy compute. We'll clone the model (vocab+idf)
-    // TODO: Use Vec<Arc<TfidfModel>> model storage to avoid cloning.
-    let model = {
-        let guard = TFIDF_MODELS.lock().map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("TFIDF_MODELS mutex poisoned")
-        })?;
-        let idx = model_id as usize;
-        if idx >= guard.len() {
-            return Err(PyValueError::new_err(format!("Invalid model_id {model_id}")));
-        }
-        guard[idx].clone()
-    };
-
+    // Clone only the Arc before releasing the GIL. Concurrent transforms share
+    // the immutable fitted vocabulary and IDF without cloning their contents.
+    let model = Arc::clone(&model_id.model);
     let n_cols = model.n_cols;
+    drop(model_id);
 
     let (data, indices, indptr) = py
         .detach(|| model.transform_csr(&docs))
@@ -657,6 +631,9 @@ fn tfidf_transform_csr(
 // ---- Expose module ----
 #[pymodule]
 fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
+    m.add_class::<TfidfModelHandle>()?;
+    m.add_class::<FdEmbedModel>()?;
+    m.add_class::<TruncatedSvdModel>()?;
     m.add_function(wrap_pyfunction!(hashing_tfidf_csr, m)?)?;
     m.add_function(wrap_pyfunction!(hashing_tfidf_csr_with_idf, m)?)?;
     m.add_function(wrap_pyfunction!(fd_fit_from_csr, m)?)?;
