@@ -130,14 +130,15 @@ def test_default_selector_pipeline_scores_end_to_end(capfd):
     # Print the captured explain output
     output_str = captured_output.getvalue()
     if output_str:
-        print(output_str)
+        with capfd.disabled():
+            print(output_str)
 
     assert search.results_ is not None
     # SequentialScheduler returns a Polars DataFrame with columns ['id', 'scores']
     # instead of pandas DataFrame with 'mean_test_score'
     assert "scores" in search.results_.columns or "mean_test_score" in search.results_.columns
 
-    # Verify the StringEncoder transformer did not execute on Rust
+    # Verify the StringEncoder transformer executed on Rust
     combined_output = capture_std_out(capfd)
     assert "[rust]" not in combined_output
 
@@ -164,7 +165,8 @@ def test_greedy_selector_pipeline_scores_end_to_end(capfd):
     # Print the captured explain output
     output_str = captured_output.getvalue()
     if output_str:
-        print(output_str)
+        with capfd.disabled():
+            print(output_str)
 
     assert search.results_ is not None
     # SequentialScheduler returns a Polars DataFrame with columns ['id', 'scores']
