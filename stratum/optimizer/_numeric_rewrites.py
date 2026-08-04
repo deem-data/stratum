@@ -1,3 +1,5 @@
+import scipy.special as sp
+
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
 from stratum.optimizer.ir._ops import Op, ValueOp
@@ -232,3 +234,61 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+
+def match_softmax(op):
+    """Match ``DIVIDE(EXP(x), SUM(EXP(x)))`` where both operands are the same EXP
+    node and nothing outside the pattern consumes the EXP or SUM value.
+
+    The reduction is matched as ``NumericOpType.SUM``. It was previously keyed on
+    ``type is GENERIC and func is np.sum``; promoting SUM into the enum makes this
+    a single type check, but the args/kwargs guard below is still required --
+    the type says "this is a sum", not "this is a whole-array sum".
+    """
+    if not (isinstance(op, NumericOp) and op.type is NumericOpType.DIVIDE):
+        return None
+    if op.opt_operand is None or op.reversed:
+        return None
+
+    numer = op.inputs[0]
+    denom = op.inputs[op.opt_operand.k]
+
+    if not (isinstance(numer, NumericOp) and numer.type is NumericOpType.EXP):
+        return None
+    if not (isinstance(denom, NumericOp) and denom.type is NumericOpType.SUM):
+        return None
+    # Reject axis/keepdims/dtype sums: `exp(x)/sum(exp(x), axis=0)` is a
+    # column-wise softmax, not the whole-array `scipy.special.softmax(x)`.
+    if denom.args or denom.kwargs:
+        return None
+    # SUM must be fed by exactly the same EXP node as the numerator.
+    if len(denom.inputs) != 1 or denom.inputs[0] is not numer:
+        return None
+    # Fan-out: no other consumer may rely on the EXP or SUM value.
+    if set(numer.outputs) != {op, denom}:
+        return None
+    if set(denom.outputs) != {op}:
+        return None
+    return (op, numer, denom)
+
+
+def replace_with_softmax(div_op, exp_op, sum_op, root):
+    """Replace the DIV(EXP(x), SUM(EXP(x))) sub-DAG with a single GENERIC
+    NumericOp wrapping ``scipy.special.softmax``, which is numerically stable
+    (it subtracts the max before exponentiating)."""
+    x = exp_op.inputs[0]
+
+    softmax_op = NumericOp(
+        inputs=[x],
+        outputs=list(div_op.outputs),
+        func=sp.softmax,
+    )
+
+    x.replace_output(exp_op, softmax_op)
+    div_op.replace_input_of_outputs(softmax_op)
+    if div_op is root:
+        root = softmax_op
+    return root
+
+
+fuse_softmax = rewrite_pass(match_softmax, replace_with_softmax)
