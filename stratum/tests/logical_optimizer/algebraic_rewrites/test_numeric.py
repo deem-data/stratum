@@ -657,3 +657,75 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
+
+    # (x + c1) + c2 -> x + (c1 + c2)
+    def test_add_chain_fires(self):
+        """(x + 2) + 3  →  x + 5 ."""
+        df = st.as_data_op(10)
+        out, *_ = optimize((df + 2) + 3)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].type, NumericOpType.ADD)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 15)
+
+    def test_add_chain_negative_constant(self):
+        """(x + 5) + (-2)  →  x + 3."""
+        df = st.as_data_op(10)
+        out, *_ = optimize((df + 5) + (-2))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 13)
+
+    def test_add_chain_then_add_zero_removes_op(self):
+        """(x + 2) + (-2)  →  x + 0  →  x: add_chain runs before add_zero."""
+        df = st.as_data_op(10)
+        out, *_ = optimize((df + 2) + (-2))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 10)
+
+    def test_add_chain_disabled(self):
+        """add_chain=False keeps both add ops."""
+        df = st.as_data_op(10)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(add_chain=False),
+        )
+        out, *_ = optimize((df + 2) + 3, config=config)
+        self.assertEqual(len(out), 3)
+
+    def test_no_rewrite_single_add(self):
+        """A single x + 2 is left unchanged."""
+        df = st.as_data_op(10)
+        out, *_ = optimize(df + 2)
+        self.assertEqual(len(out), 2)
+
+    def test_no_rewrite_add_then_multiply(self):
+        """(x + 2) * 3 must not fuse (different op types)."""
+        df = st.as_data_op(10)
+        out, *_ = optimize((df + 2) * 3)
+        self.assertEqual(len(out), 3)
+
+    def test_no_rewrite_reversed_first_add(self):
+        """(2 + x) + 3 is not fused (reversed form)."""
+        df = st.as_data_op(10)
+        out, *_ = optimize((2 + df) + 3)
+        self.assertEqual(len(out), 3)
+
+    def test_add_chain_with_trailing_op(self):
+        """((x + 2) + 3) * 2  →  (x + 5) * 2, keeping the trailing multiply."""
+        df = st.as_data_op(10)
+        out, *_ = optimize(((df + 2) + 3) * 2)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[1].type, NumericOpType.ADD)
+        self.assertEqual(out[2].process("fit", [out[1].process("fit", [out[0].value])]), 30)
+
+    def test_disable_add_chain_does_not_affect_log_exp(self):
+        """Disabling add_chain must not suppress other rewrites."""
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(add_chain=False),
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 1)

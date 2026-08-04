@@ -1,3 +1,4 @@
+import operator
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
 from stratum.optimizer.ir._ops import Op, ValueOp
@@ -144,6 +145,32 @@ def fold_to_one(op: Op, root: Op) -> Op:
     return one_op if op is root else root
 
 
+def match_const_chain(type1):
+    """Match (x <op> c1) <op> c2: two consecutive var-const ops of the same type."""
+    def match(op1):
+        if not (isinstance(op1, NumericOp) and op1.type is type1
+                and op1.opt_operand is None and _is_scalar_const(op1.constant)
+                and not op1.reversed and len(op1.outputs) == 1):
+            return None
+        op2 = op1.outputs[0]
+        if (isinstance(op2, NumericOp) and op2.type is type1
+                and op2.opt_operand is None and _is_scalar_const(op2.constant)
+                and not op2.reversed):
+            return (op1, op2)
+        return None
+    return match
+
+
+def make_merge_const_chain(combine):
+    """Action factory: fold op2's constant into op1 via combine, then drop op2."""
+    def action(op1, op2, root):
+        op1.constant = combine(op1.constant, op2.constant)
+        op1.outputs = [out for out in op1.outputs if out is not op2]
+        replace_op_in_outputs(op2, op1)
+        return op1 if op2 is root else root
+    return action
+
+
 match_exp_minus_one = match_two_op_chain(NumericOp, NumericOpType.EXP, NumericOpType.SUBTRACT,
     match2=lambda op: _matches_scalar_const(op, 1, reversed=False),
 )
@@ -232,3 +259,9 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+# Constant accumulation: (x + c1) + c2 rewritten as x + (c1 + c2)
+fold_add_chain = rewrite_pass(
+    match_const_chain(NumericOpType.ADD),
+    make_merge_const_chain(operator.add),
+)
