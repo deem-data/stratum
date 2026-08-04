@@ -5,7 +5,11 @@ from stratum.optimizer._optimize import  optimize
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
-from stratum.optimizer.ir._ops import OperandRef
+from stratum.optimizer.ir._ops import OperandRef, ValueOp
+
+
+ZERO_DIV_ON = OptConfig(algebraic_rewrites=True,
+                        algebraic_rewrite_config=AlgebraicRewritesConfig(zero_div=True))
 
 class TestCSE(unittest.TestCase):
 
@@ -657,3 +661,97 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
+
+    # 0 / x -> 0
+    def test_zero_div_off_by_default(self):
+        """zero_div is opt-in: 0 / x is NOT folded unless the flag is enabled."""
+        df = st.as_data_op(5)
+        out, *_ = optimize(0 / df)
+        self.assertEqual(len(out), 2)
+
+    def test_zero_div(self):
+        """0 / x folds to a single ValueOp(0) when zero_div is enabled."""
+        df = st.as_data_op(5)
+        out, *_ = optimize(0 / df, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 1)
+        self.assertIsInstance(out[0], ValueOp)
+        self.assertEqual(out[0].value, 0)
+
+    def test_zero_div_float_numerator(self):
+        """0.0 / x also matches (0.0 == 0)."""
+        df = st.as_data_op(5)
+        out, *_ = optimize(0.0 / df, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 0)
+
+    def test_no_rewrite_div_by_zero(self):
+        """x / 0 must not be rewritten to 0 (only 0 / x is)."""
+        df = st.as_data_op(np.float64(5.0))
+        out, *_ = optimize(df / 0, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 2)
+
+    def test_no_rewrite_normal_div(self):
+        """x / 2 must not be rewritten."""
+        df = st.as_data_op(6)
+        out, *_ = optimize(df / 2, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 2)
+
+    def test_zero_div_with_trailing_op(self):
+        """(0 / x) + 3 folds the division to 0, keeping the trailing + 3."""
+        df = st.as_data_op(5)
+        t2 = (0 / df) + 3
+        out, *_ = optimize(t2, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0].value, 0)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 3)
+
+    def test_zero_div_complex_divisor(self):
+        """0 / exp(x) folds to 0; the whole divisor subgraph is dropped."""
+        df = st.as_data_op(5)
+        t2 = 0 / df.skb.apply_func(np.exp)
+        out, *_ = optimize(t2, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 0)
+
+    def test_zero_div_after_identity(self):
+        """identity_op strips * 1 first, then 0 / (x * 1) folds to 0."""
+        df = st.as_data_op(5)
+        t2 = 0 / (df * 1)
+        out, *_ = optimize(t2, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 0)
+
+    def test_zero_div_with_cancelable_divisor(self):
+        """0 / exp(log(x)) folds to 0 regardless of which rewrite runs first."""
+        df = st.as_data_op(5)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+        out, *_ = optimize(0 / t2, config=ZERO_DIV_ON)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 0)
+
+    def test_zero_div_diverges_at_zero_divisor(self):
+        """Divisor = 0: unoptimized 0/0 is NaN, optimized gives 0."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df = st.as_data_op(np.float64(0.0))
+            t = 0 / df
+            # flag off (default): DIVIDE op kept, evaluates 0 / 0 -> NaN
+            out_off, *_ = optimize(t)
+            self.assertEqual(len(out_off), 2)
+            self.assertTrue(np.isnan(out_off[1].process("fit", [out_off[0].value])))
+            # flag on: folded to constant 0
+            out_on, *_ = optimize(t, config=ZERO_DIV_ON)
+            self.assertEqual(len(out_on), 1)
+            self.assertEqual(out_on[0].value, 0)
+
+    def test_zero_div_diverges_at_nan_divisor(self):
+        """Divisor = NaN: unoptimized 0/NaN is NaN, optimized gives 0."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df = st.as_data_op(np.float64(np.nan))
+            t = 0 / df
+            out_off, *_ = optimize(t)
+            self.assertEqual(len(out_off), 2)
+            self.assertTrue(np.isnan(out_off[1].process("fit", [out_off[0].value])))
+            out_on, *_ = optimize(t, config=ZERO_DIV_ON)
+            self.assertEqual(len(out_on), 1)
+            self.assertEqual(out_on[0].value, 0)
