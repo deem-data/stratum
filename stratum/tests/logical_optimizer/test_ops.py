@@ -50,8 +50,7 @@ class TestOpCloning(unittest.TestCase):
         pred = data_op.skb.apply(DummyRegressor(), y=data["y"])
         pred = pred.skb.apply_func(lambda x, a, b: x, 1, b=1)
         choice = st.choose_from([pred], name="choice").as_data_op()
-        with st.config(fast_dataops_convert=True):
-            ops, *_ = optimize_(choice.empty)
+        ops, *_ = optimize_(choice.empty)
 
         # ops[0] is the physical source op; physical ops are never cloned.
         with self.assertRaises(TypeError):

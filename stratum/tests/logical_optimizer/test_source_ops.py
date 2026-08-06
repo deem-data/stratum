@@ -53,8 +53,7 @@ class TestMakeReadOp(unittest.TestCase):
     """`make_read_op` and its end-to-end usage via the optimizer."""
 
     def _optimize_read(self, data, env=None):
-        with st.config(fast_dataops_convert=True):
-            return optimize(data, OptConfig(dataframe_ops=True), env=env)
+        return optimize(data, OptConfig(dataframe_ops=True), env=env)
 
     def test_with_variable_input(self):
         with csv_file(pd.DataFrame({"col": [1, 2]})) as path:
