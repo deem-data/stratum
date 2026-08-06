@@ -72,6 +72,24 @@ class TestNumericOps(unittest.TestCase):
         result = op.process("fit", [np.array([2.0, 3.0, 4.0])])
         np.testing.assert_array_almost_equal(result, np.array([4.0, 9.0, 16.0]))
 
+    def test_process_sum(self):
+        op = NumericOp(inputs=[], outputs=None, func=np.sum)
+        self.assertEqual(op.type, NumericOpType.SUM)
+        result = op.process("fit", [np.array([1.0, 2.0, 3.0])])
+        np.testing.assert_almost_equal(result, 6.0)
+
+    def test_process_sum_with_axis_arg(self):
+        """Positional reduction args must reach np.sum."""
+        op = NumericOp(inputs=[], outputs=None, func=np.sum, args=(0,))
+        result = op.process("fit", [np.array([[1.0, 2.0], [3.0, 4.0]])])
+        np.testing.assert_array_almost_equal(result, np.array([4.0, 6.0]))
+
+    def test_process_sum_with_kwargs(self):
+        """Keyword reduction args must reach np.sum."""
+        op = NumericOp(inputs=[], outputs=None, func=np.sum, kwargs={"axis": 1, "keepdims": True})
+        result = op.process("fit", [np.array([[1.0, 2.0], [3.0, 4.0]])])
+        np.testing.assert_array_almost_equal(result, np.array([[3.0], [7.0]]))
+
     def test_unsupported_numeric_op(self):
         op = NumericOp(inputs=[], outputs=None, func=np.cos)
         op.type = "unsupported"

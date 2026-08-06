@@ -78,7 +78,6 @@ class _Flags:
     implementation_selector: str = _read_implementation_selector(
         os.getenv("STRATUM_IMPLEMENTATION_SELECTOR", "default"))
     pandas_query: bool = _env_bool("STRATUM_PANDAS_QUERY", False)
-    fast_dataops_convert: bool = True
     validate_dag: bool = True
     make_selection_op: bool = True
     make_map_op: bool = True
@@ -102,7 +101,6 @@ def set_config(rust_backend: bool | None = None,
     force_polars: bool = False,
     pandas_query: bool = False,
     cse: bool = True,
-    fast_dataops_convert: bool = True,
     validate_dag: bool = True,
     make_selection_op: bool = True,
     make_map_op: bool = True,
@@ -209,9 +207,6 @@ def set_config(rust_backend: bool | None = None,
     FLAGS.make_map_op = bool(make_map_op)
     FLAGS.make_column_projection = bool(make_column_projection)
     FLAGS.rechunk = bool(rechunk)
-
-    #FIXME: This should be the default. No need to set it. Remove.
-    FLAGS.fast_dataops_convert = bool(fast_dataops_convert)
     FLAGS.validate_dag = bool(validate_dag)
 
 

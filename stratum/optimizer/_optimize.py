@@ -264,10 +264,7 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
 
 def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
     start = start_time()
-    if FLAGS.fast_dataops_convert:
-        g = build_graph(dag)
-    else:
-        g = _Graph().run(dag)
+    g = build_graph(dag)
     nodes = g["nodes"]
     parents = g["parents"]
     children = g["children"]
