@@ -1736,7 +1736,7 @@ wheels = [
 
 [[package]]
 name = "stratum-ai"
-version = "0.0.0.dev0"
+version = "0.0.0.dev1"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
@@ -1786,7 +1786,6 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "polars" },
     { name = "psutil", marker = "extra == 'benchmark'", specifier = ">=7.2" },
-    { name = "pyarrow", specifier = ">=22.0.0" },
     { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pygments", specifier = ">=2.20.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },

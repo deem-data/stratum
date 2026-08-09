@@ -55,3 +55,9 @@ Bigger features should be planned as GitHub issues with sub-issues to break the 
   ├── #17 partition-aware scheduling → [LazyDAG] implement partition-aware scheduling #17
   └── #18 integration tests          → [LazyDAG] add integration tests #18
 ```
+
+## Publishing a Development Build
+
+The PyPI workflow is intentionally opt-in and does not run for normal commits. Before publishing, update the version in `pyproject.toml` to a new development version and configure the repository secret `PYPI_API_TOKEN` with a project-scoped PyPI token.
+
+Run **Publish Python package** manually from the GitHub Actions tab, or push a tag matching `pypi-*`. The workflow builds portable wheels for the supported CPython 3.11+ platforms, builds an sdist, and publishes all artifacts together.

@@ -14,8 +14,8 @@ name = "skrub_rust"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Python 3.10 ABI for wide wheel compatibility on 3.10.x
-pyo3 = { version = ">=0.29.0", features = ["extension-module", "abi3-py310"] }
+# Python 3.11 ABI for the project's supported CPython versions
+pyo3 = { version = ">=0.29.0", features = ["extension-module", "abi3-py311"] }
 numpy = { version = ">=0.29,<0.30" }
 ahash = "0.8.12"
 anyhow = "1.0.99"
