@@ -86,6 +86,13 @@ class RustyStringEncoder(_SE):
         super().__init__(vectorizer=vectorizer, analyzer=analyzer, ngram_range=ngram_range, n_components=n_components, **kwargs)
         self._rust_state_ = None
 
+    def __sklearn_clone__(self):
+        """Keep the plan-time Rust binding marker on nested clones."""
+        cloned = type(self)(**self.get_params(deep=False))
+        if getattr(self, "_stratum_force_rust", False): # TODO: remove this flag
+            cloned._stratum_force_rust = True
+        return cloned
+
     def fit_transform(self, X, y=None):
         # Check supported parameters
         if not _rust_supported_subset(self)[0]:

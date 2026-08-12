@@ -32,6 +32,15 @@ def supports_rust_one_hot_encoder(estimator) -> tuple[bool, str]:
         return False, "dtype must be float32"
     if getattr(estimator, "handle_unknown", None) != "ignore":
         return False, "handle_unknown must be 'ignore'"
+    categories = getattr(estimator, "categories", "auto")
+    if not (isinstance(categories, str) and categories == "auto"):
+        return False, "categories must be 'auto'"
+    if getattr(estimator, "min_frequency", None) is not None:
+        return False, "min_frequency is not supported"
+    if getattr(estimator, "max_categories", None) is not None:
+        return False, "max_categories is not supported"
+    if getattr(estimator, "feature_name_combiner", "concat") != "concat":
+        return False, "feature_name_combiner must be 'concat'"
     return True, ""
 
 
@@ -89,6 +98,18 @@ class RustyOneHotEncoder(_SKOneHot):
         self._supported_params = (drop == "if_binary"
                                   and np.dtype(self.dtype) == np.dtype(np.float32) #'float32'/np.float32/np.dtype('float32)
                                   and handle_unknown == "ignore" and len(kwargs) == 0)
+
+    def __sklearn_clone__(self):
+        """Keep the plan-time Rust binding marker on nested clones.
+
+        TableVectorizer clones its leaf prototypes while constructing its
+        internal pipeline.  The marker is intentionally private and is copied
+        only for an unfitted estimator clone; fitted state is not retained.
+        """
+        cloned = type(self)(**self.get_params(deep=False))
+        if getattr(self, "_stratum_force_rust", False):
+            cloned._stratum_force_rust = True # TODO: remove this flag
+        return cloned
 
     def fit(self, X, y=None):
         # Fit the sklearn OHE for exact categories/drop parity

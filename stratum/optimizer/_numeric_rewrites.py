@@ -1,6 +1,9 @@
+import numbers
+
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
 from stratum.optimizer.ir._ops import Op, ValueOp
+import numpy as np
 
 
 def _is_scalar_const(value) -> bool:
@@ -9,8 +12,12 @@ def _is_scalar_const(value) -> bool:
     Guards against ndarray constants (e.g. ``df * np.array([...])``), whose
     ``== const`` yields an array and raises "truth value of an array is
     ambiguous" when used in a boolean context.
+
+    ``numbers.Real`` rather than ``(int, float)`` so numpy scalars match too:
+    ``np.int64`` is not an ``int`` subclass and would otherwise skip every
+    identity rewrite. ``Real`` still excludes ndarray and ``complex``.
     """
-    return isinstance(value, (int, float))
+    return isinstance(value, numbers.Real)
 
 
 def _matches_scalar_const(op, const, reversed=None):
@@ -222,6 +229,19 @@ eliminate_pow_zero = rewrite_pass(
     fold_to_one,
 )
 
+# `x ** 1 -> x`. Matched as a first-class identity on `NumericOpType.POW`, reusing the
+# same helper as `x * 1` / `x / 1`. `reversed=False` keeps `1 ** x` (which is 1, not x)
+# untouched.
+#
+# TODO(dtype): like `x / 1` below, not always dtype-preserving. `int_array ** 1.0`
+# yields float64, and under NEP 50 `int8_array ** np.int64(1)` yields int64, while
+# the eliminated result keeps the original dtype. Matching only a weak `int` 1 would
+# avoid this.
+eliminate_pow_by_one = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.POW, 1, reversed=False),
+    eliminate_single_op_chain_root_safe,
+)
+
 # TODO(dtype): unlike the other identity rewrites (`x*1`, `x+0`, `x-0`), dropping
 # `x / 1` is not dtype-preserving. `np.divide` always performs true division, so
 # `int_array / 1` yields float64 while the eliminated result keeps the original
@@ -232,3 +252,78 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+
+def replace_three_op_chain(op1: Op, op2: Op, op3: Op, replacement: Op):
+    """Replace op1 -> op2 -> op3 with replacement: x -> replacement -> downstream."""
+    x = op1.inputs[0]
+    x.replace_output(op1, replacement)
+    replacement.add_input(x)
+    for downstream in op3.outputs:
+        replacement.add_output(downstream)
+        downstream.replace_input(op3, replacement)
+
+
+def make_replace_three_op_chain_root_safe(make_replacement):
+    """Action factory: replace a three-op chain with a new op from make_replacement()."""
+    def action(op1: Op, op2: Op, op3: Op, root: Op) -> Op:
+        replacement = make_replacement()
+        replace_three_op_chain(op1, op2, op3, replacement)
+        if op3 is root:
+            root = replacement
+        return root
+    return action
+
+
+def _logsumexp(x):
+    """Numerically stable log(sum(exp(x))): ``c + log(sum(exp(x - c)))``, ``c = max(x)``.
+
+    Note: this is a *stability* rewrite, not a speed one. There is no fused
+    kernel here -- the replacement still runs separate NumPy passes, and the
+    extra ``max`` / ``subtract`` make it marginally more work than the original
+    three-op chain. What it buys is that inputs large enough to overflow ``exp``
+    (e.g. ``x = 1000``) return a finite result instead of ``inf``. Collapsing
+    three IR nodes into one is a side effect, not the motivation.
+    """
+    c = np.max(x)
+    return c + np.log(np.sum(np.exp(x - c)))
+
+
+def match_log_sum_exp(op):
+    """Match ``EXP -> SUM -> LOG`` chain."""
+    if not isinstance(op, NumericOp):
+        return None
+    if op.type is not NumericOpType.EXP:
+        return None
+    if len(op.outputs) != 1:
+        return None
+
+    op2 = op.outputs[0]
+    if not isinstance(op2, NumericOp):
+        return None
+    if op2.type is not NumericOpType.SUM:
+        return None
+    if len(op2.outputs) != 1:
+        return None
+    # `_logsumexp` always reduces over the whole array, so any reduction
+    # modifier (axis, keepdims, dtype, where, ...) would be silently dropped.
+    if op2.args or op2.kwargs:
+        return None
+
+    op3 = op2.outputs[0]
+    if not isinstance(op3, NumericOp):
+        return None
+    if op3.type is not NumericOpType.LOG:
+        return None
+
+    return (op, op2, op3)
+
+
+_replace_with_logsumexp = make_replace_three_op_chain_root_safe(
+    lambda: NumericOp(inputs=[], outputs=[], func=_logsumexp)
+)
+
+eliminate_log_sum_exp = rewrite_pass(
+    match_log_sum_exp,
+    _replace_with_logsumexp,
+)

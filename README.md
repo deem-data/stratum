@@ -9,7 +9,7 @@
 [![Rust CI](https://github.com/deem-data/stratum/actions/workflows/rust_tests.yml/badge.svg)](https://github.com/deem-data/stratum/actions/workflows/rust_tests.yml)
 [![codecov](https://codecov.io/gh/deem-data/stratum/graph/badge.svg?token=QQDTC0RXUN)](https://codecov.io/gh/deem-data/stratum)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 
 **Stratum** is an ML system for efficiently executing **large-scale agentic pipeline search**. It integrates with MLE agents by representing batches of agent-generated pipelines as lazily evaluated DAGs, applying logical and runtime optimizations, and executing them across heterogeneous backends, including a Rust-based runtime.
 Stratum builds on [skrub's](https://skrub-data.org/stable) operator abstraction and is under active development.
@@ -26,13 +26,15 @@ Stratum builds on [skrub's](https://skrub-data.org/stable) operator abstraction 
 
 ## Installation
 
-For now, you need to build stratum from source.
+Install the current development build from PyPI:
 
-**Requirements:**
-- Python **3.12+**
-- [skrub](https://skrub-data.org/stable/)
-- [Rust toolchain](https://rustup.rs/) (nightly not required; stable is fine)
-- [maturin](https://www.maturin.rs/) (`pip install maturin`)
+```bash
+python -m pip install "stratum-ai==0.0.0.dev1"
+```
+
+Pre-built Rust wheels are provided for the supported CPython 3.11+ platforms, so a Rust toolchain is not required for a normal installation. The source-build instructions below are for contributors developing Stratum itself.
+
+For source development, you need Python **3.11+**, a [Rust toolchain](https://rustup.rs/) (nightly not required; stable is fine), and [maturin](https://www.maturin.rs/) (`python -m pip install maturin`).
 
 From the repository root, install the extension in editable (development) mode:
 
@@ -150,7 +152,7 @@ This produces redistributable `.whl` files under `dist/`.
 
 ```bash
 # Linux / macOS
-maturin build --release -o dist --interpreter python3.10 --compatibility linux
+maturin build --release -o dist --interpreter python3.11 --compatibility linux
 
 # Windows
 maturin build --release -o dist
@@ -158,16 +160,13 @@ maturin build --release -o dist
 Then install with:
 
 ```bash
-pip install ./dist/stratum-*.whl
+python -m pip install ./dist/stratum_ai-*.whl
 ```
 
 ---
 
 ## License
 Apache License 2.0. See [LICENSE](LICENSE) for details.
-
-
-
 
 
 

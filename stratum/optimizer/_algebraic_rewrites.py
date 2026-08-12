@@ -10,10 +10,12 @@ from stratum.optimizer._numeric_rewrites import (
     eliminate_add_zero,
     fold_exp_minus_one,
     eliminate_pow_zero,
+    eliminate_pow_by_one,
     eliminate_identity_subtract,
     eliminate_any_mul_zero,
     eliminate_div_by_one,
     fold_log_plus_one,
+    eliminate_log_sum_exp,
 )
 from stratum.optimizer.ir._ops import Op
 from stratum.utils._utils import start_time, log_time
@@ -34,10 +36,12 @@ class AlgebraicRewritesConfig:
     add_zero: bool = True
     exp_minus_one: bool = True
     pow_zero: bool = True
+    pow_by_one: bool = True
     identity_subtract: bool = True
     any_mul_zero: bool = True
     div_by_one: bool = True
     log_plus_one: bool = True
+    log_sum_exp: bool = True
 
 
 def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
@@ -69,7 +73,13 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
         root = eliminate_identity_subtract(root)
     if config.pow_zero:
         root = eliminate_pow_zero(root)
+    if config.pow_by_one:
+        root = eliminate_pow_by_one(root)
     if config.any_mul_zero:
         root = eliminate_any_mul_zero(root)
+    if config.log_sum_exp:
+        # Stability, not speed -- see _logsumexp. Enabled by default because the
+        # unstable form silently overflows to inf.
+        root = eliminate_log_sum_exp(root)
     log_time("algebraic_rewrite", start)
     return root

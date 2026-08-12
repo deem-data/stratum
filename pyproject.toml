@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "stratum-ai" # PyPi name
-version = "0.0.0.dev0"
+version = "0.0.0.dev1"
 description = "skrub with a Rust backend"
 readme = "README.md"
 authors = [{name = "Arnab Phani"}]
@@ -15,7 +15,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -29,7 +28,6 @@ dependencies = [
     "skrub==0.8.0",
     "polars",
     "graphviz",
-    "pyarrow>=22.0.0",
     "pygments>=2.20.0",
     "urllib3>=2.7.0",
     "idna>=3.15",

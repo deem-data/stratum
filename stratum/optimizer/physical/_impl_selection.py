@@ -79,9 +79,12 @@ class GreedyImplementationSelector(ImplementationSelector):
     does not call :meth:`PhysicalImpl.cost` (still a placeholder) and does not
     look at neighboring operators, formats, conversion costs, or plan-wide
     costs. This is a baseline.
+    stratum backend contains hybrid implementations (python + rust).
     """
 
-    _PREFERRED_BACKENDS = ("rust", "polars", "numpy", "sklearn-skrub", "pandas")
+    _PREFERRED_BACKENDS = (
+        "rust", "stratum", "polars", "numpy", "sklearn-skrub", "pandas"
+    )
 
     def choose(self, op: IRNode, candidates: list[PhysicalImpl],
                ctx: PlanContext) -> PhysicalImpl | None:
