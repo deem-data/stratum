@@ -1,0 +1,18 @@
+{
+  "rows": [1000, 10000, 100000, 500000],
+  "cols": [100, 500, 1000],
+  "repeats": 5,
+  "warmup": 1,
+  "test_size": 0.2,
+  "random_state": 42,
+  "n_informative_frac": 0.5,
+  "lr_params": {
+    "C": 1.0,
+    "l1_ratio": 0.0,
+    "fit_intercept": true,
+    "tol": 1e-4,
+    "max_iter": 1000
+  },
+  "output_csv": "benchmark.csv",
+  "plots_dir": "plots"
+}
