@@ -4,6 +4,7 @@ Outputs:
   repository-card.png      — 1280x640 GitHub social card (white background)
   repository-card-dark.png — Transparent card with white text (for dark themes)
   stratum_logo.png         — Transparent logo, cropped tight, light pixels cleaned
+  stratum_logo_stacked_large.png — Full-resolution logo with "stratum" below the icon
 """
 
 import os
@@ -19,6 +20,9 @@ LOGO_DARK_OUTPUT = os.path.join(DIR, "stratum_logo_dark.png")
 LOGO_OUTPUT = os.path.join(DIR, "stratum_logo.png")
 LOGO_LARGE_OUTPUT = os.path.join(DIR, "stratum_logo_large.png")
 LOGO_DARK_LARGE_OUTPUT = os.path.join(DIR, "stratum_logo_dark_large.png")
+LOGO_STACKED_LARGE_OUTPUT = os.path.join(DIR, "stratum_logo_stacked_large.png")
+LOGO_DARK_STACKED_LARGE_OUTPUT = os.path.join(
+    DIR, "stratum_logo_dark_stacked_large.png")
 
 CARD_W, CARD_H = 1280, 640
 TEXT = "stratum"
@@ -26,6 +30,11 @@ TEXT_COLOR = (30, 41, 59)       # Dark navy to match icon's bottom layer
 TEXT_COLOR_DARK = (255, 255, 255)  # White text for dark theme
 FONT_SIZE = 96 * 2
 GAP = 40
+
+# Stacked (text-below-icon) layout: text width and vertical gap as fractions
+# of the icon's width / height.
+STACKED_TEXT_W_RATIO = 0.62
+STACKED_GAP_RATIO = 0.04
 
 # Post-processing constants
 COMPOSITE_BRIGHT_THRESH = 200
@@ -199,6 +208,49 @@ def _make_logo_impl(icon, font, gap, text_w, text_h, text_y_off,
     print(f"Saved {output_path} ({img.width}x{img.height})")
 
 
+def _make_logo_stacked_impl(icon, font, gap, text_w, text_h, text_y_off,
+                            *, text_color, output_path, clean_light=False):
+    """Logo with the label centered below the icon."""
+    pad = max(1, int(icon.width * 0.02))
+    canvas_w = max(icon.width, text_w) + 2 * pad
+    canvas_h = icon.height + gap + text_h + 2 * pad
+    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    icon_x = (canvas_w - icon.width) // 2
+    img.paste(icon, (icon_x, pad), icon)
+
+    text_x = (canvas_w - text_w) // 2
+    text_y = pad + icon.height + gap - text_y_off
+    draw.text((text_x, text_y), TEXT, fill=text_color, font=font)
+
+    if clean_light:
+        img = _clean_light_pixels(img)
+
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+
+    img.save(output_path, "PNG")
+    print(f"Saved {output_path} ({img.width}x{img.height})")
+
+
+def fit_font_to_width(target_w, bold=True):
+    """Return the largest font whose rendered TEXT is at most target_w wide."""
+    size = 100
+    for _ in range(20):
+        w = measure_text(load_font(size, bold=bold))[0]
+        if w <= 0:
+            break
+        next_size = max(1, int(size * target_w / w))
+        if next_size == size:
+            break
+        size = next_size
+    while size > 1 and measure_text(load_font(size, bold=bold))[0] > target_w:
+        size -= 1
+    return load_font(size, bold=bold)
+
+
 def load_icon_large():
     """Load the source icon at full resolution."""
     return Image.open(ICON_PATH).convert("RGBA")
@@ -227,6 +279,21 @@ def main():
     _make_logo_impl(icon_large, font_large, gap_large, tw_l, th_l, ty_off_l,
                     text_color=TEXT_COLOR_DARK, output_path=LOGO_DARK_LARGE_OUTPUT,
                     clean_light=False)
+
+    # Stacked large logos: "stratum" centered below the full-resolution icon
+    font_stacked = fit_font_to_width(
+        int(icon_large.width * STACKED_TEXT_W_RATIO), bold=True)
+    tw_s, th_s, ty_off_s = measure_text(font_stacked)
+    gap_stacked = int(icon_large.height * STACKED_GAP_RATIO)
+
+    _make_logo_stacked_impl(
+        icon_large, font_stacked, gap_stacked, tw_s, th_s, ty_off_s,
+        text_color=TEXT_COLOR, output_path=LOGO_STACKED_LARGE_OUTPUT,
+        clean_light=True)
+    _make_logo_stacked_impl(
+        icon_large, font_stacked, gap_stacked, tw_s, th_s, ty_off_s,
+        text_color=TEXT_COLOR_DARK,
+        output_path=LOGO_DARK_STACKED_LARGE_OUTPUT, clean_light=False)
 
 
 if __name__ == "__main__":
