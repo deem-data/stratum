@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
+import time
 import warnings
 
 import numpy as np
@@ -13,8 +15,11 @@ from skrub._utils import random_string
 
 from stratum.adapters.table_vectorizer import (
     ExactFusedTableVectorizer,
+    StratumFusedTableVectorizer,
     _FusedTableVectorizer,
 )
+from stratum.adapters.one_hot_encoder import RustyOneHotEncoder
+from stratum.adapters.string_encoder import RustyStringEncoder
 
 
 def _string_encoder(n_components=2):
@@ -415,3 +420,148 @@ def test_unsupported_specific_transformers_are_rejected_before_execution():
     assert not estimator.supports(estimator)
     with pytest.raises(ValueError, match="specific_transformers"):
         estimator.fit_transform(pd.DataFrame({"a": [1, 2]}))
+
+
+def test_stratum_fused_uses_rust_leaves_and_stable_transform():
+    train = pd.DataFrame(
+        {
+            "low": ["a", "b", "a", "b", "a", "b"],
+            "high": ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+            "number": [1, 2, 3, 4, 5, 6],
+        },
+        index=[13, 11, 7, 5, 3, 1],
+    )
+    test = pd.DataFrame(
+        {
+            "low": ["b", "unseen", "a"],
+            "high": ["golf", "hotel", "alpha"],
+            "number": [7, 8, 9],
+        },
+        index=[21, 23, 25],
+    )
+    vectorizer = StratumFusedTableVectorizer(
+        cardinality_threshold=3,
+        high_cardinality=_string_encoder(),
+    )
+
+    fitted_output = vectorizer.fit_transform(train)
+    first = vectorizer.transform(test)
+    second = vectorizer.transform(test)
+
+    assert isinstance(vectorizer.transformers_["low"], RustyOneHotEncoder)
+    assert isinstance(vectorizer.transformers_["high"], RustyStringEncoder)
+    assert vectorizer.transformers_["low"]._stratum_force_rust
+    assert vectorizer.transformers_["high"]._stratum_force_rust
+    assert list(fitted_output.columns) == vectorizer.all_outputs_
+    assert list(first.columns) == vectorizer.all_outputs_
+    assert first.index.tolist() == test.index.tolist()
+    pd.testing.assert_frame_equal(first, second, rtol=1e-5, atol=1e-6)
+
+
+def test_stratum_fused_uses_four_column_workers(monkeypatch):
+    from stratum.adapters import table_vectorizer as table_vectorizer_module
+
+    real_executor = ThreadPoolExecutor
+    worker_counts = []
+    submit_counts = []
+
+    class RecordingExecutor(real_executor):
+        def __init__(self, max_workers, *args, **kwargs):
+            worker_counts.append(max_workers)
+            submit_counts.append(0)
+            super().__init__(max_workers=max_workers, *args, **kwargs)
+
+        def submit(self, *args, **kwargs):
+            submit_counts[-1] += 1
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr(
+        table_vectorizer_module, "ThreadPoolExecutor", RecordingExecutor
+    )
+    X = pd.DataFrame(
+        {
+            f"low_{position}": ["a", "b", "a", "b"]
+            for position in range(4)
+        }
+    )
+    vectorizer = StratumFusedTableVectorizer(
+        cardinality_threshold=3,
+        high_cardinality="drop",
+    )
+
+    vectorizer.fit_transform(X)
+    vectorizer.transform(X)
+
+    assert worker_counts == [4]
+    assert submit_counts == [8]
+
+
+def test_stratum_fused_allows_mixed_rust_and_python_leaves():
+    X = pd.DataFrame(
+        {
+            "low": ["a", "b", "a", "b", "a", "b"],
+            "high": ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+        }
+    )
+    python_string_encoder = StringEncoder(
+        analyzer="word",
+        ngram_range=(1, 1),
+        n_components=2,
+        random_state=0,
+    )
+    vectorizer = StratumFusedTableVectorizer(
+        cardinality_threshold=3,
+        high_cardinality=python_string_encoder,
+    )
+
+    output = vectorizer.fit_transform(X)
+
+    assert isinstance(vectorizer.transformers_["low"], RustyOneHotEncoder)
+    assert type(vectorizer.transformers_["high"]) is StringEncoder
+    assert list(output.columns) == vectorizer.all_outputs_
+
+
+def test_stratum_fused_raises_encoder_failures_in_input_order(monkeypatch):
+    def fail_out_of_order(position, column, transformer, y, heavy_slots):
+        if position == 0:
+            time.sleep(0.05)
+        raise ValueError(f"failed input position {position}")
+
+    monkeypatch.setattr(
+        StratumFusedTableVectorizer,
+        "_fit_job",
+        staticmethod(fail_out_of_order),
+    )
+    X = pd.DataFrame(
+        {
+            "first": ["a", "b", "a", "b"],
+            "second": ["x", "y", "x", "y"],
+        }
+    )
+    vectorizer = StratumFusedTableVectorizer(
+        cardinality_threshold=3,
+        high_cardinality="drop",
+    )
+
+    with pytest.raises(ValueError, match="failed input position 0"):
+        vectorizer.fit_transform(X)
+
+
+def test_stratum_fused_supports_concurrent_transform_calls():
+    train = pd.DataFrame(
+        {
+            "low": ["a", "b", "a", "b", "a", "b"],
+            "high": ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+        }
+    )
+    vectorizer = StratumFusedTableVectorizer(
+        cardinality_threshold=3,
+        high_cardinality=_string_encoder(),
+    ).fit(train)
+    expected = vectorizer.transform(train)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outputs = list(executor.map(vectorizer.transform, [train, train]))
+
+    for output in outputs:
+        pd.testing.assert_frame_equal(output, expected, rtol=1e-5, atol=1e-6)

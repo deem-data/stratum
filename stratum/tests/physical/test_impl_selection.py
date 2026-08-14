@@ -15,7 +15,9 @@ from skrub import StringEncoder
 from stratum.adapters.string_encoder import (RustyStringEncoder,
                                              supports_rust_string_encoder)
 from stratum.optimizer._optimize import optimize
+from stratum.optimizer.ir._join_ops import JoinOp
 from stratum.optimizer.ir._ops import TransformerOp
+from stratum.optimizer.ir._selection_ops import SelectionKind, SelectionOp
 from stratum.optimizer.physical._impl_selection import (
     DefaultImplementationSelector,
     FlagBasedSelector,
@@ -23,6 +25,7 @@ from stratum.optimizer.physical._impl_selection import (
     get_implementation_selector,
     select_implementations,
 )
+from stratum.optimizer.physical._join_execs import PandasJoinOp, PolarsJoinOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry,
@@ -33,6 +36,10 @@ from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry
 from stratum.optimizer.physical._source_execs import (InMemoryFrame,
                                                        PandasInMemoryFrame,
                                                        PolarsInMemoryFrame)
+from stratum.optimizer.physical._selection_execs import (
+    PandasIndexSelectionOp,
+    PolarsSelectionOp,
+)
 from stratum.optimizer.physical._transform_execs import StringEncoderOp
 from stratum.optimizer.ir._ops import Op, ValueOp
 
@@ -220,6 +227,42 @@ class TestGreedyImplementationSelector(unittest.TestCase):
 
         self.assertIsInstance(upstream, PolarsUpstream)
         self.assertIsInstance(downstream, SklearnDownstream)
+
+
+class TestRelationalImplementationSelection(unittest.TestCase):
+    def _relational_ops(self):
+        return (
+            JoinOp(
+                how="left",
+                left_on="low_category_0",
+                right_on="low_category_0",
+            ),
+            SelectionOp(kind=SelectionKind.HEAD, args=(5,)),
+        )
+
+    def test_default_binds_pandas_join_and_selection(self):
+        expected_impls = (PandasJoinOp, PandasIndexSelectionOp)
+
+        for op, expected_impl in zip(self._relational_ops(), expected_impls):
+            with self.subTest(op=type(op).__name__):
+                select_implementations(
+                    op,
+                    _ctx(),
+                    selector=DefaultImplementationSelector(),
+                )
+                self.assertIsInstance(op, expected_impl)
+
+    def test_greedy_binds_polars_join_and_selection(self):
+        expected_impls = (PolarsJoinOp, PolarsSelectionOp)
+
+        for op, expected_impl in zip(self._relational_ops(), expected_impls):
+            with self.subTest(op=type(op).__name__):
+                select_implementations(
+                    op,
+                    _ctx(),
+                    selector=GreedyImplementationSelector(),
+                )
+                self.assertIsInstance(op, expected_impl)
 
 
 class TestPlanTimeBinding(unittest.TestCase):

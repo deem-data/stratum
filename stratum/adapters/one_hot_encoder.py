@@ -1,6 +1,5 @@
 from __future__ import annotations
 import numpy as np
-import pandas as pd
 import scipy.sparse as sp
 from sklearn.preprocessing import OneHotEncoder as _SKOneHot
 from sklearn.utils._encode import _encode, _check_unknown  # private, mirrors sklearn’s own path
@@ -68,14 +67,20 @@ def _codes_from_categories(X, categories_):
     codes, n_cats = [], []
 
     for j, cats in enumerate(categories_):
-        # Remove NaNs/Nones from categories
-        # Note: This may differ output from sklearn. Sklearn allows None to be a real category.
-        cats_is_na = pd.isna(cats)
-        cats_wo_na = cats[~cats_is_na]
         Xi = np.asarray(_to_list(cols[j]), dtype=object)
-        # Fast vectorized recode (C-level). 3x faster than sklearn's _encode.
-        codes_j = pd.Categorical(Xi, categories=cats_wo_na, ordered=True).codes.astype(np.int32, copy=False) #recode
-        n_cats.append(len(cats_wo_na))
+
+        # Keep fitted missing values as categories; sklearn only masks values
+        # that were not observed during fit. This also preserves drop_idx_
+        # offsets when a missing category is present.
+        _, valid_mask = _check_unknown(Xi, cats, return_mask=True)
+        if not np.all(valid_mask):
+            Xi = Xi.copy()
+            Xi[~valid_mask] = cats[0]
+        codes_j = _encode(Xi, uniques=cats, check_unknown=False).astype(
+            np.int32, copy=False
+        )
+        codes_j[~valid_mask] = -1
+        n_cats.append(len(cats))
         codes.append(codes_j)
 
     return codes, n_cats

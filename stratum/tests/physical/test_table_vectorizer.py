@@ -3,7 +3,7 @@ import sys
 import pandas as pd
 import pytest
 from sklearn.base import clone
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from skrub import StringEncoder, TableVectorizer, selectors
 
 import stratum as st
@@ -15,6 +15,9 @@ from stratum.adapters.string_encoder import (
     RustyStringEncoder,
     supports_rust_string_encoder,
 )
+from stratum.adapters.table_vectorizer import (
+    StratumFusedTableVectorizer as FusedTableVectorizerAdapter,
+)
 from stratum.optimizer.ir._ops import TransformerOp
 from stratum.optimizer.physical._impl_selection import (
     DefaultImplementationSelector,
@@ -25,6 +28,7 @@ from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._transform_execs import (
     SkrubTableVectorizer,
     StratumTableVectorizer,
+    StratumFusedTableVectorizer,
     StringEncoderOp,
     TableVectorizerOp,
     lower_transformer,
@@ -93,21 +97,45 @@ def test_default_selector_binds_the_unchanged_skrub_table_vectorizer():
     not _rust_table_vectorizer_supported(),
     reason="Rust TableVectorizer leaf runtime is unavailable",
 )
-def test_greedy_selector_binds_stratum_and_only_supported_leaves():
+def test_greedy_selector_binds_fused_stratum_table_vectorizer():
     unsupported_high = StringEncoder(analyzer="word", n_components=2)
     op = _op(TableVectorizer(high_cardinality=unsupported_high))
     select_implementations(
         op, _ctx(), selector=GreedyImplementationSelector()
     )
 
-    assert isinstance(op, StratumTableVectorizer)
-    assert isinstance(op.estimator.low_cardinality, RustyOneHotEncoder)
-    assert op.estimator.low_cardinality._stratum_force_rust
+    assert isinstance(op, StratumFusedTableVectorizer)
+    assert isinstance(op.estimator, FusedTableVectorizerAdapter)
+    assert isinstance(op.original_estimator, FusedTableVectorizerAdapter)
+    assert type(op.estimator.low_cardinality) is OneHotEncoder
     assert type(op.estimator.high_cardinality) is StringEncoder
 
     # The selected estimator is still an ordinary cloneable sklearn estimator.
     assert clone(op.estimator) is not op.estimator
     assert clone(op.original_estimator) is not op.original_estimator
+
+
+@pytest.mark.skipif(
+    not _rust_table_vectorizer_supported(),
+    reason="Rust TableVectorizer leaf runtime is unavailable",
+)
+def test_greedy_selector_binds_partial_stratum_table_vectorizer():
+    high = StringEncoder(n_components=2)
+    op = _op(
+        TableVectorizer(
+            low_cardinality=StandardScaler(),
+            high_cardinality=high,
+        )
+    )
+
+    select_implementations(
+        op, _ctx(), selector=GreedyImplementationSelector()
+    )
+
+    assert isinstance(op, StratumTableVectorizer)
+    assert isinstance(op.estimator.high_cardinality, RustyStringEncoder)
+    assert isinstance(op.estimator.low_cardinality, StandardScaler)
+    assert op.estimator.high_cardinality._stratum_force_rust
 
 
 def test_unsupported_table_vectorizer_configuration_keeps_reference_candidate():
@@ -127,7 +155,7 @@ def test_unsupported_table_vectorizer_configuration_keeps_reference_candidate():
     not _rust_table_vectorizer_supported(),
     reason="Rust TableVectorizer leaf runtime is unavailable",
 )
-def test_stratum_table_vectorizer_fits_and_transforms_with_rust_leaves(capfd):
+def test_fused_stratum_table_vectorizer_fits_and_transforms_with_rust_leaves(capfd):
     vectorizer = TableVectorizer(
         cardinality_threshold=3,
         high_cardinality=StringEncoder(n_components=2),
@@ -136,6 +164,8 @@ def test_stratum_table_vectorizer_fits_and_transforms_with_rust_leaves(capfd):
     select_implementations(
         op, _ctx(), selector=GreedyImplementationSelector()
     )
+    assert isinstance(op, StratumFusedTableVectorizer)
+    assert isinstance(op.estimator, FusedTableVectorizerAdapter)
 
     train = pd.DataFrame(
         {
@@ -152,8 +182,8 @@ def test_stratum_table_vectorizer_fits_and_transforms_with_rust_leaves(capfd):
         }
     )
 
-    # The plan-time marker keeps the Rust path selected even when the legacy
-    # runtime flag is disabled during execution.
+    # The selected fused estimator binds Rust leaves independently of the
+    # public runtime flags used during execution.
     with st.config(
         rust_backend=False,
         allow_patch=False,

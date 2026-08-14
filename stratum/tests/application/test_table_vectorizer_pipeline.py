@@ -9,13 +9,10 @@ from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 
 import stratum as st
-from stratum.adapters.one_hot_encoder import (
-    RustyOneHotEncoder,
-    supports_rust_one_hot_encoder,
-)
-from stratum.adapters.string_encoder import (
-    RustyStringEncoder,
-    supports_rust_string_encoder,
+from stratum.adapters.one_hot_encoder import supports_rust_one_hot_encoder
+from stratum.adapters.string_encoder import supports_rust_string_encoder
+from stratum.adapters.table_vectorizer import (
+    StratumFusedTableVectorizer as FusedTableVectorizerAdapter,
 )
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.physical._map_execs import (
@@ -32,7 +29,7 @@ from stratum.optimizer.physical._source_execs import (
 )
 from stratum.optimizer.physical._transform_execs import (
     SkrubTableVectorizer,
-    StratumTableVectorizer,
+    StratumFusedTableVectorizer,
     TableVectorizerOp,
 )
 from stratum.tests._helpers import csv_file
@@ -184,33 +181,21 @@ def test_table_vectorizer_pipeline_scores_end_to_end_for_each_selector(
                     assert any(isinstance(op, PolarsAssignMapOp) for op in ops)
                     assert any(isinstance(op, PolarsColumnProjectionOp) for op in ops)
                     expected_table_op = (
-                        StratumTableVectorizer if (supports_low or supports_high)
+                        StratumFusedTableVectorizer
+                        if (supports_low or supports_high)
                         else SkrubTableVectorizer
                     )
                     assert isinstance(table_op, expected_table_op)
-                    uses_rust = expected_table_op is StratumTableVectorizer
-                    if expected_table_op is StratumTableVectorizer:
-                        if supports_low:
-                            assert isinstance(
-                                table_op.estimator.low_cardinality,
-                                RustyOneHotEncoder,
-                            )
-                        else:
-                            assert not isinstance(
-                                table_op.estimator.low_cardinality,
-                                RustyOneHotEncoder,
-                            )
-
-                        if supports_high:
-                            assert isinstance(
-                                table_op.estimator.high_cardinality,
-                                RustyStringEncoder,
-                            )
-                        else:
-                            assert not isinstance(
-                                table_op.estimator.high_cardinality,
-                                RustyStringEncoder,
-                            )
+                    uses_rust = expected_table_op is StratumFusedTableVectorizer
+                    if expected_table_op is StratumFusedTableVectorizer:
+                        assert isinstance(
+                            table_op.estimator,
+                            FusedTableVectorizerAdapter,
+                        )
+                        assert isinstance(
+                            table_op.original_estimator,
+                            FusedTableVectorizerAdapter,
+                        )
 
                 captured_output = io.StringIO()
                 with redirect_stdout(captured_output):
@@ -236,4 +221,3 @@ def test_table_vectorizer_pipeline_scores_end_to_end_for_each_selector(
                 assert "[rust]" in combined_output
             else:
                 assert "[rust]" not in combined_output
-

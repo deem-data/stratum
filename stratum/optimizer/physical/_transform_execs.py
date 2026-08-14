@@ -15,16 +15,23 @@ unchanged, and keeps running via the ``sklearn-skrub`` impl registered on
 """
 from __future__ import annotations
 
+from sklearn.base import clone
 from typing import Any
 
-from sklearn.base import clone
 from skrub import TableVectorizer as _SkrubTableVectorizer
 from skrub import StringEncoder as _SkrubStringEncoder
 
-from stratum.adapters.one_hot_encoder import (RustyOneHotEncoder,
-                                             supports_rust_one_hot_encoder)
-from stratum.adapters.string_encoder import (RustyStringEncoder,
-                                             supports_rust_string_encoder)
+from stratum.adapters.one_hot_encoder import (
+    RustyOneHotEncoder,
+    supports_rust_one_hot_encoder,
+)
+from stratum.adapters.string_encoder import (
+    RustyStringEncoder,
+    supports_rust_string_encoder,
+)
+from stratum.adapters.table_vectorizer import (
+    StratumFusedTableVectorizer as _StratumFusedTableVectorizer,
+)
 from stratum.optimizer.ir._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp
@@ -36,9 +43,9 @@ class TableVectorizerOp(TransformerOp, PhysicalOp):
     """Abstract physical TableVectorizer transformer.
 
     The reference implementation deliberately keeps Skrub's complete pipeline
-    intact.  The hybrid implementation below only changes the nested leaf
-    estimator prototypes at plan time, so unsupported TableVectorizer
-    configurations retain the same execution path.
+    intact. The Stratum implementation uses the fused TableVectorizer adapter
+    for supported configurations; unsupported configurations use the reference
+    implementation.
     """
     is_abstract = True
 
@@ -56,12 +63,14 @@ class StratumTableVectorizer(TableVectorizerOp):
 
     @classmethod
     def supports(cls, op: TableVectorizerOp, ctx: Any) -> bool:
+        """Select this for mixed/partially supported configs"""
         estimator = op.original_estimator
         if not isinstance(estimator, _SkrubTableVectorizer):
             return False
         if getattr(estimator, "specific_transformers", ()):
             return False
-        # Select if at least one encoder can use Rust
+        if _StratumFusedTableVectorizer.supports(estimator, ctx):
+            return False
         return any(
             supported
             for supported, _ in (
@@ -71,8 +80,6 @@ class StratumTableVectorizer(TableVectorizerOp):
         )
 
     def on_impl_selected(self, ctx: Any) -> None:
-        # Bind both estimator copies: BaseEstimatorOp uses the original copy for
-        # fitting and stores the fitted result in the other copy.
         self.estimator = _bind_table_vectorizer_leaves(self.estimator)
         self.original_estimator = _bind_table_vectorizer_leaves(
             self.original_estimator
@@ -100,6 +107,35 @@ def _bind_table_vectorizer_leaves(estimator: _SkrubTableVectorizer):
         if supported:
             setattr(bound, name, adapt(prototype))
     return bound
+
+
+@physical_impl(of=TableVectorizerOp, backend="stratum")
+class StratumFusedTableVectorizer(TableVectorizerOp):
+    """Multithreaded fused orchestration with eligible Rust leaf encoders."""
+    is_abstract = False
+
+    @classmethod
+    def supports(cls, op: TableVectorizerOp, ctx: Any) -> bool:
+        """Select for fully supported (all Rust) configs"""
+        return _StratumFusedTableVectorizer.supports(
+            op.original_estimator,
+            ctx,
+        )
+
+    def on_impl_selected(self, ctx: Any) -> None:
+        # Bind both copies before execution. The fused adapter independently
+        # clones and selects eligible Rust leaves during fit.
+        self.estimator = _as_stratum_fused_table_vectorizer(self.estimator)
+        self.original_estimator = _as_stratum_fused_table_vectorizer(
+            self.original_estimator
+        )
+
+
+def _as_stratum_fused_table_vectorizer(
+    estimator: _SkrubTableVectorizer,
+) -> _StratumFusedTableVectorizer:
+    """Clone a TableVectorizer configuration into the fused runtime."""
+    return _StratumFusedTableVectorizer(**estimator.get_params(deep=False))
 
 
 class StringEncoderOp(TransformerOp, PhysicalOp):

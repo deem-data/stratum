@@ -5,6 +5,7 @@ import numpy as np
 from numpy.testing import assert_array_equal
 import sklearn.preprocessing
 from stratum import set_config, OneHotEncoder
+from stratum.adapters.one_hot_encoder import _codes_from_categories
 
 def capture_std_out(capfd):
     # Capture timing output
@@ -39,3 +40,29 @@ def test_ohe_compare(sparse_output, capfd):
         # Assert if rust timing appeared (verifies that rust code is executed)
         assert "[rust]" in capture_std_out(capfd)
 
+
+def test_ohe_preserves_fitted_missing_category():
+    X = pd.DataFrame({"a": ["x", None, None]})
+    reference_encoder = sklearn.preprocessing.OneHotEncoder(
+        drop="if_binary",
+        dtype=np.float32,
+        handle_unknown="ignore",
+        sparse_output=False,
+    ).set_output(transform="pandas")
+    reference = reference_encoder.fit_transform(X)
+
+    encoder = OneHotEncoder(
+        drop="if_binary",
+        dtype=np.float32,
+        handle_unknown="ignore",
+        sparse_output=False,
+    )
+    encoder.set_output(transform="pandas")
+    encoder._stratum_force_rust = True
+    actual = encoder.fit_transform(X)
+
+    pd.testing.assert_frame_equal(actual, reference)
+    assert actual.shape == (3, 1)
+    codes, n_cats = _codes_from_categories(X, encoder.categories_)
+    assert_array_equal(codes[0], np.array([0, 1, 1], dtype=np.int32))
+    assert n_cats == [2]
