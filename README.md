@@ -14,12 +14,14 @@
 **Stratum** is an ML system for efficiently executing **large-scale agentic pipeline search**. It integrates with MLE agents by representing batches of agent-generated pipelines as lazily evaluated DAGs, applying logical and runtime optimizations, and executing them across heterogeneous backends, including a Rust-based runtime.
 Stratum builds on [skrub's](https://skrub-data.org/stable) operator abstraction and is under active development.
 
+> 📄 Paper: The motivation and vision behind stratum are described in our [VLDB 2026 paper](https://arxiv.org/pdf/2603.03589).
+
 ---
 
 ## Design Principles
 
 - Provide seamless and unrestricted support for **arbitrary ML libraries** without operator porting.
-- Enable **lazy evaluation** and provide operator semantics that enable logical rewrites and **cost-based** optimizations.
+- A semantic abstraction built on a minimal set of logical operators that enables rewrites and lazy evaluation with physical operator independence.
 - Implement a runtime with **efficient operator kernels** (in Rust), scheduling across CPUs, GPUs, and distributed backends, plus runtime optimizations such as **buffer pools, reuse of intermediates, and inter- and intra-operator parallelization**.
 
 ---
@@ -59,10 +61,10 @@ The following flags enable different features of Stratum. These flags can be set
 import stratum
 
 stratum.set_config(
-    rust_backend=True,
     scheduler=True,
+    implementation_selector="greedy",
+    explain=True,
     stats=True,
-    debug_timing=False,
 )
 ```
 ### Example Code
@@ -73,50 +75,26 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.linear_model import LinearRegression
 
 def main():
+    # Collect and prepare datasets
     dataset = skrub.datasets.fetch_employee_salaries()
     df = skrub.as_data_op(dataset.employee_salaries).skb.subsample()
     df_clean = df.dropna()
     y = df_clean["current_annual_salary"].skb.mark_as_y()
     X = df_clean.drop(columns=["current_annual_salary"]).skb.mark_as_X()
 
-    skrub.set_config(rust_backend=True, debug_timing=True, scheduler=True, stats=True)
-    tv = skrub.TableVectorizer(high_cardinality=skrub.StringEncoder(), low_cardinality=OneHotEncoder(sparse_output=False))
+    # Apply feature transformations
+    skrub.set_config(scheduler=True, implementation_selector="greedy", explain=True, stats=True)
+    tv = skrub.TableVectorizer()
     X_enc = X.skb.apply(tv)
     print(f"Encoded data shape: {X_enc.shape.skb.preview()}")
 
+    # Training and cross-validation
     pred = X_enc.skb.apply(LinearRegression(), y=y)
     search = pred.skb.make_grid_search(cv=3, fitted=True, scoring="r2", refit=False)
     print(search.results_)
 
 if __name__ == "__main__":
     main()
-```
----
-
-## Repository Layout
-
-```bash
-stratum/
-├─ pyproject.toml           # Project metadata + Python/Rust build config (maturin)
-├─ README.md
-├─ LICENSE
-├─ _rust/                   # Rust crate (PyO3 extension)
-│  ├─ Cargo.toml
-│  └─ src/lib.rs            # Defines #[pymodule] fn _rust_backend_native(...)
-└─ stratum/                 # Python package
-   ├─ __init__.py           # Façade over skrub + automatic patching
-   ├─ _config.py            # set_config/get_config + runtime/env sync
-   ├─ _api.py               # High-level grid search / evaluate helpers
-   ├─ _rust_backend.py      # Python <-> Rust shim (re-exports native fns)
-   ├─ adapters/             # Public API (dispatch to Rust or fall back to skrub)
-   │  ├─ string_encoder.py  # RustyStringEncoder
-   │  └─ one_hot_encoder.py # RustyOneHotEncoder
-   ├─ optimizer/
-   │  ├─ ir/                # DAG representation 
-   │  └─ _optimize.py       # logical rewrites
-   ├─ runtime/              # Schedulers and runtime execution
-   ├─ patching/             # Hooks that patch upstream skrub
-   └─ tests/                # Test suite
 ```
 ---
 

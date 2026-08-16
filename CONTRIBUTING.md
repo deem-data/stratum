@@ -25,6 +25,7 @@ We use commit message tags to keep our git history organized and scannable. Ever
 | `[Test]` | Test-only changes | `[Test] add coverage for batch executor edge cases` |
 | `[Docs]` | Documentation changes | `[Docs] add API reference for PipelineBuilder` |
 | `[_FEATURE_NAME_]` | Part of a multi-commit feature | `[LazyDAG] add topological sort for execution planning` |
+| `[Infra]` | Infrastructure changes | `[Infra] add release workflow` |
 
 ### Feature Tags
 
