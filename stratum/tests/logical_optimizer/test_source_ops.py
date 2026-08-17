@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import stratum as st
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.ir._source_ops import DataSourceOp, make_read_op
@@ -47,6 +48,25 @@ class TestDataSourceRewrites(unittest.TestCase):
             data = st.as_data_op(path).skb.apply_func(pd.read_parquet)
             ops = optimize(data, OptConfig(dataframe_ops=True))
         self.assertTrue(any(isinstance(op, ReadParquet) for op in ops))
+
+
+class TestDataSourceMetadata(unittest.TestCase):
+    def test_pandas_schema_preserves_duplicate_columns(self):
+        data = pd.DataFrame([[1, 2]], columns=["a", "a"])
+        op = DataSourceOp(data=data)
+        self.assertEqual(tuple(zip(data.columns, data.dtypes)), op.schema)
+        self.assertTrue(op.has_schema)
+
+    def test_polars_schema(self):
+        data = pl.DataFrame({"a": [1], "b": [2.0]})
+        op = DataSourceOp(data=data)
+        self.assertEqual(tuple(data.schema.items()), op.schema)
+        self.assertTrue(op.has_schema)
+
+    def test_file_schema_is_unknown(self):
+        op = DataSourceOp(file_path="data.csv", _format="csv")
+        self.assertIsNone(op.schema)
+        self.assertFalse(op.has_schema)
 
 
 class TestMakeReadOp(unittest.TestCase):

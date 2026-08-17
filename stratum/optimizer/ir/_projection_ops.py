@@ -1,4 +1,5 @@
 from typing import Callable
+from pandas.api.types import is_dict_like, is_list_like
 from skrub.selectors._base import make_selector
 from stratum.optimizer.ir._ops import (OutputType, CallOp, GetAttrOp,
                                        MethodCallOp, Op, TransformerOp, _resolve_args, _resolve_kwargs)
@@ -68,6 +69,54 @@ class MetadataOp(Op):
         self.args = args
         self.kwargs = kwargs
         self.output_type = OutputType.FRAME
+        self.has_schema = False
+        self.schema = None
+        self.infer_schema()
+
+    def infer_schema(self):
+        """Infer the schema produced by a dataframe metadata operation.
+
+        For ``rename``, pandas changes column labels in either of these forms::
+
+            frame.rename(mapper, axis=1)
+            frame.rename(columns=mapper)
+
+        ``mapper`` may be dict-like or callable. Renaming the index does not
+        affect the column schema. A schema is represented as ``(name, dtype)``
+        pairs, so only the names change and their order and dtypes are retained.
+        """
+        if not self.inputs or not getattr(self.inputs[0], "has_schema", False):
+            return None
+
+        input_schema = getattr(self.inputs[0], "schema", None)
+        if input_schema is None:
+            return None
+        if self.func != "rename":
+            return input_schema
+
+        args = self.args or ()
+        kwargs = self.kwargs or {}
+
+        if "columns" in kwargs:
+            mapper = kwargs["columns"]
+        else:
+            mapper = kwargs.get("mapper", args[0] if args else None)
+            axis = kwargs.get("axis", args[1] if len(args) > 1 else 0)
+            if axis not in (1, "columns"):
+                self.schema = input_schema
+                self.has_schema = True
+                return
+
+        if is_dict_like(mapper):
+            rename = lambda column: mapper[column] if column in mapper else column
+        elif callable(mapper):
+            rename = mapper
+        else:
+            # Dynamic/unsupported mappers cannot be evaluated at plan time.
+            return None
+
+        self.schema = tuple((rename(column), dtype) for column, dtype in input_schema)
+        self.has_schema = True
 
 
 class ProjectionOp(Op):
@@ -112,10 +161,45 @@ class ProjectionOp(Op):
 
 class DropOp(ProjectionOp):
     fields = ["args", "kwargs", "columns"]
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
+
+    def __init__(self, args: tuple | list = (), kwargs: dict = None,
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+        self.schema = None
+        self.has_schema = False
+        self.infer_schema()
 
+    def infer_schema(self):
+        if not self.inputs or not getattr(self.inputs[0], "has_schema", False):
+            return None
+        input_schema = self.inputs[0].schema
+        columns_to_remove = None
+
+        args = self.args or ()
+        kwargs = self.kwargs or {}
+
+        if "columns" in kwargs:
+            columns_to_remove = kwargs["columns"]
+        else:
+            labels = kwargs.get("labels", args[0] if args else None)
+            axis = kwargs.get("axis", args[1] if len(args) > 1 else 0)
+            if labels is not None and axis in (1, "columns"):
+                columns_to_remove = labels
+
+        if columns_to_remove is None:
+            self.schema = input_schema
+            self.has_schema = True
+            return
+
+        if not is_list_like(columns_to_remove):
+            columns_to_remove = [columns_to_remove]
+
+        self.schema = tuple(
+            (column, dtype)
+            for column, dtype in input_schema
+            if column not in columns_to_remove
+        )
+        self.has_schema = True
 
 class ColumnSelectorOp(Op):
     """A column selection by (deferred) skrub selector: keeps rows, restricts columns.

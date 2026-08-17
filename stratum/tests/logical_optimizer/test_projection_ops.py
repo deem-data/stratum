@@ -13,6 +13,7 @@ from stratum.optimizer.ir._projection_ops import (
     make_string_method_op, polars_datetime_kwargs)
 from stratum.optimizer.ir._map_ops import AssignMapOp
 from stratum.optimizer.ir._column_expr import Col, DtExpr
+from stratum.optimizer.ir._source_ops import DataSourceOp
 from stratum.optimizer.ir._ops import (
     CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType,
     TransformerOp)
@@ -139,6 +140,88 @@ class TestMetadataOp(unittest.TestCase):
     def test_kwargs_none_skips_check(self):
         self.assertIsNone(MetadataOp(func="rename").kwargs)
 
+    def test_schema_from_columns_dict(self):
+        source = DataSourceOp(data=pd.DataFrame({"a": [1], "b": [2.0]}))
+        op = MetadataOp(
+            func="rename", args=(), kwargs={"columns": {"a": "x"}},
+            inputs=[source],
+        )
+        self.assertEqual((("x", source.schema[0][1]), ("b", source.schema[1][1])),
+                         op.schema)
+
+    def test_schema_from_custom_dict_like_mapper(self):
+        class Mapper:
+            def __init__(self):
+                self._mapping = {"a": "x"}
+
+            def __getitem__(self, key):
+                return self._mapping[key]
+
+            def keys(self):
+                return self._mapping.keys()
+
+            def __contains__(self, key):
+                return key in self._mapping
+
+        source = DataSourceOp(data=pd.DataFrame({"a": [1], "b": [2]}))
+        op = MetadataOp(
+            func="rename", args=(), kwargs={"columns": Mapper()},
+            inputs=[source],
+        )
+        self.assertEqual(["x", "b"], [name for name, _ in op.schema])
+
+    def test_schema_from_callable_columns_mapper(self):
+        source = DataSourceOp(data=pd.DataFrame({"a": [1], "b": [2]}))
+        op = MetadataOp(
+            func="rename", args=(), kwargs={"columns": str.upper},
+            inputs=[source],
+        )
+        self.assertEqual(["A", "B"], [name for name, _ in op.schema])
+
+    def test_schema_from_mapper_on_column_axis(self):
+        source = DataSourceOp(data=pd.DataFrame({"a": [1], "b": [2]}))
+        op = MetadataOp(
+            func="rename", args=({"a": "x"},), kwargs={"axis": 1},
+            inputs=[source],
+        )
+        self.assertEqual(["x", "b"], [name for name, _ in op.schema])
+
+    def test_schema_propagates_through_chained_renames(self):
+        source = DataSourceOp(data=pd.DataFrame({"a": [1], "b": [2]}))
+        first = MetadataOp(
+            func="rename", args=(), kwargs={"columns": {"a": "x"}},
+            inputs=[source],
+        )
+        second = MetadataOp(
+            func="rename", args=(), kwargs={"columns": str.upper},
+            inputs=[first],
+        )
+        self.assertEqual(["X", "B"], [name for name, _ in second.schema])
+
+    def test_index_rename_keeps_column_schema(self):
+        source = DataSourceOp(data=pd.DataFrame({"a": [1], "b": [2]}))
+        op = MetadataOp(
+            func="rename", args=(), kwargs={"index": {0: 1}},
+            inputs=[source],
+        )
+        self.assertEqual(source.schema, op.schema)
+
+    def test_mapper_defaults_to_index_axis(self):
+        source = DataSourceOp(data=pd.DataFrame({"a": [1], "b": [2]}))
+        op = MetadataOp(
+            func="rename", args=({"a": "x"},), kwargs={},
+            inputs=[source],
+        )
+        self.assertEqual(source.schema, op.schema)
+
+    def test_unknown_input_schema_stays_unknown(self):
+        source = DataSourceOp(file_path="data.csv", _format="csv")
+        op = MetadataOp(
+            func="rename", args=(), kwargs={"columns": {"a": "x"}},
+            inputs=[source],
+        )
+        self.assertIsNone(op.schema)
+
     def test_rename_polars_with_columns_kwarg(self):
         with force_polars():
             op = MetadataOp(func="rename", args=(), kwargs={"columns": {"a": "x"}})
@@ -181,6 +264,47 @@ class TestProjectionOp(unittest.TestCase):
             op = ProjectionOp(method="drop", args=(), kwargs={})
             with self.assertRaises(ValueError):
                 run_op(op, pl.DataFrame({"a": [1]}))
+
+
+class TestDropOpSchema(unittest.TestCase):
+    def setUp(self):
+        self.source = DataSourceOp(
+            data=pd.DataFrame({"a": [1], "b": [2], "c": [3]})
+        )
+
+    def test_drop_columns_list_updates_schema(self):
+        op = DropOp(
+            kwargs={"columns": ["b"]},
+            inputs=[self.source],
+        )
+        self.assertEqual(["a", "c"], [name for name, _ in op.schema])
+        self.assertTrue(op.has_schema)
+
+    def test_drop_single_column_updates_schema(self):
+        op = DropOp(
+            kwargs={"columns": "b"},
+            inputs=[self.source],
+        )
+        self.assertEqual(["a", "c"], [name for name, _ in op.schema])
+
+    def test_row_drop_preserves_schema(self):
+        op = DropOp(
+            args=(0,),
+            kwargs={"axis": 0},
+            inputs=[self.source],
+        )
+        self.assertEqual(self.source.schema, op.schema)
+
+    def test_unknown_input_schema_stays_unknown(self):
+        source = DataSourceOp(file_path="data.csv", _format="csv")
+        op = DropOp(kwargs={"columns": "b"}, inputs=[source])
+        self.assertIsNone(op.schema)
+        self.assertFalse(op.has_schema)
+
+    def test_missing_input_stays_unknown(self):
+        op = DropOp(kwargs={"columns": "b"})
+        self.assertIsNone(op.schema)
+        self.assertFalse(op.has_schema)
 
 
 class TestDropOpPolars(PolarsTestCase):

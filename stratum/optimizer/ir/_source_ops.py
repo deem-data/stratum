@@ -1,5 +1,6 @@
 from stratum.optimizer.ir._ops import OperandRef, Op, OutputType, ValueOp, VariableOp, CallOp
 from pandas import DataFrame
+from polars import DataFrame as PolarsDataFrame
 
 
 class DataSourceOp(Op):
@@ -12,7 +13,8 @@ class DataSourceOp(Op):
     """
     logical_family = "Source"
 
-    def __init__(self, data: DataFrame = None, file_path: str = None, _format: str = None,
+    def __init__(self, data: DataFrame | PolarsDataFrame = None,
+                 file_path: str = None, _format: str = None,
                  read_args: tuple | list = None, read_kwargs: dict = None, is_X=False, is_y=False, outputs: list[Op] = None, inputs: list[Op] = None):
         if outputs is None:
             outputs = []
@@ -24,6 +26,14 @@ class DataSourceOp(Op):
         self.file_path = file_path
         self.read_args = read_args
         self.read_kwargs = read_kwargs
+
+        if isinstance(data, DataFrame):
+            self.schema = tuple(zip(data.columns, data.dtypes))
+        elif isinstance(data, PolarsDataFrame):
+            self.schema = tuple(data.schema.items())
+        else:
+            self.schema = None
+        self.has_schema = self.schema is not None
         # A directly-passed DataFrame or a csv read is a FRAME; np.load yields an
         # ndarray, so an npy source is a MATRIX.
         self.output_type = OutputType.MATRIX if _format == "npy" else OutputType.FRAME
