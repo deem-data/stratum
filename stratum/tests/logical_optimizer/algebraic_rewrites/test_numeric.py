@@ -1,11 +1,14 @@
 import unittest
 import stratum as st
 import numpy as np
+import pandas as pd
+from pandas.testing import assert_frame_equal
 from stratum.optimizer._optimize import  optimize
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer._algebraic_rewrites import AlgebraicRewritesConfig
+from stratum.optimizer._numeric_rewrites import match_self_operation
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
-from stratum.optimizer.ir._ops import OperandRef
+from stratum.optimizer.ir._ops import OperandRef, ValueOp
 
 class TestCSE(unittest.TestCase):
 
@@ -973,5 +976,156 @@ class TestPowByOne(unittest.TestCase):
             algebraic_rewrite_config=AlgebraicRewritesConfig(pow_by_one=False),
         )
         out, *_ = optimize(t1, config=config)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].value, 1)
+
+    # x * x -> square(x)
+    def test_self_multiply_to_square(self):
+        """x * x  →  square(x), for the multiply as the root op.
+
+        Also covers root-safety: the multiply is the DAG root here, so the fold has
+        to hand back the square as the new root -- it must end up last in the plan.
+        """
+        for value in (5, -5, 2.5):
+            with self.subTest(value=value):
+                df = st.as_data_op(value)
+                out, *_ = optimize(df * df)
+                self.assertEqual(len(out), 2)
+                self.assertIsInstance(out[1], NumericOp)
+                self.assertIs(out[-1].type, NumericOpType.SQUARE)
+                self.assertEqual(out[-1].process("fit", [out[0].value]), value * value)
+
+    def test_self_multiply_operand_with_other_consumers(self):
+        """(x * x) + x: x feeds both the multiply and the add; the extra edge survives."""
+        df = st.as_data_op(5)
+        out, *_ = optimize((df * df) + df)
+        self.assertEqual(len(out), 3)
+        self.assertIs(out[1].type, NumericOpType.SQUARE)
+        squared = out[1].process("fit", [out[0].value])
+        self.assertEqual(out[2].process("fit", [squared, out[0].value]), 30)
+
+    def test_self_multiply_after_cse(self):
+        """log(x) * log(x): two distinct DataOps merged by CSE still fold to square.
+
+        The fold depends on CSE running first (it does -- see `logical_optimize`):
+        without it the two logs stay separate ops and the multiply is not a self-op.
+        """
+        df = st.as_data_op(2.0)
+        out, *_ = optimize(df.skb.apply_func(np.log) * df.skb.apply_func(np.log))
+        self.assertEqual(len(out), 3)
+        self.assertIs(out[1].type, NumericOpType.LOG)
+        self.assertIs(out[2].type, NumericOpType.SQUARE)
+        self.assertEqual(out[2].process("fit", [out[1].process("fit", [out[0].value])]),
+                         np.log(2.0) ** 2)
+
+    def test_self_multiply_cubed_only_folds_once(self):
+        """x * x * x  →  square(x) * x: the outer multiply is not a self-op."""
+        df = st.as_data_op(3)
+        out, *_ = optimize(df * df * df)
+        self.assertEqual(len(out), 3)
+        self.assertIs(out[1].type, NumericOpType.SQUARE)
+        self.assertIs(out[2].type, NumericOpType.MULTIPLY)
+        squared = out[1].process("fit", [out[0].value])
+        self.assertEqual(out[2].process("fit", [squared, out[0].value]), 27)
+
+    def test_self_multiply_after_identity_elimination(self):
+        """(x * 1) * x  →  square(x): identity_op runs first and exposes the self-op."""
+        df = st.as_data_op(5)
+        out, *_ = optimize((df * 1) * df)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[1].type, NumericOpType.SQUARE)
+        self.assertEqual(out[1].process("fit", [out[0].value]), 25)
+
+    def test_self_multiply_dataframe_operand(self):
+        """The fold works on frame data, not just scalars."""
+        df = st.as_data_op(pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]}))
+        out, *_ = optimize(df * df)
+        self.assertIs(out[-1].type, NumericOpType.SQUARE)
+        # A frame source lowers to an in-memory source op, so read it via process().
+        result = out[-1].process("fit", [out[0].process("fit", [])])
+        assert_frame_equal(result, pd.DataFrame({"a": [1.0, 4.0], "b": [9.0, 16.0]}))
+
+    def test_other_self_operations_not_rewritten(self):
+        """Only MULTIPLY is registered: x+x, x-x, x/x and x**x are left alone."""
+        cases = [
+            (lambda v: v + v, NumericOpType.ADD),
+            (lambda v: v - v, NumericOpType.SUBTRACT),
+            (lambda v: v / v, NumericOpType.DIVIDE),
+            (lambda v: v ** v, NumericOpType.POW),
+        ]
+        for build, expected in cases:
+            with self.subTest(op=expected):
+                out, *_ = optimize(build(st.as_data_op(5)))
+                self.assertIs(out[1].type, expected)
+
+    def test_match_self_operation_generalizes_to_other_types(self):
+        """The matcher is op-type agnostic: it matches x + x and rejects x + y."""
+        match_self_add = match_self_operation(NumericOp, NumericOpType.ADD)
+        self_add = NumericOp(type=NumericOpType.ADD, inputs=[ValueOp(5)],
+                             opt_operand=OperandRef(0))
+        self.assertEqual(match_self_add(self_add), (self_add,))
+
+        two_operand_add = NumericOp(type=NumericOpType.ADD,
+                                    inputs=[ValueOp(5), ValueOp(3)],
+                                    opt_operand=OperandRef(1))
+        self.assertIsNone(match_self_add(two_operand_add))
+
+        const_add = NumericOp(type=NumericOpType.ADD, inputs=[ValueOp(5)], constant=3)
+        self.assertIsNone(match_self_add(const_add))
+
+        self_multiply = NumericOp(type=NumericOpType.MULTIPLY, inputs=[ValueOp(5)],
+                                  opt_operand=OperandRef(0))
+        self.assertIsNone(match_self_add(self_multiply))
+
+    def test_self_multiply_disabled(self):
+        """self_multiply=False leaves x * x as a MULTIPLY."""
+        df = st.as_data_op(5)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(self_multiply=False),
+        )
+        out, *_ = optimize(df * df, config=config)
+        self.assertEqual(out[1].type, NumericOpType.MULTIPLY)
+
+    def test_no_rewrite_multiply_different_operands(self):
+        """x * y (different operands) must not become square."""
+        x = st.as_data_op(5)
+        y = st.as_data_op(3)
+        out, *_ = optimize(x * y)
+        self.assertFalse(any(isinstance(o, NumericOp) and o.type is NumericOpType.SQUARE for o in out))
+
+    def test_no_rewrite_multiply_by_constant(self):
+        """x * 3 and 3 * x (constant operand, both operand orders) must not become square."""
+        for label, build in (("x * 3", lambda v: v * 3), ("3 * x", lambda v: 3 * v)):
+            with self.subTest(expr=label):
+                out, *_ = optimize(build(st.as_data_op(5)))
+                self.assertFalse(any(isinstance(o, NumericOp) and o.type is NumericOpType.SQUARE
+                                     for o in out))
+
+    def test_self_multiply_with_trailing_op(self):
+        """(x * x) + 3  →  square(x) + 3, keeping the trailing op."""
+        df = st.as_data_op(5)
+        out, *_ = optimize((df * df) + 3)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[1].type, NumericOpType.SQUARE)
+        self.assertEqual(out[2].process("fit", [out[1].process("fit", [out[0].value])]), 28)
+
+    def test_self_multiply_then_sqrt_is_abs(self):
+        """sqrt(x * x) → sqrt(square(x)) → abs(x): composes with sqrt_square."""
+        df = st.as_data_op(-5)
+        out, *_ = optimize((df * df).skb.apply_func(np.sqrt))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1].type, NumericOpType.ABS)
+
+    def test_disable_self_multiply_does_not_affect_log_exp(self):
+        """Disabling self_multiply must not suppress other rewrites."""
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(self_multiply=False),
+        )
+        out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)

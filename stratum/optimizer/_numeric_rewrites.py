@@ -2,7 +2,7 @@ import numbers
 
 from stratum.optimizer.ir._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer._op_utils import rewrite_pass, replace_op_in_outputs
-from stratum.optimizer.ir._ops import Op, ValueOp
+from stratum.optimizer.ir._ops import Op, ValueOp, OperandRef
 import numpy as np
 
 
@@ -64,6 +64,28 @@ def match_identity_operation(op_cls, type1, const, reversed=None):
         if isinstance(op1, op_cls) and op1.type == type1:
             if _matches_scalar_const(op1, const, reversed):
                 return (op1,)
+        return None
+    return match
+
+
+def match_self_operation(op_cls, op_type):
+    """Match a var-var operation whose two operands are the same node (``x <op> x``).
+
+    Counterpart to :func:`match_identity_operation` for the var-var case: instead
+    of a constant operand it requires the optional operand to be an
+    :class:`OperandRef` pointing back at input 0. ``x <op> x`` binds a single
+    de-duplicated input edge (see :class:`~stratum.optimizer.ir._ops.OperandBinder`),
+    so both operands resolving to ``inputs[0]`` is exactly the self-operation case.
+    ``reversed`` is irrelevant here -- both sides are the same node.
+    """
+    def match(op):
+        if (
+            isinstance(op, op_cls)
+            and op.type is op_type
+            and isinstance(op.opt_operand, OperandRef)
+            and op.inputs[op.opt_operand.k] is op.inputs[0]
+        ):
+            return (op,)
         return None
     return match
 
@@ -149,6 +171,21 @@ def fold_to_one(op: Op, root: Op) -> Op:
         operand.outputs = [out for out in operand.outputs if out is not op]
     replace_op_in_outputs(op, one_op)
     return one_op if op is root else root
+
+
+def fold_to_square(op: Op, root: Op) -> Op:
+    """Rewrite a self-multiply into a square op, keeping its operand (x * x -> square(x)).
+
+    The operand keeps its single input edge, so the only rewiring needed is to
+    swap the multiply for the square in ``x``'s outputs and in the inputs of the
+    multiply's consumers.
+    """
+    x = op.inputs[0]
+    square_op = NumericOp(inputs=[], outputs=[], type=NumericOpType.SQUARE)
+    x.replace_output(op, square_op)
+    square_op.add_input(x)
+    replace_op_in_outputs(op, square_op)
+    return square_op if op is root else root
 
 
 match_exp_minus_one = match_two_op_chain(NumericOp, NumericOpType.EXP, NumericOpType.SUBTRACT,
@@ -252,6 +289,11 @@ eliminate_div_by_one = rewrite_pass(
 )
 
 fold_log_plus_one = rewrite_pass(match_add_one_then_log, _replace_with_log1p)
+
+fold_self_multiply = rewrite_pass(
+    match_self_operation(NumericOp, NumericOpType.MULTIPLY),
+    fold_to_square,
+)
 
 
 def replace_three_op_chain(op1: Op, op2: Op, op3: Op, replacement: Op):
