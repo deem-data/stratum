@@ -36,9 +36,11 @@ class FileReadOp(PhysicalOp):
     format: str | None = None
 
     def __init__(self, file_path=None, read_args=None, read_kwargs=None):
-        # No name: the concrete class (PandasReadCSV, ...) already encodes backend
-        # and format, so a "read_csv" name would just double it in the plan.
-        super().__init__(name=file_path if file_path else None)
+        # No name beyond the path: the concrete class (PandasReadCSV, ...) already
+        # encodes backend and format, so a "read_csv" name would just double it in
+        # the plan. A graph-fed path is only known at runtime, so it is not a name.
+        super().__init__(name=str(file_path) if file_path is not None
+                              and not isinstance(file_path, OperandRef) else None)
         # file_path is an OperandRef when graph-fed (e.g. a variable), else a literal.
         self.file_path = file_path
         self.read_args = read_args

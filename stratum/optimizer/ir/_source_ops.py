@@ -1,5 +1,7 @@
 from stratum.optimizer.ir._ops import OperandRef, Op, OutputType, ValueOp, VariableOp, CallOp
 from pandas import DataFrame
+import numpy as np
+import pandas as pd
 
 
 class DataSourceOp(Op):
@@ -62,3 +64,35 @@ def make_read_op(op: CallOp, format: str = "csv") -> DataSourceOp:
     for in_ in inputs:
         in_.replace_output(op, new_op)
     return new_op
+
+
+# Reader functions recognised as data sources, paired with the source format they
+# produce. Matched by identity (as `op.func is pd.read_csv` was), so a callable
+# with an exotic `__eq__`/`__hash__` cannot confuse the lookup.
+_READ_FORMATS = (
+    (pd.read_csv, "csv"),
+    (pd.read_parquet, "parquet"),
+    (np.load, "npy"),
+)
+
+
+def try_make_read_op(op: Op) -> DataSourceOp | None:
+    """Rewrite a call to a supported reader into a :class:`DataSourceOp`.
+
+    Covers both spellings of a read step, which differ only in whether the path
+    reaches the call as an operand or as a plain literal::
+
+        X.skb.apply_func(pd.read_csv)        # == skrub.deferred(pd.read_csv)(X)
+        skrub.deferred(pd.read_csv)(path)    # path is a literal -> no operands
+
+    Returns ``None`` (leaving a plain ``CallOp``) when ``op`` is not a call to a
+    known reader, or when the path is not the first positional argument -- e.g.
+    ``skrub.deferred(pd.read_csv)(filepath_or_buffer=path)``, whose keyword name
+    differs per reader.
+    """
+    if not isinstance(op, CallOp):
+        return None
+    fmt = next((fmt for func, fmt in _READ_FORMATS if op.func is func), None)
+    if fmt is None or not op.args:
+        return None
+    return make_read_op(op, fmt)

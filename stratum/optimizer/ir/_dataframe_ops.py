@@ -9,7 +9,7 @@ import numpy as np
 # Per-category frame ops. These are imported here both because the
 # `extract_dataframe_op` dispatcher below references them and so that existing
 # `from ..._dataframe_ops import X` import sites keep working (re-export hub).
-from stratum.optimizer.ir._source_ops import DataSourceOp, make_read_op
+from stratum.optimizer.ir._source_ops import DataSourceOp, make_read_op, try_make_read_op
 from stratum.optimizer.ir._selection_ops import (
     SelectionKind, SelectionOp, _SELECTION_METHODS, make_selection_op,
     is_mask_selection, make_mask_selection_op)
@@ -84,24 +84,21 @@ def _is_column_projection(op: GetItemOp) -> bool:
 def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                          column_projection = True) -> tuple[Op, bool]:
     new_op = None
-    # DataSource detection (directly passed dataframe)
     if len(op.inputs) == 0:
+        # DataSource detection (directly passed dataframe)
         if isinstance(op, ValueOp) and (isinstance(op.value, DataFrame) or isinstance(op.value, PolarsDataFrame)):
             new_op = DataSourceOp(data=op.value)
             new_op.outputs = op.outputs
+        else:
+            # DataSource detection (read operation with a literal path):
+            # `skrub.deferred(pd.read_csv)("data.csv")` inlines the path into the
+            # call, so the read has no operands at all.
+            new_op = try_make_read_op(op)
 
     # DataSource detection (read operation): the input is not frame-world data --
     # a raw value (path / variable), or a numpy MATRIX left to the numeric path.
     elif not is_frame_like(op.inputs[0]):
-        if isinstance(op, CallOp):
-            if op.func is pd.read_csv:
-                new_op = make_read_op(op)
-
-            elif op.func is pd.read_parquet:
-                new_op = make_read_op(op, "parquet")
-
-            elif op.func is np.load:
-                new_op = make_read_op(op, "npy")
+        new_op = try_make_read_op(op)
 
     # input is frame-world data (a frame or a series): this is a dataframe op
     else:
