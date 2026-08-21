@@ -14,6 +14,7 @@ op's resolved inputs and the execution mode.
 """
 from __future__ import annotations
 import operator
+from typing import Mapping
 
 import polars as pl
 import pandas as pd
@@ -578,3 +579,53 @@ def fold_column_expr(root_node: Op, src: Op, root_consumer: Op):
     folder = _Folder(src)
     expr = folder.fold(root_node, root_consumer)
     return expr, folder.absorbed, folder.leaf_ops
+
+
+def substitute_cols(expr: ColumnExpr, bindings: Mapping[str, ColumnExpr],
+                    _memo: dict[int, ColumnExpr] | None = None) -> ColumnExpr:
+    """Replace ``Col(name)`` with ``bindings[name]`` when present.
+
+    Binding values are already source-relative and are not re-walked.
+    That preserves simultaneous-assign semantics inside one original map.
+
+    Shared subtrees stay shared via identity memoization: each distinct
+    ``ColumnExpr`` object is rewritten at most once per call.
+    """
+    if _memo is None:
+        _memo = {}
+    eid = id(expr)
+    if eid in _memo:
+        return _memo[eid]
+
+    if isinstance(expr, Col):
+        # Bindings are not re-walked (simultaneous rule within one map stage).
+        result = bindings.get(expr.name, expr)
+    elif isinstance(expr, (Const, OperandLeaf)):
+        result = expr
+    elif isinstance(expr, BinOpExpr):
+        left = substitute_cols(expr.left, bindings, _memo)
+        right = substitute_cols(expr.right, bindings, _memo)
+        result = (expr if left is expr.left and right is expr.right
+                  else BinOpExpr(expr.op, left, right))
+    elif isinstance(expr, UnaryOpExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else UnaryOpExpr(expr.op, operand))
+    elif isinstance(expr, StrExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else StrExpr(operand, expr.method, expr.args, expr.kwargs))
+    elif isinstance(expr, DtExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else DtExpr(operand, expr.attr))
+    elif isinstance(expr, DatetimeExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else DatetimeExpr(operand, expr.args, expr.kwargs))
+    else:
+        raise TypeError(
+            f"substitute_cols: unsupported ColumnExpr node {type(expr).__name__}")
+
+    _memo[eid] = result
+    return result
