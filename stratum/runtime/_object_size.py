@@ -3,6 +3,7 @@
 
 from sys import getsizeof
 from pandas import DataFrame, Series
+from pandas.core.groupby.groupby import GroupBy
 from polars import DataFrame as PolarsDataFrame, Series as PolarsSeries
 import numpy as np
 from numpy import ndarray
@@ -34,6 +35,13 @@ def get_size_pandas(obj):
         return obj.memory_usage(deep=True).sum()
     elif isinstance(obj, Series):
         return obj.memory_usage(deep=True)
+    elif isinstance(obj, GroupBy):
+        # A groupby is a lazy view: it holds the frame it was built from plus the
+        # grouper, so the frame dominates. Reached whenever a groupby(...) op is
+        # left unfused (no `by` argument, a column selection in between, or an
+        # aggregation spec the logical IR cannot represent) and its intermediate
+        # lands in the pool.
+        return get_size(obj.obj)
     else:
         raise ValueError(f"Unsupported pandas type for memory estimation: {type(obj)}")
 

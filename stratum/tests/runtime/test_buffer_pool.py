@@ -74,6 +74,13 @@ class TestBufferPool(unittest.TestCase):
         pool.memory_usage = 2*1024**5
         self.assertEqual(pool.total_size, "2.00 PB")
 
+    def test_groupby_is_sized_as_its_underlying_frame(self):
+        # An unfused groupby(...) op puts a GroupBy view in the pool; sizing it
+        # used to raise, which crashed any plan that left one unfused.
+        df = pd.DataFrame({"g": ["a", "a", "b"], "v": [1, 2, 3]})
+        self.assertEqual(get_size(df), get_size(df.groupby("g")))
+        self.assertEqual(get_size(df["v"]), get_size(df.groupby("g")["v"]))
+
     def test_unknown_object_sizes(self):
         class Foo:
             pass
