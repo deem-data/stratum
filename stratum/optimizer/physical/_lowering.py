@@ -52,6 +52,7 @@ def install_lowered(old: Op, new: PhysicalOp, root: IRNode) -> IRNode:
     new.outputs = old.outputs
     new.is_X = old.is_X
     new.is_y = old.is_y
+    new.output_schema = old.output_schema
     if new.output_type is OutputType.UNKNOWN:
         new.output_type = old.output_type
     for in_ in new.inputs:

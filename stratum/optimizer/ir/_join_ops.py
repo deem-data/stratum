@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from stratum.optimizer.ir._ops import OperandRef, OutputType, MethodCallOp, Op
+from stratum.optimizer.ir import _schema
 
 
 class JoinOp(Op):
@@ -27,6 +28,16 @@ class JoinOp(Op):
         self.right_index = right_index
         self.suffixes = suffixes
         self.output_type = OutputType.FRAME
+
+    def propagate_output_schema(self):
+        """Merge left and right schemas, applying suffixes to overlapping
+        non-key columns and collapsing shared (equal-named) join keys."""
+        left = self.inputs[0].output_schema
+        right = self.inputs[1].output_schema
+        left_on = _schema.as_column_list(self.left_on) or []
+        right_on = _schema.as_column_list(self.right_on) or []
+        shared_keys = set(left_on) & set(right_on)
+        self.output_schema = _schema.merge_join_schemas(left, right, shared_keys, self.suffixes)
 
 
 _MERGE_POSITIONAL = ["how", "on", "left_on", "right_on",

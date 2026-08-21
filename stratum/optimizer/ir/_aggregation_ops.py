@@ -1,4 +1,5 @@
 from stratum.optimizer.ir._ops import OperandRef, OutputType, MethodCallOp, Op
+from stratum.optimizer.ir import _schema
 
 
 class AggregateOp(Op):
@@ -29,6 +30,17 @@ class AggregateOp(Op):
         self.aggregations = aggregations
         self.groupby_kwargs = groupby_kwargs or {}
         self.output_type = OutputType.FRAME
+
+    def propagate_output_schema(self):
+        """Best-effort: only a dict aggregation spec gives statically known output
+        columns (its keys); a bare function name or list spec is left unknown.
+        See :func:`_schema.aggregate_schema` for the exact rules."""
+        self.output_schema = _schema.aggregate_schema(
+            self.inputs[0].output_schema,
+            self.grouping_attributes,
+            self.aggregations,
+            self.groupby_kwargs.get("as_index"),
+        )
 
 
 class GroupedDataframeOp(Op):

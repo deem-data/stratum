@@ -228,6 +228,7 @@ class IRNode:
         self.is_split_op = False
         self.was_cloned = False
         self.remove_after: list[IRNode] = []
+        self.output_schema = None
 
     def to_str_helper(self):
         class_name = (self.__class__.__name__ if self._is_physical

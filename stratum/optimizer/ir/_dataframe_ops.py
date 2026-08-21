@@ -1,5 +1,6 @@
 from stratum.optimizer.ir._ops import (OperandRef, OutputType, is_frame_like, BaseEstimatorOp, BinOp, UnaryOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp,
                                        MethodCallOp, Op, TransformerOp, ValueOp)
+from stratum.optimizer.ir import _schema
 from pandas import DataFrame
 from polars import DataFrame as PolarsDataFrame
 from skrub import SelectCols
@@ -45,6 +46,11 @@ class ConcatOp(Op):
         self.others = list(others)
         self.axis = axis
         self.output_type = OutputType.FRAME
+
+    def propagate_output_schema(self):
+        """Concat merges schemas: the result holds every column appearing in any
+        operand (row-wise concat shares columns, column-wise concat unions them)."""
+        self.output_schema = _schema.union_columns([in_op.output_schema for in_op in self.inputs])
 
 
 def _getitem_output_type(op: GetItemOp) -> OutputType:

@@ -56,6 +56,7 @@ class OptConfig():
         numeric_ops: bool = True,
         algebraic_rewrites: bool = True,
         algebraic_rewrite_config: AlgebraicRewritesConfig | None = None,
+        propagate_schema: bool = True,
     ):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
@@ -65,6 +66,7 @@ class OptConfig():
         if algebraic_rewrite_config is None:
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
+        self.propagate_schema = propagate_schema
 
 def _debug_show_graph(root: Op, name: str):
     if FLAGS.debug_graph:
@@ -163,6 +165,15 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None) -> O
     if config.unroll_choices:
         root = choice_unrolling(root)
 
+    # Propagate derived schemas through the Op DAG (part of broader metadata
+    # propagation used later for operator selection / parallelization planning).
+    # TODO: schemas are propagated once here, before algebraic_rewrites. Rewrites
+    # that create or replace ops leave new ops without a schema and replaced ones
+    # stale; re-propagate (or update incrementally) once rewrites start consuming
+    # output_schema.
+    if config.propagate_schema:
+        propagate_output_schema(root)
+
     # Final logical DAG
     if config.algebraic_rewrites:
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
@@ -226,6 +237,14 @@ def extract_numeric_operators(root):
     log_time("to_numeric took", start)
     _debug_show_graph(root, "numeric_rewrite")
     return root
+
+
+def propagate_output_schema(root):
+    """Propagate each op's output schema from its inputs (sources to sinks)."""
+    start = start_time()
+    for op in topological_iterator(root):
+        op.propagate_output_schema()
+    log_time("schema_propagation took", start)
 
 
 def convert_to_ops(dag: DataOp, env: dict = None) -> Op:

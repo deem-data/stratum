@@ -19,6 +19,7 @@ from stratum.optimizer.ir._base import (
     config_key, estimator_key, clone_value,
     _ALL_SELECTOR_KEY, _GRAPH_PARAM_KEY,
 )
+from stratum.optimizer.ir import _schema
 import logging
 import os
 logger = logging.getLogger(__name__)
@@ -122,6 +123,12 @@ class Op(IRNode):
         input_ids = tuple(id(i) for i in self.inputs)
         config = tuple((name, config_key(getattr(self, name))) for name in fields)
         return (type(self), input_ids, config)
+
+    def propagate_output_schema(self):
+        """Default: the output schema is unknown. Ops that can statically determine
+        their columns override this; everything else (UDFs, non-frame ops, frame ops
+        without a propagation rule yet) falls back to the unknown schema."""
+        self.output_schema = None
 
 
 class ImplOp(Op):
@@ -502,6 +509,29 @@ class GetItemOp(Op):
         super().__init__(name=name)
     # Execution lives in the physical impls (physical/_getitem_execs.py).
 
+    def propagate_output_schema(self):
+        """Column projection (`df["c"]`, `df[["a","b"]]`) selects a sub-schema;
+        a slice or a series-shaped row mask (`df[mask]`) preserves the schema. A
+        graph-fed key that isn't series-shaped can't be resolved statically (it
+        may be a computed column selector), so it falls back to the unknown
+        schema rather than over-claiming all columns."""
+        schema = self.inputs[0].output_schema
+        if isinstance(self.key, slice):
+            self.output_schema = schema  # row slice keeps all columns
+        elif isinstance(self.key, OperandRef):
+            # The key's runtime value isn't known statically, so we classify by
+            # the producing op's kind. A SERIES key is treated as a boolean row
+            # mask (`df[df["x"] > 0]`) and keeps the schema; a non-SERIES
+            # (list/array column selector) can't be resolved -> unknown.
+            # HEURISTIC: a SERIES of column *labels* used as `df[series]` is
+            # column selection too, which this misclassifies -- but that idiom
+            # doesn't occur in supported pipelines (a SERIES key is always a
+            # mask there).
+            key_op = self.inputs[self.key.k]
+            self.output_schema = schema if key_op.output_type is OutputType.SERIES else None
+        else:
+            self.output_schema = _schema.select_columns(schema, self.key)
+
 class BinOp(Op):
     fields = ["op", "left", "right"]
     
@@ -512,6 +542,26 @@ class BinOp(Op):
         self.left = left
         self.right = right
 
+    def propagate_output_schema(self):
+        """An elementwise op over frame data keeps the shape of its frame operand
+        (e.g. `df + 1`, `df["x"] > 0`); the dtype may change but the columns don't.
+
+        For a frame-frame op (`df1 + df2`) pandas aligns on column labels and
+        unions them, so we only trust a result when every frame operand carries
+        the same known columns. Differing schemas (or any unknown one) fall back
+        to the unknown schema rather than guessing one side's shape."""
+        if self.output_type not in FRAME_TYPES:
+            self.output_schema = None
+            return
+        frame_schemas = [in_op.output_schema for in_op in self.inputs if is_frame_like(in_op)]
+        if not frame_schemas or any(s is None for s in frame_schemas):
+            self.output_schema = None
+            return
+        first = frame_schemas[0]
+        if any(list(s.keys()) != list(first.keys()) for s in frame_schemas[1:]):
+            self.output_schema = None
+            return
+        self.output_schema = first
 
     def process(self, mode: str, inputs: list):
         left = inputs[self.left.k] if isinstance(self.left, OperandRef) else self.left

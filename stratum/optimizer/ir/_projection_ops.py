@@ -2,6 +2,8 @@ from typing import Callable
 from skrub.selectors._base import make_selector
 from stratum.optimizer.ir._ops import (OutputType, CallOp, GetAttrOp,
                                        MethodCallOp, Op, TransformerOp, _resolve_args, _resolve_kwargs)
+from stratum.optimizer.ir import _schema
+import polars as pl
 
 
 def resolve_selector_columns(frame, selector) -> list[str]:
@@ -69,6 +71,18 @@ class MetadataOp(Op):
         self.kwargs = kwargs
         self.output_type = OutputType.FRAME
 
+    def propagate_output_schema(self):
+        """Currently only ``rename`` is modelled: it remaps the columns named in
+        the ``columns`` (or axis=1 ``mapper``) mapping and leaves the rest. Any
+        other metadata op falls back to the unknown schema."""
+        kwargs = self.kwargs or {}
+        mapping = None
+        if self.func == "rename":
+            mapping = kwargs.get("columns")
+            if mapping is None and kwargs.get("axis") == 1:
+                mapping = kwargs.get("mapper")
+        self.output_schema = _schema.rename_columns(self.inputs[0].output_schema, mapping)
+
 
 class ProjectionOp(Op):
     logical_family = "Projection"
@@ -115,6 +129,19 @@ class DropOp(ProjectionOp):
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+
+    def _dropped_columns(self):
+        """Column labels being dropped, or ``None`` if not statically known."""
+        kwargs = self.kwargs or {}
+        if "columns" in kwargs:
+            return kwargs["columns"]
+        # positional form `df.drop(labels, axis=1)`: labels are columns only when axis==1.
+        if self.args and kwargs.get("axis", 0) == 1:
+            return self.args[0]
+        return None
+
+    def propagate_output_schema(self):
+        self.output_schema = _schema.drop_columns(self.inputs[0].output_schema, self._dropped_columns())
 
 
 class ColumnSelectorOp(Op):
@@ -165,6 +192,9 @@ class ColumnProjectionOp(Op):
         self.output_type = (OutputType.SERIES if isinstance(key, str)
                             else OutputType.FRAME)
 
+    def propagate_output_schema(self):
+        self.output_schema = _schema.select_columns(self.inputs[0].output_schema, self.key)
+
 
 def make_column_projection_op(op) -> ColumnProjectionOp:
     """Rewrite a column-selecting ``df[key]`` :class:`GetItemOp` (a literal
@@ -186,12 +216,23 @@ class AssignOp(ProjectionOp):
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
 
+    def propagate_output_schema(self):
+        """`df.assign(a=..., b=...)` adds/overwrites the kwargs-named columns.
+        Their dtype depends on the assigned expression, so we record them as
+        Unknown-typed while keeping the rest of the input schema intact."""
+        new_columns = list(self.kwargs.keys()) if self.kwargs else []
+        self.output_schema = _schema.add_columns(self.inputs[0].output_schema, new_columns)
+
 
 class DatetimeConversionOp(ProjectionOp):
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
         super().__init__(args=args, kwargs=dict(kwargs or {}), inputs=inputs,
                          outputs=outputs, columns=columns)
+
+    def propagate_output_schema(self):
+        # to_datetime keeps the column names and turns each into a Datetime column.
+        self.output_schema = _schema.retype_columns(self.inputs[0].output_schema, pl.Datetime("us"))
 
 
 class StringMethodOp(ProjectionOp):
@@ -236,6 +277,14 @@ class GetAttrProjectionOp(Op):
         self.inputs = inputs
         self.outputs = outputs
         self.output_type = OutputType.FRAME
+
+    def propagate_output_schema(self):
+        """An attribute/accessor projection (e.g. ``.dt.year``) preserves the
+        input's column names but changes their dtype. The result dtype depends on
+        the accessor (``.dt.year``->int, ``.dt.is_month_end``->bool, ...) and
+        pandas/polars disagree on some, so we keep the names and mark the dtypes
+        ``Unknown`` rather than infer them."""
+        self.output_schema = _schema.retype_columns(self.inputs[0].output_schema)
 
 
 def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp:
