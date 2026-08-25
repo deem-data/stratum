@@ -10,7 +10,7 @@ import polars as pl
 from stratum._api import grid_search
 from stratum._config import config
 from stratum.runtime._buffer_pool import BufferPool
-from stratum.runtime._object_size import get_size
+from stratum.runtime._object_size import UNKNOWN_SIZE, get_size
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, _arr, _make_op, simple_pipeline
 import skrub
 from sklearn.dummy import DummyRegressor
@@ -82,20 +82,16 @@ class TestBufferPool(unittest.TestCase):
         self.assertEqual(get_size(df["v"]), get_size(df.groupby("g")["v"]))
 
     def test_unknown_object_sizes(self):
+        # An object we cannot size must not crash the plan that produced it (a
+        # `df.index` intermediate used to). It is counted as UNKNOWN_SIZE instead,
+        # which means the pool under-accounts for it; see the TODO in _object_size.
         class Foo:
             pass
 
-        with self.assertRaises(ValueError):
-            get_size(Foo())
-
-        with self.assertRaises(ValueError):
-            get_size(pd.Index([1, 2, 3]))
-
-        with self.assertRaises(ValueError):
-            get_size(pl.LazyFrame({"a": [1, 2, 3]}))
-
-        with self.assertRaises(ValueError):
-            get_size(np.dtype("float64"))
+        for obj in (Foo(), pd.Index([1, 2, 3]), pl.LazyFrame({"a": [1, 2, 3]}),
+                    np.dtype("float64")):
+            with self.subTest(obj=type(obj).__name__):
+                self.assertEqual(get_size(obj), UNKNOWN_SIZE)
 
 
 # ---------------------------------------------------------------------------

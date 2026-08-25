@@ -2,7 +2,7 @@ import pandas as pd
 import unittest
 import skrub
 from sklearn.dummy import DummyRegressor
-from stratum.utils._skrub_graph import build_graph
+from stratum.utils._skrub_graph import build_graph, get_data
 
 class TestGraph(unittest.TestCase):
 
@@ -102,3 +102,37 @@ class TestGraph(unittest.TestCase):
         fast_sig = self._graph_signature(fast)
 
         self.assertEqual(ref_sig, fast_sig)
+
+class TestGetData(unittest.TestCase):
+    """`get_data` must return exactly what `dag.skb.get_data()` returns."""
+
+    def test_matches_skrub_get_data(self):
+        df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        data = skrub.var("data", df)
+        X = data[["x"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        offset = skrub.var("offset", 3)
+        pred = (X + offset).skb.apply(DummyRegressor(), y=y)
+
+        expected = pred.skb.get_data()
+        actual = get_data(pred)
+        # Same variables, whatever order the two traversals happen to visit them in.
+        self.assertEqual(set(expected), {"data", "offset"})
+        self.assertEqual(set(actual), set(expected))
+        for name, value in expected.items():
+            if isinstance(value, pd.DataFrame):
+                pd.testing.assert_frame_equal(actual[name], value)
+            else:
+                self.assertEqual(actual[name], value)
+
+    def test_skips_variables_without_a_value(self):
+        # A variable declared without a value is absent from the mapping, so
+        # `optimize` leaves it a VariableOp instead of folding in a bogus constant.
+        valued = skrub.var("valued", 1)
+        pred = valued + skrub.var("no_value")
+        self.assertEqual(get_data(pred), {"valued": 1})
+        self.assertEqual(get_data(pred), pred.skb.get_data())
+
+    def test_no_variables(self):
+        dag = skrub.as_data_op(pd.DataFrame({"x": [1]}))
+        self.assertEqual(get_data(dag), {})

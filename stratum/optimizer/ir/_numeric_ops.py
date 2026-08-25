@@ -4,6 +4,7 @@ from enum import Enum
 
 import numpy as np
 
+from stratum.optimizer.ir._base import _resolve_args, _resolve_kwargs
 from stratum.optimizer.ir._ops import BinOp, CallOp, Op, OperandRef
 
 class NumericOpType(Enum):
@@ -83,8 +84,13 @@ class NumericOp(Op):
         self.reversed = reversed
 
     def process(self, mode: str, inputs: list):
+        # A trailing argument can be another operand (e.g. `np.arctan2(dy, dx)`),
+        # not just a constant, so resolve refs the same way CallOp does before the
+        # rewrite: passing an unresolved OperandRef to a ufunc makes numpy fall
+        # back to object dtype and look the ufunc up as a method on each element.
         if self.type == NumericOpType.GENERIC:
-            return self.func(inputs[0], *self.args, **self.kwargs)
+            return self.func(inputs[0], *_resolve_args(self.args, inputs),
+                             **_resolve_kwargs(self.kwargs, inputs))
         elif self.type == NumericOpType.LOG:
             return np.log(inputs[0])
         elif self.type == NumericOpType.EXP:
@@ -100,7 +106,8 @@ class NumericOp(Op):
         elif self.type == NumericOpType.EXPM1:
             return np.expm1(inputs[0])
         elif self.type == NumericOpType.SUM:
-            return np.sum(inputs[0], *self.args, **self.kwargs)
+            return np.sum(inputs[0], *_resolve_args(self.args, inputs),
+                          **_resolve_kwargs(self.kwargs, inputs))
         elif self.type in _BINARY_TYPES:
             # The primary operand is always input 0 (bound first); the optional
             # second operand is referenced explicitly so x op x (single edge) works.

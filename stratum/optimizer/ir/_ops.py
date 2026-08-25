@@ -5,7 +5,7 @@ from typing import Callable
 from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
-from skrub._data_ops._choosing import Choice
+from skrub._data_ops._choosing import BaseChoice, Choice, Match
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, Var, _wrap_estimator
 from skrub._utils import PassThrough
 from pandas import DataFrame
@@ -218,6 +218,12 @@ class VariableOp(Op):
 
 class BaseEstimatorOp(Op):
     fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs", "param_refs"]
+    # skrub keys `Apply.kwargs` by the estimator method the kwargs belong to, and
+    # evaluates only the group for the method it is about to call. Subclasses name
+    # the two groups stratum can reach: the one for the fitting call and the one
+    # for the transform/predict call.
+    fit_kwargs_key: str | None = None
+    call_kwargs_key: str | None = None
 
     def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None, param_refs=None):
         super().__init__()
@@ -234,9 +240,27 @@ class BaseEstimatorOp(Op):
         self.how = how
         self.allow_reject = allow_reject
         self.unsupervised = unsupervised
+        # {method name: kwargs for that method}, as built by `.skb.apply()`. The
+        # inner values may contain OperandRefs (a `fit_kwargs` entry can be fed by
+        # the graph, e.g. an eval set), so they are resolved per call in
+        # `method_kwargs` rather than stored as ready-to-splat dicts.
         self.kwargs = kwargs
         self.param_refs = param_refs if param_refs is not None else {}
         self.parallelism = os.cpu_count() # TODO:this will should be set during physical planning phase
+
+    def method_kwargs(self, key: str | None, inputs: list) -> dict:
+        """Resolve the kwargs group `key` against `inputs`, as skrub's
+        `Apply._eval_kwargs` does for the method it is about to call."""
+        group = self.kwargs.get(key) if key else None
+        if group is None:
+            return {}
+        # The whole group can itself be graph-fed (a DataOp evaluating to a dict),
+        # so it is only known to be a dict once resolved.
+        group = _resolve_operand(group, inputs)
+        if group is None:
+            return {}
+        self.check_kwargs(group)
+        return group
 
     def clone(self):
         params = self.estimator.get_params()
@@ -249,7 +273,7 @@ class BaseEstimatorOp(Op):
             how=self.how,
             allow_reject=self.allow_reject,
             unsupervised=self.unsupervised,
-            kwargs=self.kwargs,
+            kwargs=clone_value(self.kwargs),
             param_refs=self.param_refs,
         )
         new_op.was_cloned = True
@@ -268,6 +292,13 @@ class BaseEstimatorOp(Op):
         place_holders = {name: inputs[ref.k] for name, ref in self.param_refs.items()}
         estm.set_params(**place_holders)
         cols = inputs[self.cols.k] if isinstance(self.cols, OperandRef) else self.cols
+        # Predict mode never fits, so (like skrub) the fit group is left unevaluated.
+        # Note the difference from skrub: skrub also never *computes* what that group
+        # references, while our plan is eager, so a sub-DAG feeding only fit kwargs
+        # still runs in predict mode and has to tolerate it (a transformer carving an
+        # eval set out of the training fold must return placeholders in predict mode).
+        fit_kwargs = {} if mode == "predict" else self.method_kwargs(self.fit_kwargs_key, inputs)
+        call_kwargs = self.method_kwargs(self.call_kwargs_key, inputs)
         return (
             estm,
             x,
@@ -276,7 +307,7 @@ class BaseEstimatorOp(Op):
             self.how,
             self.allow_reject,
             self.unsupervised,
-            self.kwargs,
+            (fit_kwargs, call_kwargs),
             mode,
             self.parallelism
         )
@@ -293,12 +324,20 @@ class BaseEstimatorOp(Op):
 
 class PredictorOp(BaseEstimatorOp):
     logical_family = "Predictor"
+    # fit_transform mode calls fit() then predict(); predict mode only predict().
+    fit_kwargs_key = "fit"
+    call_kwargs_key = "predict"
 
     def get_process_task(self):
         return process_estimator_task
 
 class TransformerOp(BaseEstimatorOp):
     logical_family = "Transformer"
+    # A transformer is fitted through fit_transform(), so (as in skrub) the "fit"
+    # group never applies to one; predict mode calls transform().
+    fit_kwargs_key = "fit_transform"
+    call_kwargs_key = "transform"
+
     def get_process_task(self):
         return process_transformer_task
 
@@ -340,16 +379,17 @@ def check_estm_inputs(estimator, mode, x, y):
 def process_estimator_task(task_data):
     """ Process a predictor (EstimatorOp) task in a worker process. """
     (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    fit_kwargs, predict_kwargs = kwargs
     _, x, y = check_estm_inputs(estimator, mode, x, y)
     if mode == "fit_transform":
         estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
         y_arg = () if unsupervised else (y,)
-        estimator.fit(x, *y_arg, **kwargs)
-        result = estimator.predict(x, **kwargs)
+        estimator.fit(x, *y_arg, **fit_kwargs)
+        result = estimator.predict(x, **predict_kwargs)
         # Return both result and fitted estimator (in case of multi-processing)
         return result, estimator
     elif mode == "predict":
-        result = estimator.predict(x, **kwargs)
+        result = estimator.predict(x, **predict_kwargs)
         return result, estimator
     else:
         raise ValueError(f"Mode {mode} not supported for PredictorOp.")
@@ -357,14 +397,15 @@ def process_estimator_task(task_data):
 def process_transformer_task(task_data):
     """ Process a transformer (TransformerOp) task in a worker process. """
     (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    fit_transform_kwargs, transform_kwargs = kwargs
     converted, x, y = check_estm_inputs(estimator, mode, x, y)
     with estimator_parallel_config(parallelism):
         if mode == "fit_transform":
             estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
             y_arg = () if unsupervised else (y,)
-            result = estimator.fit_transform(x, *y_arg, **kwargs)
+            result = estimator.fit_transform(x, *y_arg, **fit_transform_kwargs)
         elif mode == "predict":
-            result = estimator.transform(x, **kwargs)
+            result = estimator.transform(x, **transform_kwargs)
         else:
             raise ValueError(f"Mode {mode} not supported for TransformerOp.")
     if converted:
@@ -547,6 +588,66 @@ def _bind_or_value(binder: OperandBinder, value):
     return binder.ref(value) if isinstance(value, DataOp) else value
 
 
+# Method groups reachable from stratum's two execution modes: which of the two a
+# group belongs to depends on the estimator kind (see BaseEstimatorOp subclasses).
+_EXECUTABLE_KWARGS_KEYS = frozenset({"fit", "fit_transform", "transform", "predict"})
+# Groups skrub routes to a method stratum never calls. Ignoring them would change
+# results with no trace, so they are rejected instead.
+_UNSUPPORTED_KWARGS_KEYS = frozenset({"predict_proba", "decision_function", "score"})
+
+
+def _bind_apply_kwargs(binder: OperandBinder, estimator_class, kwargs: dict | None) -> dict:
+    """Bind the DataOps nested in an Apply's per-method kwargs to OperandRefs.
+
+    ``.skb.apply()`` always passes all seven method groups, most of them None.
+    Dropping the empty ones keeps the op's config (and therefore its CSE key)
+    down to the groups that carry something.
+
+    Every remaining group is bound, including one this estimator kind will never
+    call (a transformer is fitted through ``fit_transform``, so its ``fit`` group
+    is dead in skrub too). Graph extraction already reported the DataOps inside
+    each group as children of the Apply node, so a group left unbound leaves those
+    ops in the DAG with no consumer, and the topological walk then trips over a
+    node it has no in-degree entry for.
+    """
+    bound = {}
+    for method, group in (kwargs or {}).items():
+        if group is None:
+            continue
+        if any(isinstance(v, (BaseChoice, Match)) for v in _iter_nested(group)):
+            # A choice here would have to expand the parameter grid; its DataOp
+            # outcomes are graph children, so silently keeping it would orphan them.
+            raise NotImplementedError(
+                f"A choice inside `{method}_kwargs` of `.skb.apply()` is not "
+                f"supported yet (choice found in {group!r}).")
+        if method in _UNSUPPORTED_KWARGS_KEYS or method not in _EXECUTABLE_KWARGS_KEYS:
+            raise NotImplementedError(
+                f"`{method}_kwargs` passed to `.skb.apply()` is not supported yet: "
+                f"stratum never calls `{method}()`, so the arguments would be "
+                f"silently dropped.")
+        if method not in (estimator_class.fit_kwargs_key, estimator_class.call_kwargs_key):
+            # Dead for this estimator kind in skrub as well, so it is bound (to keep
+            # the DAG consistent) but never splatted. Mirroring skrub here rather
+            # than raising keeps a pipeline skrub accepts working.
+            logger.warning(
+                f"`{method}_kwargs` is ignored for a {estimator_class.logical_family.lower()}: "
+                f"it is fitted through `{estimator_class.fit_kwargs_key}()` and applied "
+                f"through `{estimator_class.call_kwargs_key}()`.")
+        bound[method] = binder.bind(group)
+    return bound
+
+
+def _iter_nested(value):
+    """Yield ``value`` and every item nested in its tuples/lists/dicts."""
+    yield value
+    if isinstance(value, (tuple, list)):
+        for v in value:
+            yield from _iter_nested(v)
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_nested(v)
+
+
 def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict) -> Op:
     """Build the TransformerOp/EstimatorOp for one concrete estimator of an Apply impl.
 
@@ -565,6 +666,7 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict) -> Op:
                   if isinstance(v, DataOp) and id(v) in ids_to_ops}
     y = _bind_or_value(binder, impl.y)
     cols = _bind_or_value(binder, impl.cols)
+    kwargs = _bind_apply_kwargs(binder, estimator_class, impl.kwargs)
     op = estimator_class(
         estimator=estimator,
         y=y,
@@ -572,7 +674,7 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict) -> Op:
         how=impl.how,
         allow_reject=impl.allow_reject,
         unsupervised=impl.unsupervised,
-        kwargs={},
+        kwargs=kwargs,
         param_refs=param_refs,
     )
     op.inputs = binder.inputs
