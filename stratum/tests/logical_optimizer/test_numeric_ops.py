@@ -393,3 +393,34 @@ class TestNumericOps(unittest.TestCase):
         self.assertFalse(
             any(isinstance(o, NumericOp) and o.type == NumericOpType.LOG1P for o in out)
         )
+
+    def test_process_generic_resolves_operand_args(self):
+        """A second operand in a generic numpy call must be resolved, not passed
+        through as an OperandRef (numpy would then look the ufunc up as a method
+        on each element and raise)."""
+        op = NumericOp(inputs=[], outputs=None, func=np.arctan2, args=(OperandRef(1),))
+        self.assertEqual(op.type, NumericOpType.GENERIC)
+        dy, dx = np.array([1.0, -1.0]), np.array([2.0, 2.0])
+        np.testing.assert_array_almost_equal(op.process("fit", [dy, dx]), np.arctan2(dy, dx))
+
+    def test_process_sum_resolves_operand_args(self):
+        op = NumericOp(inputs=[], outputs=None, func=np.sum, kwargs={"axis": OperandRef(1)})
+        result = op.process("fit", [np.array([[1.0, 2.0], [3.0, 4.0]]), 1])
+        np.testing.assert_array_almost_equal(result, np.array([3.0, 7.0]))
+
+    def test_binary_numpy_func_on_two_columns(self):
+        """`np.arctan2(dy, dx)` over two graph columns runs end to end: the
+        extraction pass used to keep the second column as an unresolved ref."""
+        data = st.as_data_op(self.df)
+        X = data[["x"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        dy, dx = X["x"] * 2.0, X["x"] + 1.0
+        bearing = dy.skb.apply_func(np.arctan2, dx)
+        pred = X.assign(bearing=bearing).skb.apply(DummyRegressor(), y=y)
+
+        out, *_ = optimize(pred)
+        op = next(o for o in out if isinstance(o, NumericOp)
+                  and o.type == NumericOpType.GENERIC and o.func is np.arctan2)
+        col = pd.Series([1.0, 2.0, 3.0])
+        pd.testing.assert_series_equal(op.process("fit", [col * 2.0, col + 1.0]),
+                                       np.arctan2(col * 2.0, col + 1.0))

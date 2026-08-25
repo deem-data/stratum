@@ -19,6 +19,20 @@ def get_size(obj):
     else:
         return get_size_single_object(obj)
 
+# TODO: an unsized object is accounted for as 1 byte, so the pool never counts
+# it towards its memory budget and never picks it for eviction: whatever it holds
+# (possibly a whole frame behind a lazy view) leaks until the plan tears the pool
+# down. Add a real estimate for every type that reaches the pool; the fallback
+# only exists so an unknown intermediate cannot crash a plan mid-execution.
+UNKNOWN_SIZE = 1
+
+
+def _unknown_size(obj, kind: str = "") -> int:
+    logger.debug(f"No memory estimate for {kind or 'type'} {type(obj)}; "
+                 f"counting it as {UNKNOWN_SIZE} byte")
+    return UNKNOWN_SIZE
+
+
 def get_size_single_object(obj):
     if type(obj).__module__.startswith("pandas"):
         return get_size_pandas(obj)
@@ -28,7 +42,7 @@ def get_size_single_object(obj):
         return get_size_numpy(obj)
     if isinstance(obj, (str, int, float, bool, bytes)) or obj is None:
         return getsizeof(obj)
-    raise ValueError(f"Unsupported type for memory estimation: {type(obj)}")
+    return _unknown_size(obj)
 
 def get_size_pandas(obj):
     if isinstance(obj, DataFrame):
@@ -43,7 +57,7 @@ def get_size_pandas(obj):
         # lands in the pool.
         return get_size(obj.obj)
     else:
-        raise ValueError(f"Unsupported pandas type for memory estimation: {type(obj)}")
+        return _unknown_size(obj, "pandas type")
 
 def get_size_polars(obj):
     if isinstance(obj, PolarsDataFrame):
@@ -51,7 +65,7 @@ def get_size_polars(obj):
     elif isinstance(obj, PolarsSeries):
         return obj.estimated_size(unit="b")
     else:
-        raise ValueError(f"Unsupported polars type for memory estimation: {type(obj)}")
+        return _unknown_size(obj, "polars type")
 
 def get_size_numpy(obj):
     if isinstance(obj, ndarray):
@@ -59,7 +73,7 @@ def get_size_numpy(obj):
     elif isinstance(obj, np.generic):
         return obj.itemsize
     else:
-        raise ValueError(f"Unsupported numpy type for memory estimation: {type(obj)}")
+        return _unknown_size(obj, "numpy type")
 
 def prettify_bytes(num_bytes: float) -> str:
     """Format a byte count as a human-readable string (e.g. ``"1.50 MB"``)."""

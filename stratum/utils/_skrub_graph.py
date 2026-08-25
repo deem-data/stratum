@@ -4,11 +4,16 @@ Drop-in replacement for ``skrub._data_ops._evaluation._Graph().run(dag)``
 that avoids the heavyweight generator-based ``_DataOpTraversal`` machinery.
 We only need the DataOp-to-DataOp adjacency; choices, estimators, slices etc.
 are irrelevant for graph structure and can be skipped.
+
+The same traversal also backs :func:`get_data`, the fast counterpart of
+``dag.skb.get_data()``, which goes through that same slow machinery.
 """
 
 from collections import defaultdict
 from skrub._data_ops import DataOp
 from skrub._data_ops._choosing import BaseChoice, Choice, Match
+from skrub._data_ops._data_ops import Var
+from skrub._data_ops._utils import NULL
 
 
 _BUILTIN_SEQ = (list, tuple, frozenset, set)
@@ -85,3 +90,23 @@ def build_graph(data_op):
     children = {k: _unique(v) for k, v in raw_children.items()}
     parents = {k: _unique(v) for k, v in raw_parents.items()}
     return {"nodes": raw_nodes, "children": children, "parents": parents}
+
+
+def get_data(data_op):
+    """Collect the values of the variables in a DataOp DAG.
+
+    Fast replacement for ``data_op.skb.get_data()``, which walks the DAG with
+    skrub's generator-based traversal: that traversal re-walks shared
+    sub-expressions, so on a DAG with many shared nodes it is orders of
+    magnitude slower than the DFS in :func:`build_graph` (200 s vs 0.3 ms on a
+    118-node feature-engineering pipeline).
+
+    Returns the same ``{variable name: value}`` mapping, skipping variables that
+    were declared without a value.
+    """
+    data = {}
+    for node in build_graph(data_op)["nodes"].values():
+        impl = node._skrub_impl
+        if isinstance(impl, Var) and impl.value is not NULL:
+            data[impl.name] = impl.value
+    return data

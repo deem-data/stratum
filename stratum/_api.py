@@ -4,6 +4,7 @@ from skrub import DataOp
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import optimize
 from stratum.runtime._scheduler import SequentialScheduler
+from stratum.utils._skrub_graph import get_data
 from time import perf_counter
 
 #TODO: Rename this file
@@ -12,7 +13,7 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
     t0 = perf_counter()
     #FIXME: Measure operator execution only if stats is enabled
     env_extra = env if env else {}
-    env = dag.skb.get_data()
+    env = get_data(dag)
     for k, v in env_extra.items():
         env[k] = v
     # Resolve variables to constants at compile time, so the scheduler runs
@@ -31,7 +32,7 @@ def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
     """Evaluate a DataOp DAG with train/test split."""
     # Resolve variables to constants at compile time, so the scheduler runs
     # without an environment.
-    linearized_dag, split_pos, flagged_ops = optimize(dag, env=dag.skb.get_data())
+    linearized_dag, split_pos, flagged_ops = optimize(dag, env=get_data(dag))
     sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats)
     out = sched.evaluate(seed, test_size)
     stats_printer(sched)

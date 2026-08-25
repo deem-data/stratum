@@ -1736,7 +1736,7 @@ wheels = [
 
 [[package]]
 name = "stratum-ai"
-version = "0.0.0.dev1"
+version = "0.0.0.dev2"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
