@@ -1,5 +1,5 @@
 use ndarray::{Array2, Axis};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyList, PyModule};
 use pyo3::{PyErr, exceptions::PyValueError};
@@ -17,7 +17,9 @@ mod truncated_svd;  //TruncatedSVD using randomized SVD
 mod util;
 mod threads;
 mod one_hot_encoder;
-use std::sync::Arc;
+mod logistic_regression;
+use once_cell::sync::Lazy;
+use std::sync::{Arc, Mutex};
 
 // TODO (refactor): Move functions to corresponding modules
 // TODO (perf): Test with blas/mkl. Accordingly move from faer
@@ -628,6 +630,94 @@ fn tfidf_transform_csr(
     Ok((Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_cols))
 }
 
+// Binary Logistic Regression
+
+
+#[pyfunction]
+fn binary_predict<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f32>,
+    w: PyReadonlyArray1<f32>,
+    bias: f32,
+    intercept: bool,
+) -> Bound<'py, PyArray1<u32>> {
+   
+
+    let x_view = x.as_array();
+    let w_view = w.as_array();
+
+    let classes =
+        py.detach(|| logistic_regression::dot_argmax_binary(x_view, w_view, bias, intercept));
+
+    classes.into_pyarray(py)
+}
+
+#[pyfunction]
+fn binary_predict_proba<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f32>,
+    w: PyReadonlyArray1<f32>,
+    bias: f32,
+    intercept: bool,
+) -> Bound<'py, PyArray2<f32>> {
+    let x_view = x.as_array();
+    let w_view = w.as_array();
+
+    let proba =
+        py.detach(|| logistic_regression::dot_sigmoid_binary(x_view, w_view, bias, intercept));
+
+    proba.into_pyarray(py)
+}
+
+// One argument per hyper-parameter: this is the Python-facing signature, so the list is
+// the API rather than something to bundle away.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+#[pyo3(signature = (x, y, l1_reg, l2_reg, intercept, max_iters, m, tolerance, sample_weights=None))]
+fn binary_lbfgs_fit<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f32>,
+    y: PyReadonlyArray1<u32>,
+    l1_reg: f32,
+    l2_reg: f32,
+    intercept: bool,
+    max_iters: u64,
+    m: usize,
+    tolerance: f32,
+    sample_weights: Option<PyReadonlyArray1<f32>>,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
+    // Build the zero-copy views up front. These borrow x / y / sample_weights,
+    // which stay alive on this stack frame for the whole call — so the buffers
+    // remain valid (and, being PyReadonlyArray, immutable) while the GIL is off.
+    let x_view = x.as_array();
+    let y_view = y.as_array();
+    let sample_weights_view = sample_weights.as_ref().map(|w| w.as_array());
+
+    // Release the GIL for the fit: it's pure Rust number-crunching that never
+    // touches Python, so other Python threads can run while it iterates.
+    // The closure returns the raw Result, not a PyResult — PyErr is not Ungil and
+    // can't be constructed here; we convert it after re-acquiring the GIL.
+    let w = py
+        .detach(|| {
+            logistic_regression::fit_binary(
+                x_view,
+                y_view,
+                l1_reg,
+                l2_reg,
+                intercept,
+                max_iters,
+                m,
+                tolerance,
+                sample_weights_view,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Back under the GIL: hand the result buffer to NumPy (zero-copy).
+    Ok(w.into_pyarray(py))
+}
+
+
 // ---- Expose module ----
 #[pymodule]
 fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
@@ -644,5 +734,11 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_hot_encoder::csr_to_dense, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_fit_csr, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_transform_csr, m)?)?;
+
+    // (Binary) Logistic Regression
+    m.add_function(wrap_pyfunction!(binary_predict, m)?)?;
+    m.add_function(wrap_pyfunction!(binary_predict_proba, m)?)?;
+    m.add_function(wrap_pyfunction!(binary_lbfgs_fit, m)?)?;
+    
     Ok(())
 }
