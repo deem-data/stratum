@@ -322,21 +322,34 @@ def test_assign_pipeline_evaluates(polars):
 
 
 def test_chained_assign_maps_evaluate(polars):
-    # Three chained assigns, each reading a column produced by the previous one:
-    # every assign folds into its own map, and Col refs resolve against the
-    # previous map's output frame.
+    # Three chained assigns fuse into one map; Col refs are inlined against the
+    # original source so sequential assign semantics are preserved.
     df = pd.DataFrame({"x": [1, 2, 3]})
     src = st.as_data_op(df)
     d1 = src.assign(x2=src["x"] * 2)
     d2 = d1.assign(x4=d1["x2"] * 2)
     d3 = d2.assign(x8=d2["x4"] * 2)
     ops = optimize(d3, OptConfig(dataframe_ops=True))
-    assert 3 == len([o for o in ops if isinstance(o, AssignMapOp)])
-    assert 4 == len(ops)  # source + three maps
+    assert 1 == len([o for o in ops if isinstance(o, AssignMapOp)])
+    assert 2 == len(ops)  # source + fused map
     result = st._api.evaluate(d3)
     assert [2, 4, 6] == list(result["x2"])
     assert [4, 8, 12] == list(result["x4"])
     assert [8, 16, 24] == list(result["x8"])
+
+
+def test_chained_assign_maps_unfused_when_disabled(polars):
+    from stratum.optimizer._dataframe_rewrites import DataframeRewritesConfig
+    df = pd.DataFrame({"x": [1, 2, 3]})
+    src = st.as_data_op(df)
+    d1 = src.assign(x2=src["x"] * 2)
+    d2 = d1.assign(x4=d1["x2"] * 2)
+    d3 = d2.assign(x8=d2["x4"] * 2)
+    ops = optimize(d3, OptConfig(
+        dataframe_ops=True,
+        dataframe_rewrite_config=DataframeRewritesConfig(fuse_assign_maps=False)))
+    assert 3 == len([o for o in ops if isinstance(o, AssignMapOp)])
+    assert 4 == len(ops)  # source + three maps
 
 
 def test_assign_overwrite_and_read_original_column(polars):
