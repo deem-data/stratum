@@ -1,7 +1,7 @@
 from sklearn.base import BaseEstimator
-from sklearn.dummy import DummyRegressor
+from sklearn.dummy import DummyClassifier, DummyRegressor
 from stratum import config
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GroupKFold, KFold, StratifiedKFold
 from stratum.tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1, datetime_pipeline2
 from contextlib import redirect_stdout
 from io import StringIO
@@ -13,6 +13,27 @@ import stratum as st
 import logging
 
 logging.basicConfig(level=logging.INFO)
+
+class CountingKFold(KFold):
+    """KFold that records how often it was asked for splits."""
+
+    def __init__(self, n_splits=3):
+        super().__init__(n_splits=n_splits)
+        self.calls = 0
+
+    def split(self, X, y=None, groups=None):
+        self.calls += 1
+        return super().split(X, y, groups)
+
+
+def _classification_frame(n=90, n_classes=3):
+    rng = np.random.default_rng(0)
+    return pd.DataFrame({
+        "a": rng.normal(size=n),
+        "b": rng.normal(size=n),
+        "t": rng.integers(0, n_classes, size=n),
+    })
+
 
 class InputCheckEstimator(BaseEstimator):
     def fit(self, X, y):
@@ -139,6 +160,65 @@ class SearchTest(RuntimeTest):
         X = X.drop(columns=["datetime"])
         pred = X.skb.apply(DummyRegressor(), y=y)
         st._api.grid_search(pred)
+
+
+class CrossValidationSplitterTest(unittest.TestCase):
+    """Regression tests for issue #199."""
+
+    def setUp(self):
+        self.df = _classification_frame()
+
+    def _classification_pipeline(self, **mark_as_x_kwargs):
+        data = st.as_data_op(self.df)
+        y = data["t"].skb.mark_as_y()
+        X = data[["a", "b"]].skb.mark_as_X(**mark_as_x_kwargs)
+        return X.skb.apply(DummyClassifier(strategy="most_frequent"), y=y)
+
+    def test_stratified_cv_gets_y(self):
+        """A stratified splitter needs the labels; passing X only raised TypeError."""
+        cv = StratifiedKFold(n_splits=3)
+        sched = st._api.grid_search(self._classification_pipeline(),
+                                    cv=cv, scoring="accuracy")
+
+        search = self._classification_pipeline().skb.make_grid_search(
+            cv=StratifiedKFold(n_splits=3), fitted=True, scoring="accuracy")
+        assert np.allclose(search.results_["mean_test_score"], sched.results_["scores"])
+
+    def test_declared_cv_drives_the_folds(self):
+        """`mark_as_X(cv=...)` used to be ignored in favour of check_cv(None)."""
+        cv = CountingKFold(n_splits=3)
+        pred = self._classification_pipeline(cv=cv, split_kwargs={})
+        with config(scheduler=True):
+            pred.skb.make_grid_search(scoring="accuracy")
+        self.assertGreater(cv.calls, 0)
+
+    def test_declared_cv_without_split_kwargs(self):
+        """`split_kwargs` defaults to None and must not reach the splitter as **None."""
+        cv = CountingKFold(n_splits=3)
+        pred = self._classification_pipeline(cv=cv)
+        with config(scheduler=True):
+            pred.skb.make_grid_search(scoring="accuracy")
+        self.assertGreater(cv.calls, 0)
+
+    def test_explicit_cv_overrides_declared_cv(self):
+        """skrub's precedence: an explicit splitter wins over the declared one."""
+        declared = CountingKFold(n_splits=3)
+        pred = self._classification_pipeline(cv=declared, split_kwargs={})
+        st._api.grid_search(pred, cv=StratifiedKFold(n_splits=2), scoring="accuracy")
+        self.assertEqual(declared.calls, 0)
+
+    def test_declared_split_kwargs_reach_the_splitter(self):
+        """`groups` for GroupKFold travels through split_kwargs."""
+        groups = np.arange(len(self.df)) % 3
+        pred = self._classification_pipeline(cv=GroupKFold(n_splits=3),
+                                             split_kwargs={"groups": groups})
+        sched = st._api.grid_search(pred, scoring="accuracy")
+
+        search = self._classification_pipeline(
+            cv=GroupKFold(n_splits=3), split_kwargs={"groups": groups},
+        ).skb.make_grid_search(fitted=True, scoring="accuracy")
+        assert np.allclose(search.results_["mean_test_score"], sched.results_["scores"])
+
 
 if __name__ == "__main__":
     unittest.main()
