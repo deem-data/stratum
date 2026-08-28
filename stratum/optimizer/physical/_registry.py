@@ -3,7 +3,45 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
+from stratum.optimizer.ir._aggregation_ops import AggregateOp, GroupedDataframeOp
 from stratum.optimizer.ir._base import IRNode
+from stratum.optimizer.ir._dataframe_ops import (
+    ApplyUDFOp,
+    AssignMapOp,
+    AssignOp,
+    ColumnProjectionOp,
+    ColumnSelectorOp,
+    ConcatOp,
+    DatetimeConversionOp,
+    DropOp,
+    GetAttrProjectionOp,
+    MapOp,
+    MetadataOp,
+    MissingMaskOp,
+    ProjectionOp,
+    SelectionOp,
+    SplitOp,
+    SplitOutput,
+    StringMethodOp,
+)
+from stratum.optimizer.ir._join_ops import JoinOp
+from stratum.optimizer.ir._numeric_ops import NumericOp
+from stratum.optimizer.ir._ops import (
+    BaseEstimatorOp,
+    BinOp,
+    CallOp,
+    ChoiceOp,
+    GetAttrOp,
+    GetItemOp,
+    ImplOp,
+    MethodCallOp,
+    Op,
+    PredictorOp,
+    SearchEvalOp,
+    TransformerOp,
+    ValueOp,
+    VariableOp,
+)
 BackendName = str
 
 
@@ -51,6 +89,84 @@ class RustPhysicalImpl(PhysicalImpl):
     data_parallel: bool = False
 
 
+"""Operator family used to keep the registry extensible."""
+@dataclass(frozen=True, slots=True)
+class OperatorFamily:
+    name: str
+    op_types: tuple[type[IRNode], ...]
+    default_backends: tuple[BackendName, ...] = ()
+    notes: str = ""
+
+
+"""A physical execution backend understood by the registry."""
+@dataclass(frozen=True, slots=True)
+class BackendSpec:
+    name: str
+    notes: str = ""
+
+
+# FIXME: Only list the stratum's logical operators after compilation from skrub IR
+# these will be replaced by the general physical operators (once they are here), and
+# will be lowered to specific physical op implementations. Types leave this list as
+# their family migrates to the physical layer (sources already have: DataSourceOp is
+# lowered away and its physical types live in the "sources" family instead).
+CURRENT_LOGICAL_OPERATOR_TYPES: tuple[type[Op], ...] = (
+    AggregateOp,
+    ApplyUDFOp,
+    AssignMapOp,
+    AssignOp,
+    BaseEstimatorOp,
+    BinOp,
+    CallOp,
+    ChoiceOp,
+    ColumnProjectionOp,
+    ColumnSelectorOp,
+    ConcatOp,
+    DatetimeConversionOp,
+    DropOp,
+    PredictorOp,
+    GetAttrOp,
+    GetAttrProjectionOp,
+    GetItemOp,
+    GroupedDataframeOp,
+    ImplOp,
+    JoinOp,
+    MapOp,
+    MetadataOp,
+    MethodCallOp,
+    MissingMaskOp,
+    NumericOp,
+    ProjectionOp,
+    SearchEvalOp,
+    SelectionOp,
+    SplitOp,
+    SplitOutput,
+    StringMethodOp,
+    TransformerOp,
+    ValueOp,
+    VariableOp,
+)
+
+
+CURRENT_BACKENDS: tuple[BackendSpec, ...] = (
+    BackendSpec("pandas", "Pandas dataframe implementation."),
+    BackendSpec("polars", "Polars dataframe implementation."),
+    BackendSpec("numpy", "NumPy array implementation."),
+    BackendSpec("sklearn-skrub", "Existing sklearn/skrub implementation."),
+    BackendSpec("rust", "Native Rust implementation selected like any other backend."),
+)
+
+
+CURRENT_OPERATOR_FAMILIES: tuple[OperatorFamily, ...] = (
+    OperatorFamily(
+        name="logical",
+        op_types=CURRENT_LOGICAL_OPERATOR_TYPES,
+        default_backends=tuple(backend.name for backend in CURRENT_BACKENDS),
+        notes="Current logical IR surface; backends are attached later by the planner.",
+    ),
+)
+
+
 def _unsupported_supports(op: IRNode, ctx: Any) -> bool:
     return False
 
@@ -79,26 +195,43 @@ def _placeholder_exec_mem(op: IRNode, stats: Any) -> int:
     return 0
 
 
-"""Dictionary for physical implementations keyed by operator type.
-Extensibile to support new backends. """
+"""Container for physical implementations and their operator families."""
 class PhysicalRegistry:
     def __init__(
         self,
+        families: Iterable[OperatorFamily] = (),
         implementations: Iterable[PhysicalImpl] = (),
     ) -> None:
+        self._families: list[OperatorFamily] = list(families)
         self._implementations: dict[type[IRNode], list[PhysicalImpl]] = {}
         self._implementations_by_backend: dict[BackendName, list[PhysicalImpl]] = {}
         for impl in implementations:
             self.register(impl)
+
+    def register_family(self, family: OperatorFamily) -> None:
+        self._families.append(family)
 
     def register(self, impl: PhysicalImpl) -> PhysicalImpl:
         self._implementations.setdefault(impl.op_type, []).append(impl)
         self._implementations_by_backend.setdefault(impl.backend_name, []).append(impl)
         return impl
 
+    def families(self) -> tuple[OperatorFamily, ...]:
+        return tuple(self._families)
+
     def op_types(self) -> tuple[type[IRNode], ...]:
-        """Return operator types with at least one registered implementation."""
-        return tuple(self._implementations)
+        types: list[type[IRNode]] = []
+        seen: set[type[IRNode]] = set()
+        for family in self._families:
+            for op_type in family.op_types:
+                if op_type not in seen:
+                    seen.add(op_type)
+                    types.append(op_type)
+        for op_type in self._implementations:
+            if op_type not in seen:
+                seen.add(op_type)
+                types.append(op_type)
+        return tuple(types)
 
     def candidates_for(
         self,
@@ -111,6 +244,7 @@ class PhysicalRegistry:
             candidates = [impl for impl in candidates if impl.backend_name == backend_name]
         return tuple(candidates)
 
+    """Return the physical implementations available for a given operator."""
     def candidates_for_op(
         self,
         op: IRNode,
