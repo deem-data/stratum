@@ -86,9 +86,14 @@ class Scheduler:
         """Perform cross-validation on the logical DAG."""
         scoring_func, greater_is_better = get_scoring_func(scoring)
 
+        # The split op's inputs are [X, y] (see add_splitting_op). Both are still
+        # in the pool after compute_xy and are pinned by removal planning, so the
+        # labels can be handed to the splitter: stratified splitters need them,
+        # and every sklearn splitter accepts split(X, y=None, groups=None).
         x_data = self.pool.pin(split_op.inputs[0])
+        y_data = self.pool.pin(split_op.inputs[1])
         splits = []
-        for i, (train_index, test_index) in enumerate(cv.split(x_data)):
+        for i, (train_index, test_index) in enumerate(cv.split(x_data, y_data)):
             train_key = ("__cv_split", "train", i)
             test_key = ("__cv_split", "test", i)
             splits.append((i, train_key, test_key))
@@ -96,6 +101,7 @@ class Scheduler:
             self.pool.put(train_key, train_index)
             self.log_memory_usage()
         self.pool.unpin(split_op.inputs[0])
+        self.pool.unpin(split_op.inputs[1])
 
         for i, train_ids_handle, test_ids_handle in splits:
             self.cv_id = i

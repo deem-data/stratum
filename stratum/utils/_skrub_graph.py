@@ -92,6 +92,19 @@ def build_graph(data_op):
     return {"nodes": raw_nodes, "children": children, "parents": parents}
 
 
+def find_x_impl(data_op):
+    """Return the impl of the node marked with ``mark_as_X()``, or None.
+
+    Fast counterpart of ``skrub._data_ops._evaluation.find_X``, which goes
+    through the same slow generator-based traversal as ``get_data``.
+    """
+    for node in build_graph(data_op)["nodes"].values():
+        impl = node._skrub_impl
+        if impl.is_X:
+            return impl
+    return None
+
+
 def get_data(data_op):
     """Collect the values of the variables in a DataOp DAG.
 
