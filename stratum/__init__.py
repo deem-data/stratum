@@ -26,11 +26,14 @@ __skrub_version__ = _dist_version("skrub")
 # Expose our subclasses under the same names
 from .adapters.string_encoder import RustyStringEncoder as StringEncoder
 from .adapters.one_hot_encoder import RustyOneHotEncoder as OneHotEncoder
+from .adapters.normalizer import RustyNormalizer as Normalizer, normalize
 
 # __all__ passthrough. Keep __all__ minimal
 __all__ = [
     "StringEncoder",
     "OneHotEncoder",
+    "Normalizer",
+    "normalize",
     "config",
     "__version__",
     "__skrub_version__",
