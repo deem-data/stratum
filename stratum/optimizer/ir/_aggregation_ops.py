@@ -1,4 +1,89 @@
+from polars import List
+
+from stratum.optimizer._op_utils import replace_op_in_outputs
+from stratum.optimizer.ir._base import remap_operand_refs
 from stratum.optimizer.ir._ops import OperandRef, OutputType, MethodCallOp, Op
+from typing import TypedDict
+
+
+
+
+
+# Two caller types: "plain" (Series/DataFrame) and "grouped"
+# (SeriesGroupBy/DataFrameGroupBy).
+# a mechanisim to handle method signature mismatch depending on the caller type has been created.
+#
+# there are cases where Series vs Dataframe or SeriesGroupby vs DataFrameGroupBy method variants disagrre on signature.
+# the entry is the union. the DataFrame/DataFrameGroupby form is a superset in almost every case. this fact shall be exploited once
+# schema propagation is integrated, to ensure the correct dispatch of fields_list.
+#
+# current implementation does not handle UDF aggregate functions
+
+def _expand(spec: dict) -> dict:
+    """Flatten {(method, ...): params} into {method: params}."""
+    out = {}
+    for methods, params in spec.items():
+        for m in methods:
+            assert m not in out, f"duplicate signature entry for {m!r}"
+            out[m] = params
+    return out
+
+_GROUPBY_POSITIONAL = ("by", "level", "as_index", "sort",
+                       "group_keys", "observed", "dropna")
+
+ENGINE    = ("engine", "engine_kwargs")
+AXIS_SKIP = ("axis", "skipna")
+
+
+# --- plain Series / DataFrame ----------------------------------------------
+_PLAIN = {
+    ("sum", "prod"):                     AXIS_SKIP + ("numeric_only", "min_count"),
+    ("mean", "median", "min", "max",
+     "skew", "kurt", "idxmin", "idxmax"): AXIS_SKIP + ("numeric_only",),
+    ("std", "var", "sem"):               AXIS_SKIP + ("ddof", "numeric_only"),
+    ("all", "any"):                      ("axis", "bool_only", "skipna"),
+    ("quantile",):                       ("q", "axis", "numeric_only",
+                                          "interpolation", "method"),
+    ("nunique",):                        ("axis", "dropna"),
+    ("count",):                          ("axis", "numeric_only"),
+    # first / last / size have no plain method in 3.0.2; `.size` is a property
+    # and arrives as a GetAttrOp, never as a MethodCallOp.
+}
+
+
+# --- SeriesGroupBy / DataFrameGroupBy --------------------------------------
+_GROUPED = {
+    ("sum", "min", "max"):     ("numeric_only", "min_count", "skipna") + ENGINE,
+    ("prod", "first", "last"): ("numeric_only", "min_count", "skipna"),
+    ("mean",):                 ("numeric_only", "skipna") + ENGINE,
+    ("median",):               ("numeric_only", "skipna"),
+    ("std", "var"):            ("ddof",) + ENGINE + ("numeric_only", "skipna"),
+    ("sem",):                  ("ddof", "numeric_only", "skipna"),
+    ("skew", "kurt"):          ("skipna", "numeric_only"),
+    ("idxmin", "idxmax"):      ("skipna", "numeric_only"),
+    ("all", "any"):            ("skipna",),
+    ("quantile",):             ("q", "interpolation", "numeric_only"),
+    ("nunique",):              ("dropna",),
+    ("count", "size"):         (),
+}
+
+
+
+_AGG_SPEC_POSITIONAL = {
+    "plain":   ("func", "axis"),
+    "grouped": ("func",),
+}
+
+_AGG_GROUPED_KEYWORD_ONLY = ENGINE
+
+
+_AGG_FUNCS = {"agg", "aggregate"}
+
+
+_POSITIONAL = {
+    "plain":   _expand(_PLAIN),
+    "grouped": _expand(_GROUPED),
+}
 
 
 class AggregateOp(Op):
@@ -14,111 +99,82 @@ class AggregateOp(Op):
     selected at plan time.
     """
     logical_family = "Aggregation"
-    fields = ["grouping_attributes", "aggregations", "groupby_kwargs"]
+    fields = ["grouped", "grouping_kwargs", "agg_method", "aggregation_kwargs"]
 
-    def __init__(self, grouping_attributes: str | list[str] | OperandRef,
-                 aggregations: str | list[str] | dict | OperandRef,
-                 groupby_kwargs: dict | None = None,
-                 inputs: list[Op] | None = None, outputs: list[Op] | None = None):
-        # by/agg go in the name so the base helper renders them for both the
-        # logical family ("Aggregation(by=..., agg=...)") and the bound physical
-        # impl ("PandasAggregateOp(by=..., agg=...)").
-        super().__init__(name=f"by={grouping_attributes}, agg={aggregations}",
-                         inputs=inputs, outputs=outputs)
-        self.grouping_attributes = grouping_attributes
-        self.aggregations = aggregations
-        self.groupby_kwargs = groupby_kwargs or {}
-        self.output_type = OutputType.FRAME
+    def __init__(self, grouped: bool, grouping_kwargs: dict, agg_method: str, aggregation_kwargs, inputs: list[Op] | None = None, outputs: list[Op] | None = None):
+        super().__init__(name="Aggregation", inputs=inputs, outputs=outputs)
+        self.grouped = grouped
+        self.grouping_kwargs = grouping_kwargs
+        self.agg_method = agg_method
+        self.aggregation_kwargs = aggregation_kwargs
 
-
-class GroupedDataframeOp(Op):
-    def __init__(self, ops: list[Op]):
-        super().__init__(name="GROUPED_DATAFRAME", is_X=False, is_y=False)
-        self.ops = ops
-        self.output_type = OutputType.FRAME
-
-    def process(self, mode: str, inputs: list):  # pragma: no cover
-        # TODO: GroupedDataframeOp is experimental and not integrated yet.
-        # Needs proper refactoring to collect sub-op inputs from the pool.
-        raise NotImplementedError("GroupedDataframeOp is not integrated yet.")
-
-
-# Aggregation methods callable directly on a groupby (no .agg wrapper needed).
-_AGG_METHODS = {"sum", "mean", "count", "min", "max", "median", "std", "var",
-                "first", "last", "prod", "size", "nunique", "sem"}
-# Generic aggregation entrypoints that take the aggregation spec as an argument.
-_AGG_FUNCS = {"agg", "aggregate"}
 
 
 def _is_groupby_op(op: Op) -> bool:
     return isinstance(op, MethodCallOp) and op.method_name == "groupby"
 
 
-def _is_aggregation(op: MethodCallOp) -> bool:
-    """True for a `groupby(...).<agg>()` pair that can fuse into an AggregateOp.
 
-    Requires the aggregation to consume a `groupby` op directly (no GetItem or
-    other op in between) and that groupby to have a single consumer.
-    """
-    if not op.inputs or not _is_groupby_op(op.inputs[0]):
-        return False
-    if len(op.inputs[0].outputs) != 1:
-        return False
-    if _extract_grouping(op.inputs[0]) is None:
-        return False
-    if op.method_name in _AGG_METHODS:
-        return True
-    # `.agg(spec)` / `.aggregate(spec)`: only the positional-spec form is supported.
-    return op.method_name in _AGG_FUNCS and bool(op.args)
+def _make_grouped_agg_op(agg_method: str, op: MethodCallOp, agg_fields: tuple[str, ...], operand: MethodCallOp, groupby_kwargs: dict) -> AggregateOp | None:
+    if len(operand.outputs) != 1:
+        return None
 
+    agg_kwargs = dict(zip(agg_fields, op.args))
+    if op.kwargs:
+        agg_kwargs.update(op.kwargs)
 
-def _extract_grouping(groupby_op: MethodCallOp) -> str | list[str] | OperandRef:
-    if groupby_op.args:
-        return groupby_op.args[0]
-    if groupby_op.kwargs and "by" in groupby_op.kwargs:
-        return groupby_op.kwargs["by"]
-    return None
+    op_inp = op.inputs[1:]
 
+    offset = len(operand.inputs) - 1
+    mapping = {k: k + offset for k in range(1, len(op.inputs))}
+    agg_kwargs = remap_operand_refs(agg_kwargs, mapping)
 
-def _extract_aggregations(op: MethodCallOp) -> str | list[str] | OperandRef:
-    if op.method_name in _AGG_FUNCS:
-        return op.args[0]
-    # direct method such as .mean()/.sum()/.count() -> normalize to its name
-    return op.method_name
+    new_op = AggregateOp(grouped=True, grouping_kwargs=groupby_kwargs, agg_method=agg_method, aggregation_kwargs=agg_kwargs, inputs=operand.inputs + op_inp, outputs=op.outputs)
 
+    operand.replace_output_of_inputs(new_op)
 
-def make_aggregate_op(op: MethodCallOp) -> AggregateOp:
-    """Fuse `groupby(by).agg(...)` (or `.sum()/.mean()/...`) into an AggregateOp."""
-    groupby_op = op.inputs[0]
-    df = groupby_op.inputs[0]
+    for _op in op_inp:
+        _op.replace_output(op, new_op)
 
-    grouping_attributes = _extract_grouping(groupby_op)
-    aggregations = _extract_aggregations(op)
+    operand.outputs.remove(op)
 
-    # Inputs in resolution order: the frame, then any placeholder operands of the
-    # grouping key, then any placeholder operands of the aggregation spec.
-    inputs = [df] + list(groupby_op.inputs[1:]) + list(op.inputs[1:])
-
-    # OperandRefs in aggregations index into op.inputs. After prepending
-    # groupby_op.inputs[1:], those refs need to shift by that slice's length.
-    offset = len(groupby_op.inputs) - 1
-    if isinstance(aggregations, OperandRef):
-        aggregations = OperandRef(aggregations.k + offset)
-
-    # All groupby kwargs except 'by', which is captured in grouping_attributes.
-    groupby_kwargs = {k: v for k, v in (groupby_op.kwargs or {}).items() if k != "by"}
-
-    new_op = AggregateOp(
-        grouping_attributes=grouping_attributes,
-        aggregations=aggregations,
-        groupby_kwargs=groupby_kwargs,
-        inputs=inputs,
-        outputs=op.outputs,
-    )
-    # Bypass the now-orphaned groupby op: rewire the frame and grouping-key
-    # producers, plus any aggregation-arg producers, to feed the new op.
-    groupby_op.replace_output_of_inputs(new_op)
-    for extra in op.inputs[1:]:
-        extra.replace_output(op, new_op)
-    groupby_op.outputs.remove(op)
     return new_op
+
+
+def _make_plain_agg_op(agg_method: str, op: MethodCallOp, agg_fields: tuple[str, ...]) -> AggregateOp:
+    agg_kwargs = dict(zip(agg_fields, op.args))
+    if op.kwargs:
+        agg_kwargs.update(op.kwargs)
+
+    new_op = AggregateOp(grouped=False, grouping_kwargs={},  agg_method=agg_method, aggregation_kwargs=agg_kwargs, inputs=op.inputs, outputs=op.outputs)
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
+    agg_method = "agg" if op.method_name in _AGG_FUNCS else op.method_name
+
+    operand = op.inputs[0]
+    grouped_operand = _is_groupby_op(operand)
+
+    if grouped_operand:
+        groupby_params = dict(zip(_GROUPBY_POSITIONAL, operand.args))
+        if operand.kwargs:
+            groupby_params.update(operand.kwargs)
+
+        if agg_method == "agg":
+            agg_fields = _AGG_SPEC_POSITIONAL["grouped"]
+        else:
+            if agg_method not in _POSITIONAL["grouped"]:
+                return None
+            agg_fields = _POSITIONAL["grouped"][agg_method]
+
+        return _make_grouped_agg_op(agg_method, op, agg_fields, operand, groupby_params)
+
+    if agg_method == "agg":
+        agg_fields = _AGG_SPEC_POSITIONAL["plain"]
+    else:
+        if agg_method not in _POSITIONAL["plain"]:
+            return None
+        agg_fields = _POSITIONAL["plain"][agg_method]
+
+    return _make_plain_agg_op(agg_method, op, agg_fields)
