@@ -19,6 +19,8 @@ by decomposing scikit-learn's scorer into the same four fields, so a metric Stra
 not implemented still works and still means exactly what it means upstream. Moving a
 metric from the second group to the first is a local change with a test that pins the
 two against each other.
+
+See ``docs/adr/0005-scoring-reads-values-not-an-estimator.md``.
 """
 from __future__ import annotations
 

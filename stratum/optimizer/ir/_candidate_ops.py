@@ -14,6 +14,9 @@ lifetime is declared.
 
 Scoring itself is a call against those values and the fold's labels; see
 ``_scoring.py`` for why no estimator is involved.
+
+See ``docs/adr/0003-scoring-is-a-plan-operator.md`` and
+``docs/adr/0005-scoring-reads-values-not-an-estimator.md``.
 """
 from __future__ import annotations
 
