@@ -1,6 +1,6 @@
 """Physical transformer operators.
 
-Lowering turns a logical :class:`~stratum.optimizer.ir._ops.TransformerOp`
+Lowering turns a logical :class:`~stratum.optimizer.logical._ops.TransformerOp`
 wrapping a supported estimator into an *abstract* physical transformer op -- one
 per estimator kind.
 Implementation selection then swaps the abstract op to a concrete backend impl:
@@ -32,7 +32,7 @@ from stratum.adapters.string_encoder import (
 from stratum.adapters.table_vectorizer import (
     StratumFusedTableVectorizer as _StratumFusedTableVectorizer,
 )
-from stratum.optimizer.ir._ops import TransformerOp
+from stratum.optimizer.logical._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp
 from stratum.optimizer.physical._registry import (physical_impl, rust_impl,

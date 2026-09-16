@@ -13,7 +13,7 @@ import logging
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.ir._map_ops import AssignMapOp
+from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 

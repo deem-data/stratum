@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from stratum.optimizer.ir._base import IRNode, OutputType
-from stratum.optimizer.ir._ops import Op
+from stratum.optimizer.logical._base import IRNode, OutputType
+from stratum.optimizer.logical._ops import Op
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.utils._utils import start_time, log_time

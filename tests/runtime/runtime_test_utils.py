@@ -1,0 +1,111 @@
+import unittest
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from skrub._data_ops._data_ops import DataOp
+from stratum._api import evaluate
+import stratum as st
+from sklearn.dummy import DummyRegressor
+from stratum.optimizer.logical._ops import Op
+
+
+def datetime_pipeline1(x: DataOp, y: DataOp) -> DataOp:
+    x1 = x.assign(datetime=x["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
+    x2 = x1.assign(
+        year=x1["datetime"].dt.year,
+        month=x1["datetime"].dt.month)
+    x3 = x2.drop(["datetime"], axis=1)
+    pred = x3.skb.apply(RandomForestRegressor(random_state=42), y=y)
+    return pred
+
+
+def datetime_pipeline2(x: DataOp, y: DataOp) -> DataOp:
+    x2 = x.assign(datetime=x["datetime"].apply(pd.to_datetime, format='%Y-%m-%d %H:%M:%S'))
+    x3 = x2.assign(
+        year=x2["datetime"].dt.year,
+        month=x2["datetime"].dt.month,
+        dayofweek=x2["datetime"].dt.dayofweek,
+        hour=x2["datetime"].dt.hour)
+    x4 = x3.drop(["datetime"], axis=1)
+    pred = x4.skb.apply(RandomForestRegressor(random_state=123), y=y)
+    return pred
+
+def simple_pipeline() -> DataOp:
+    data = {"x": np.linspace(0, 10, 100), "y": np.linspace(0, 10, 100) % 10}
+    data = pd.DataFrame(data)
+    data = st.as_data_op(data)
+    x = data[["x"]].skb.mark_as_X()
+    y = data["y"].skb.mark_as_y()
+    x = x + 33
+    x = x.assign(z=x["x"] + 1)
+    model = DummyRegressor()
+    pred = x.skb.apply(model, y=y)
+    return pred
+
+class RuntimeTest(unittest.TestCase):
+
+    def setUp(self):
+        self.df = pd.DataFrame({
+            "x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "y": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            "datetime": [
+                "2025-11-01 10:00:00",
+                "2025-11-02 15:30:00",
+                "2025-11-03 09:45:00",
+                "2025-11-04 12:00:00",
+                "2025-11-05 14:30:00",
+                "2025-11-06 16:45:00",
+                "2025-11-07 18:00:00",
+                "2025-11-08 20:30:00",
+                "2025-11-09 22:45:00",
+                "2025-11-10 01:00:00",
+            ]
+        })
+        self.seed = 42
+        self.test_size = 0.5
+
+    def compare_evaluate(self, pred_opt: DataOp):
+        preds = evaluate(pred_opt, seed=self.seed, test_size=self.test_size)
+
+        splits = pred_opt.skb.train_test_split(random_state=self.seed, test_size=self.test_size)
+        learner = pred_opt.skb.make_learner()
+        learner.fit(splits["train"])
+        preds_skrub = learner.predict(splits["test"])
+        np.testing.assert_array_equal(preds_skrub, preds)
+
+
+def _make_op(name="op"):
+    """Create a minimal Op (no intermediate attribute — data lives in the pool)."""
+    return Op(name=name)
+
+
+def _arr(n: int) -> np.ndarray:
+    """float64 array of length n — 8 bytes per element for predictable in-memory size."""
+    return np.arange(n, dtype=np.float64)
+
+
+def _make_linear_dag():
+    """A -> B -> C (linear chain)."""
+    a = _make_op("A")
+    b = _make_op("B")
+    c = _make_op("C")
+    a.outputs = [b]
+    b.inputs = [a]
+    b.outputs = [c]
+    c.inputs = [b]
+    return [a, b, c]
+
+
+def _make_diamond_dag():
+    """A -> B, A -> C, B -> D, C -> D (diamond)."""
+    a = _make_op("A")
+    b = _make_op("B")
+    c = _make_op("C")
+    d = _make_op("D")
+    a.outputs = [b, c]
+    b.inputs = [a]
+    b.outputs = [d]
+    c.inputs = [a]
+    c.outputs = [d]
+    d.inputs = [b, c]
+    return [a, b, c, d]

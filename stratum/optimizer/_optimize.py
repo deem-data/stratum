@@ -4,15 +4,15 @@ from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque, defaultdict
 from dataclasses import dataclass
 from typing import Any
-from ._op_cse import apply_op_cse
-from .ir._dataframe_ops import extract_dataframe_op, add_splitting_op
-from .ir._numeric_ops import extract_numeric_op
-from .ir._candidate_ops import CollectCandidatesOp, ScoreCandidatesOp
-from .ir._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op
-from .ir._split_ops import SplitOutput
+from .logical._op_cse import apply_op_cse
+from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
+from .logical._numeric_ops import extract_numeric_op
+from .logical._candidate_ops import CollectCandidatesOp, ScoreCandidatesOp
+from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op
+from .logical._split_ops import SplitOutput
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
-from ._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
+from .logical._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
 from ._linearization import linearize_dag
 from ._fit_pass_planning import mark_fit_dead_ops
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
@@ -22,7 +22,7 @@ from .physical._impl_selection import (ImplementationSelector, get_implementatio
 # Importing the physical exec modules and their lowering rules.
 from .physical import _source_execs  # noqa: F401
 from .physical import _transform_execs  # noqa: F401
-from stratum.utils._skrub_graph import build_graph
+from stratum.frontend._skrub_graph import build_graph
 import logging
 from stratum._config import FLAGS
 from stratum.utils._utils import start_time, log_time

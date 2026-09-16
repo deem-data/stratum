@@ -11,8 +11,8 @@ from __future__ import annotations
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.ir._base import OperandRef
-from stratum.optimizer.ir._dataframe_ops import ConcatOp
+from stratum.optimizer.logical._base import OperandRef
+from stratum.optimizer.logical._dataframe_ops import ConcatOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 

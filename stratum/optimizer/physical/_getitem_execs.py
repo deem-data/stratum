@@ -7,8 +7,8 @@ impl branches on it as data, not on a backend flag.
 """
 from __future__ import annotations
 
-from stratum.optimizer.ir._base import OperandRef
-from stratum.optimizer.ir._ops import GetItemOp
+from stratum.optimizer.logical._base import OperandRef
+from stratum.optimizer.logical._ops import GetItemOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 

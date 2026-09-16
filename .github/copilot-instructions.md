@@ -11,8 +11,8 @@ regressions as bugs, not style issues.
 
 Layout:
 
-- `stratum/` — Python source (optimizer, runtime, adapters, patching, utils)
-- `stratum/tests/` — pytest suite, mirrors the source layout
+- `stratum/` — Python source (frontend, optimizer, runtime, adapters, patching, utils)
+- `tests/` — pytest suite, mirrors the source layout
 - `_rust/` — Rust backend, exposed to Python via maturin/pyo3
 
 ## Review priorities (in order)

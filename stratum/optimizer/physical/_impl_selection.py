@@ -24,7 +24,7 @@ pass through and keep executing their own ``process``.
 """
 from __future__ import annotations
 
-from stratum.optimizer.ir._base import IRNode
+from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry,

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from skrub._data_ops._data_ops import EvalMode
-from stratum.optimizer.ir._dataframe_ops import SplitOp
+from stratum.optimizer.logical._dataframe_ops import SplitOp
 from stratum.optimizer._op_utils import compute_graph_node_indegree
-from stratum.optimizer.ir._ops import ImplOp, Op
+from stratum.optimizer.logical._ops import ImplOp, Op
 from stratum.utils._utils import start_time, log_time
 
 import logging

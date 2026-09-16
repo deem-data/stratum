@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from stratum.optimizer.ir._base import IRNode
+from stratum.optimizer.logical._base import IRNode
 BackendName = str
 
 
@@ -221,7 +221,7 @@ def _register_current_estimator_impls(registry: PhysicalRegistry) -> None:
     # These are transitional registrations for estimator families that do not
     # have abstract physical operators yet. Once those lowerings land, their
     # implementations should be keyed by the corresponding physical type.
-    from stratum.optimizer.ir._ops import PredictorOp, TransformerOp
+    from stratum.optimizer.logical._ops import PredictorOp, TransformerOp
 
     for op_type in (TransformerOp, PredictorOp):
         registry.register(

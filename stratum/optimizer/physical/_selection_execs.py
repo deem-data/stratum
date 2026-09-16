@@ -13,9 +13,9 @@ is query-expressible -- so neither ``process`` carries selection control flow.
 """
 from __future__ import annotations
 
-from stratum.optimizer.ir._base import _resolve_args, _resolve_kwargs
-from stratum.optimizer.ir._column_expr import EvalContext
-from stratum.optimizer.ir._selection_ops import (
+from stratum.optimizer.logical._base import _resolve_args, _resolve_kwargs
+from stratum.optimizer.logical._column_expr import EvalContext
+from stratum.optimizer.logical._selection_ops import (
     SelectionKind, SelectionOp, _SELECTION_PANDAS_METHOD, _SELECTION_POLARS_METHOD)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl

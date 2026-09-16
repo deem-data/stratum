@@ -1,7 +1,7 @@
 """Physical operator layer.
 
 A :class:`PhysicalOp` is a node in the IR *after* lowering. Where a logical
-:class:`~stratum.optimizer.ir._ops.Op` says *what* to compute in a
+:class:`~stratum.optimizer.logical._ops.Op` says *what* to compute in a
 backend-agnostic way, a physical op says *how*: a concrete physical op
 (``PandasReadCSV``, ``PolarsReadCSV``, ...) runs on exactly one backend and its
 ``process`` contains **no backend-selection control flow** -- the choice was
@@ -31,14 +31,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from stratum.optimizer.ir._base import IRNode
+from stratum.optimizer.logical._base import IRNode
 
 
 class PhysicalOp(IRNode):
     """Base for every node in the lowered (physical) IR.
 
     Shares the DAG structure and ``process`` hook with the logical layer via
-    :class:`~stratum.optimizer.ir._base.IRNode`, and adds the selection protocol
+    :class:`~stratum.optimizer.logical._base.IRNode`, and adds the selection protocol
     (:meth:`supports`/:meth:`cost`/:meth:`exec_mem` for the selector,
     :meth:`on_impl_selected` for plan-time binding).
     """

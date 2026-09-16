@@ -7,7 +7,7 @@ one of these per the plan context.
 """
 from __future__ import annotations
 
-from stratum.optimizer.ir._join_ops import JoinOp
+from stratum.optimizer.logical._join_ops import JoinOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 

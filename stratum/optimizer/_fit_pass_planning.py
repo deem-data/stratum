@@ -18,7 +18,7 @@ and the mark has to be per operator.
 """
 from __future__ import annotations
 
-from stratum.optimizer.ir._ops import BaseEstimatorOp, Op
+from stratum.optimizer.logical._ops import BaseEstimatorOp, Op
 from stratum.utils._utils import start_time, log_time
 
 import logging

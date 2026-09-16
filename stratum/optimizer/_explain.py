@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from stratum.optimizer.ir._ops import Op
+from stratum.optimizer.logical._ops import Op
 
 
 def explain_linear_plan(

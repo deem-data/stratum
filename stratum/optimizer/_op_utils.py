@@ -2,7 +2,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Iterator
 from graphviz import Digraph
-from stratum.optimizer.ir._ops import OperandRef, Op, ChoiceOp
+from stratum.optimizer.logical._ops import OperandRef, Op, ChoiceOp
 from stratum._config import get_config
 import os
 from dataclasses import dataclass

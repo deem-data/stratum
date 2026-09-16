@@ -9,9 +9,9 @@ from sklearn.model_selection import check_cv
 
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import SearchConfig, optimize
-from stratum.optimizer.ir._scoring import resolve_scoring
+from stratum.optimizer.logical._scoring import resolve_scoring
 from stratum.runtime._scheduler import SequentialScheduler
-from stratum.utils._skrub_graph import find_x_impl, get_data
+from stratum.frontend._skrub_graph import find_x_impl, get_data
 from time import perf_counter
 
 #TODO: Rename this file

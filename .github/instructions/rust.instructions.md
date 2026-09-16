@@ -20,4 +20,4 @@ applyTo: "_rust/**"
   `collect()` into intermediates, or hashing with default hashers in hot kernels
   where a faster alternative is already used elsewhere in the crate.
 - **Tests on both sides.** Kernel changes need Rust unit tests and a Python-side
-  test in `stratum/tests/` exercising the kernel through the public API.
+  test in `tests/` exercising the kernel through the public API.

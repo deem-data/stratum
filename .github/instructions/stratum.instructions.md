@@ -6,10 +6,10 @@ applyTo: "stratum/**"
 
 ## Testing rules
 
-Every behavioral change under `stratum/` (excluding `stratum/tests/`) must come with
-meaningful tests under `stratum/tests/`, in the directory mirroring the source location
-(e.g., `stratum/optimizer/` → `stratum/tests/logical_optimizer/`,
-`stratum/runtime/` → `stratum/tests/runtime/`). Codecov enforces line coverage, so do
+Every behavioral change under `stratum/` (excluding tests) must come with meaningful
+tests in the directory mirroring the source location (e.g., `stratum/optimizer/` →
+`tests/optimizer/logical/`, `stratum/runtime/` → `tests/runtime/`). Codecov
+enforces line coverage, so do
 not comment on raw coverage numbers — instead review test *quality*:
 
 - **Flag changes with no test changes.** If a PR modifies source behavior but touches

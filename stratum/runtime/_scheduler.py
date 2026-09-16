@@ -1,9 +1,9 @@
 from __future__ import annotations
 from time import perf_counter
 from sklearn.model_selection import train_test_split, check_cv
-from stratum.optimizer.ir._candidate_ops import ScoreCandidatesOp
-from stratum.optimizer.ir._dataframe_ops import SplitOp
-from stratum.optimizer.ir._ops import FITTING_MODE, Op
+from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
+from stratum.optimizer.logical._dataframe_ops import SplitOp
+from stratum.optimizer.logical._ops import FITTING_MODE, Op
 from stratum.runtime._buffer_pool import BufferPool
 import polars as pl
 

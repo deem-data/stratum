@@ -18,7 +18,7 @@ How it works:
 """
 from __future__ import annotations
 
-from stratum.optimizer.ir._ops import Op
+from stratum.optimizer.logical._ops import Op
 from stratum.utils._utils import start_time, log_time
 
 import logging

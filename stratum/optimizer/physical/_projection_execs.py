@@ -17,8 +17,8 @@ import pandas as pd
 import polars as pl
 from numpy import sin, cos
 
-from stratum.optimizer.ir._base import OperandRef, _resolve_args, _resolve_kwargs
-from stratum.optimizer.ir._projection_ops import (
+from stratum.optimizer.logical._base import OperandRef, _resolve_args, _resolve_kwargs
+from stratum.optimizer.logical._projection_ops import (
     ApplyUDFOp, AssignOp, ColumnProjectionOp, ColumnSelectorOp,
     DatetimeConversionOp, DropOp, GetAttrProjectionOp, MetadataOp, ProjectionOp,
     StringMethodOp, STR_POLARS_METHODS, polars_datetime_kwargs,

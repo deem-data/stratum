@@ -1,0 +1,1 @@
+"""Skrub frontend integration."""

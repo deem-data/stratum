@@ -106,7 +106,7 @@ Install all extras and run the full test suite:
 
 ```bash
 uv sync --all-extras
-pytest -v stratum/tests
+pytest -v tests
 ```
 
 Or, more concisely:
@@ -145,6 +145,4 @@ python -m pip install ./dist/stratum_ai-*.whl
 
 ## License
 Apache License 2.0. See [LICENSE](LICENSE) for details.
-
-
 

@@ -1,6 +1,6 @@
 """Physical source operators: the concrete read / in-memory-frame impls.
 
-Lowering turns a logical :class:`~stratum.optimizer.ir._source_ops.DataSourceOp`
+Lowering turns a logical :class:`~stratum.optimizer.logical._source_ops.DataSourceOp`
 into an *abstract* source op (``ReadCSV``, ``ReadParquet``, ``InMemoryFrame``, or
 the already-concrete ``NumpyLoad``). Implementation selection then swaps each
 abstract op to one of the backend-specific concrete classes registered below via
@@ -14,9 +14,9 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.ir._base import (OperandRef, OutputType, _resolve_args,
+from stratum.optimizer.logical._base import (OperandRef, OutputType, _resolve_args,
                                         _resolve_kwargs)
-from stratum.optimizer.ir._source_ops import DataSourceOp
+from stratum.optimizer.logical._source_ops import DataSourceOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._registry import physical_impl
