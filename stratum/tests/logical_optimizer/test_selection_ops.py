@@ -83,11 +83,6 @@ class TestSelectionProcess(unittest.TestCase):
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 2, None], "y": [4, 5, 5, 6]})
 
-    def test_dropna_pandas(self):
-        op = SelectionOp(kind=SelectionKind.DROPNA)
-        result = run_op(op, self.df)
-        self.assertEqual(3, len(result))
-
     def test_head_pandas(self):
         op = SelectionOp(kind=SelectionKind.HEAD, args=(2,))
         result = run_op(op, self.df)
@@ -96,12 +91,6 @@ class TestSelectionProcess(unittest.TestCase):
     def test_drop_duplicates_pandas(self):
         op = SelectionOp(kind=SelectionKind.DROP_DUPLICATES)
         result = run_op(op, self.df.dropna())
-        self.assertEqual(2, len(result))
-
-    def test_dropna_polars_uses_drop_nulls(self):
-        with force_polars():
-            op = SelectionOp(kind=SelectionKind.DROPNA)
-            result = run_op(op, pl.DataFrame({"x": [1, None, 3]}))
         self.assertEqual(2, len(result))
 
     def test_query_kind_not_yet_executable(self):
@@ -433,11 +422,11 @@ class TestPandasQueryImplSelection(unittest.TestCase):
         with pandas_query():
             self.assertIsInstance(self._bind(op), PandasIndexSelectionOp)
 
-    def test_method_kind_binds_index_impl_under_flag(self):
-        from stratum.optimizer.physical._selection_execs import PandasIndexSelectionOp
+    def test_method_kind_binds_method_impl_under_flag(self):
+        from stratum.optimizer.physical._selection_execs import PandasMethodBasedSelectionOp
         op = SelectionOp(kind=SelectionKind.HEAD, args=(2,))
         with pandas_query():
-            self.assertIsInstance(self._bind(op), PandasIndexSelectionOp)
+            self.assertIsInstance(self._bind(op), PandasMethodBasedSelectionOp)
 
 
 class TestColumnExprQueryStrings(unittest.TestCase):

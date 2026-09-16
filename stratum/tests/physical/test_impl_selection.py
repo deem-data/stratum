@@ -37,8 +37,8 @@ from stratum.optimizer.physical._source_execs import (InMemoryFrame,
                                                        PandasInMemoryFrame,
                                                        PolarsInMemoryFrame)
 from stratum.optimizer.physical._selection_execs import (
-    PandasIndexSelectionOp,
-    PolarsSelectionOp,
+    PandasMethodBasedSelectionOp,
+    PolarsSliceSelectionOp,
 )
 from stratum.optimizer.physical._transform_execs import StringEncoderOp
 from stratum.optimizer.ir._ops import Op, ValueOp
@@ -241,7 +241,7 @@ class TestRelationalImplementationSelection(unittest.TestCase):
         )
 
     def test_default_binds_pandas_join_and_selection(self):
-        expected_impls = (PandasJoinOp, PandasIndexSelectionOp)
+        expected_impls = (PandasJoinOp, PandasMethodBasedSelectionOp)
 
         for op, expected_impl in zip(self._relational_ops(), expected_impls):
             with self.subTest(op=type(op).__name__):
@@ -253,7 +253,7 @@ class TestRelationalImplementationSelection(unittest.TestCase):
                 self.assertIsInstance(op, expected_impl)
 
     def test_greedy_binds_polars_join_and_selection(self):
-        expected_impls = (PolarsJoinOp, PolarsSelectionOp)
+        expected_impls = (PolarsJoinOp, PolarsSliceSelectionOp)
 
         for op, expected_impl in zip(self._relational_ops(), expected_impls):
             with self.subTest(op=type(op).__name__):
