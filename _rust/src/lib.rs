@@ -1,5 +1,5 @@
 use ndarray::{Array2, Axis};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyList, PyModule};
 use pyo3::{PyErr, exceptions::PyValueError};
@@ -17,6 +17,7 @@ mod truncated_svd;  //TruncatedSVD using randomized SVD
 mod util;
 mod threads;
 mod one_hot_encoder;
+mod normalize;
 use std::sync::Arc;
 
 // TODO (refactor): Move functions to corresponding modules
@@ -628,6 +629,53 @@ fn tfidf_transform_csr(
     Ok((Py::from(py_data), Py::from(py_indices), Py::from(py_indptr), n_rows, n_cols))
 }
 
+// ---- Dense normalization ----
+
+#[pyfunction]
+fn normalize_l2_dense(py: Python<'_>, data: PyReadonlyArray2<f32>) -> PyResult<Py<PyArray2<f32>>> {
+    let arr = data.as_array();
+    let out = py.detach(|| normalize::normalize_l2(arr));
+    Ok(Py::from(out.into_pyarray(py).to_owned()))
+}
+
+#[pyfunction]
+fn normalize_l1_dense(py: Python<'_>, data: PyReadonlyArray2<f32>) -> PyResult<Py<PyArray2<f32>>> {
+    let arr = data.as_array();
+    let out = py.detach(|| normalize::normalize_l1(arr));
+    Ok(Py::from(out.into_pyarray(py).to_owned()))
+}
+
+#[pyfunction]
+fn normalize_max_dense(py: Python<'_>, data: PyReadonlyArray2<f32>) -> PyResult<Py<PyArray2<f32>>> {
+    let arr = data.as_array();
+    let out = py.detach(|| normalize::normalize_max(arr));
+    Ok(Py::from(out.into_pyarray(py).to_owned()))
+}
+
+// In-place variants: take exclusive mutable access to the caller's numpy
+// buffer directly (no copy in, no copy out) and mutate it row-wise via the
+// same Rayon kernels used by the `*_dense` (copying) variants above.
+#[pyfunction]
+fn normalize_l2_inplace(py: Python<'_>, mut data: PyReadwriteArray2<f32>) -> PyResult<()> {
+    let mut view = data.as_array_mut();
+    py.detach(|| normalize::normalize_l2_inplace(&mut view));
+    Ok(())
+}
+
+#[pyfunction]
+fn normalize_l1_inplace(py: Python<'_>, mut data: PyReadwriteArray2<f32>) -> PyResult<()> {
+    let mut view = data.as_array_mut();
+    py.detach(|| normalize::normalize_l1_inplace(&mut view));
+    Ok(())
+}
+
+#[pyfunction]
+fn normalize_max_inplace(py: Python<'_>, mut data: PyReadwriteArray2<f32>) -> PyResult<()> {
+    let mut view = data.as_array_mut();
+    py.detach(|| normalize::normalize_max_inplace(&mut view));
+    Ok(())
+}
+
 // ---- Expose module ----
 #[pymodule]
 fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
@@ -644,5 +692,11 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_hot_encoder::csr_to_dense, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_fit_csr, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf_transform_csr, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_l2_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_l1_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_max_dense, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_l2_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_l1_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_max_inplace, m)?)?;
     Ok(())
 }
