@@ -13,12 +13,15 @@ Evaluation goes through an :class:`EvalContext` carrying the source frame, the
 op's resolved inputs and the execution mode.
 """
 from __future__ import annotations
+import datetime
+import decimal
 import operator
 
+import numpy as np
 import polars as pl
 import pandas as pd
 
-from stratum.optimizer.ir._ops import OperandRef, BinOp, UnaryOp, GetItemOp, Op
+from stratum.optimizer.ir._ops import OperandRef, BinOp, UnaryOp, GetItemOp, Op, ValueOp
 from stratum.optimizer.ir._projection_ops import (
     ColumnProjectionOp, DatetimeConversionOp, GetAttrProjectionOp, StringMethodOp,
     STR_POLARS_METHODS, polars_datetime_kwargs)
@@ -34,6 +37,17 @@ BINARY_SYMBOLS = {
     operator.pow: "**",
 }
 UNARY_SYMBOLS = {operator.invert: "~", operator.neg: "-", operator.pos: "+"}
+
+# Values a ``ValueOp`` may carry into a ``Const``. Const compiles to ``pl.lit()``,
+# which is only correct for a scalar: a list becomes one list-valued cell repeated
+# per row and a pandas Series is rejected outright. Container values therefore stay
+# ``OperandLeaf``s, so the impls' own conversions still see them (see
+# PolarsAssignMapOp.process). pandas Timestamp/Timedelta subclass the datetime types.
+CONST_SCALAR_TYPES = (
+    bool, int, float, str,
+    datetime.date, datetime.time, datetime.timedelta,
+    decimal.Decimal, np.generic,
+)
 
 
 class EvalContext:
@@ -397,6 +411,9 @@ class _Folder:
 
     def _is_foldable(self, node: Op) -> bool:
         """Return whether ``node`` can be represented as a ``ColumnExpr``."""
+        if isinstance(node, ValueOp):
+            # A graph-fed constant (a Var resolved from env, or as_data_op(5)).
+            return isinstance(node.value, CONST_SCALAR_TYPES)
         if isinstance(node, BinOp):
             return node.op in BINARY_SYMBOLS
         if isinstance(node, UnaryOp):
@@ -517,6 +534,8 @@ class _Folder:
 
     def _make_expr(self, node: Op, absorbable: set[int],
                    memo: dict[int, ColumnExpr]) -> ColumnExpr:
+        if isinstance(node, ValueOp):
+            return Const(node.value)
         if isinstance(node, BinOp):
             return BinOpExpr(node.op,
                              self._operand(node.left, node, absorbable, memo),
