@@ -19,6 +19,7 @@ import stratum as st
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.ir._column_expr import BinOpExpr, Col, Const
 from stratum.optimizer.ir._map_ops import AssignMapOp
+from stratum.optimizer.ir._ops import ValueOp
 from stratum.optimizer.ir._selection_ops import SelectionKind, SelectionOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.tests.logical_optimizer.test_dataframe_ops import force_polars
@@ -180,6 +181,41 @@ def test_q1_plan_folds_filter_and_map(polars):
     for op in (sel, amo):
         assert isinstance(op, PhysicalOp), \
             f"{type(op).__name__} was not bound to a physical implementation"
+
+
+def test_q1_filter_inlines_the_date_constant(polars):
+    """``var1`` reaches the fold as a ``ValueOp`` input, not an inline literal.
+
+    A ``date`` is a scalar, so the predicate absorbs it as a ``Const`` and the frame
+    is the selection's only input.
+    """
+    ops = _plan(build_q1(make_lineitem()))
+    sel = _one(ops, SelectionOp)
+
+    assert BinOpExpr(operator.le,
+                     Col("l_shipdate"), Const(SHIPDATE_CUTOFF)) == sel.predicate
+    assert len(sel.inputs) == 1, "the date threshold should not be a graph input"
+    assert [] == [o for o in ops if isinstance(o, ValueOp)]
+
+
+def test_q1_filter_binds_query_impl_under_flag():
+    """``pandas_query`` picks the impl at plan time, and both compute Q1.
+
+    The fast path is reachable only because the date is inlined: an ``OperandLeaf``
+    makes ``to_pandas_query`` return ``None``. Pandas-only, so no fixture.
+    """
+    from stratum.optimizer.physical._selection_execs import (
+        PandasIndexSelectionOp, PandasQuerySelectionOp)
+
+    df = make_lineitem()
+    expected = q1_reference(df).reset_index(drop=True)
+
+    for flag, impl in [(False, PandasIndexSelectionOp), (True, PandasQuerySelectionOp)]:
+        with st.config(pandas_query=flag):
+            assert isinstance(_one(_plan(build_q1(df)), SelectionOp), impl)
+            result = st._api.evaluate(build_q1(df))
+        pd.testing.assert_frame_equal(
+            expected, pd.DataFrame(result).reset_index(drop=True), check_dtype=False)
 
 
 if __name__ == "__main__":
