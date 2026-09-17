@@ -1,10 +1,7 @@
-"""Physical implementations of ``AssignMapOp`` (folded column-map).
+"""Physical implementations of folded column-map operators.
 
-Same-shape backend-variant family: the concrete impls subclass ``AssignMapOp``
-(+ :class:`PhysicalOp`) and carry the backend-specific kernel. On polars every
-folded entry runs in one ``with_columns`` call; on pandas they go through
-``assign``. The backend-agnostic ``ColumnExpr`` folding and ``make_context``
-stay on the logical side.
+The concrete implementations subclass their logical map operator together with
+:class:`PhysicalOp` and carry only the backend-specific kernel.
 """
 from __future__ import annotations
 
@@ -13,7 +10,7 @@ import logging
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.ir._map_ops import AssignMapOp
+from stratum.optimizer.ir._map_ops import AssignMapOp, MissingMaskOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 
@@ -47,3 +44,22 @@ class PolarsAssignMapOp(AssignMapOp, PhysicalOp):
         # The keyword API accepts expressions, series, arrays and scalars,
         # broadcasting the latter just like pandas.DataFrame.assign.
         return ctx.frame.with_columns(**columns)
+
+
+# Polars treats native NaN values separately from null values.
+@physical_impl(of=MissingMaskOp, backend="pandas")
+class PandasMissingMaskOp(MissingMaskOp, PhysicalOp):
+    def process(self, mode: str, inputs: list):
+        obj = inputs[0]
+        return pd.isnull(obj) if self.positive else pd.notnull(obj)
+
+
+@physical_impl(of=MissingMaskOp, backend="polars")
+class PolarsMissingMaskOp(MissingMaskOp, PhysicalOp):
+    def process(self, mode: str, inputs: list):
+        obj = inputs[0]
+        if isinstance(obj, pl.DataFrame):
+            predicate = (pl.all().is_null() if self.positive
+                         else pl.all().is_not_null())
+            return obj.select(predicate)
+        return obj.is_null() if self.positive else obj.is_not_null()
