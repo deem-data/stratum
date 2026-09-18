@@ -1,13 +1,11 @@
 import operator
 import unittest
-from contextlib import contextmanager
 
 import pytest
 import pandas as pd
 import polars as pl
 
 import stratum as st
-from stratum._config import FLAGS
 from stratum.optimizer.logical._ops import remap_operand_refs
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._dataframe_ops import (
@@ -16,18 +14,7 @@ from stratum.optimizer.logical._ops import BinOp, GetItemOp, UnaryOp, Op, Operan
 from stratum.optimizer.logical._column_expr import Col, Const, BinOpExpr, UnaryOpExpr, OperandLeaf, StrExpr
 from stratum.optimizer.physical._source_execs import rechunk_pl_frame
 from .test_dataframe_ops import (
-    optimize, run_op, force_polars)
-
-
-@contextmanager
-def pandas_query(enabled=True):
-    """Temporarily set `FLAGS.pandas_query`."""
-    orig = FLAGS.pandas_query
-    FLAGS.pandas_query = enabled
-    try:
-        yield
-    finally:
-        FLAGS.pandas_query = orig
+    optimize, run_op, force_polars, pandas_query, plan_context)
 
 
 class TestSelectionExtraction(unittest.TestCase):
@@ -363,7 +350,7 @@ class TestUnaryPredicateProcess(unittest.TestCase):
 
 
 class TestPandasQuery(unittest.TestCase):
-    """With FLAGS.pandas_query, an expressible MASK runs through DataFrame.query()."""
+    """With `pandas_query` on, an expressible MASK runs through DataFrame.query()."""
 
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
@@ -408,9 +395,8 @@ class TestPandasQueryImplSelection(unittest.TestCase):
 
     def _bind(self, op):
         from stratum.optimizer.physical._impl_selection import bind_op
-        from stratum.optimizer.physical._plan_context import PlanContext
         op.inputs = [Op()]
-        return bind_op(op, PlanContext.from_flags())
+        return bind_op(op, plan_context())
 
     def test_expressible_mask_binds_query_impl_under_flag(self):
         from stratum.optimizer.physical._selection_execs import PandasQuerySelectionOp

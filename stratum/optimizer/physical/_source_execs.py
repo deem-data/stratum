@@ -5,8 +5,8 @@ into an *abstract* source op (``ReadCSV``, ``ReadParquet``, ``InMemoryFrame``, o
 the already-concrete ``NumpyLoad``). Implementation selection then swaps each
 abstract op to one of the backend-specific concrete classes registered below via
 ``@physical_impl`` (``PandasReadCSV`` / ``PolarsReadCSV`` / ...). The concrete
-``process`` methods contain no ``force_polars`` / ``rechunk`` branch -- the
-backend and rechunk decision were fixed at plan time.
+``process`` methods contain no backend or ``rechunk`` branch -- both decisions
+were fixed at plan time.
 """
 from __future__ import annotations
 
@@ -28,6 +28,130 @@ def rechunk_pl_frame(df, rows_per_chunk=128_000):
         return df
     parts = [df.slice(i, rows_per_chunk) for i in range(0, n, rows_per_chunk)]
     return pl.concat(parts, rechunk=False)
+
+
+# --- pandas -> polars read options --------------------------------------------
+# ``read_args`` / ``read_kwargs`` always arrive in *pandas* spelling: the
+# ``_READ_FORMATS`` table in ``logical/_source_ops.py`` recognises only
+# ``pd.read_csv`` / ``pd.read_parquet`` / ``np.load``, so a source op can only
+# ever have been built from a pandas call. The polars readers rename most of
+# those options, take different values for some, and have no counterpart at all
+# for others -- forwarding them verbatim is what made ``PolarsReadCSV`` reject a
+# plain ``usecols``.
+#
+# Only exact-meaning renames are listed below. An option whose polars
+# counterpart takes different *values* (``dtype`` vs ``schema_overrides``, whose
+# type objects are not interchangeable) or has no counterpart at all
+# (``index_col``) is rejected, not approximated: a read option silently dropped
+# or mis-mapped yields a quietly wrong frame, which is a far worse failure than
+# a plan that refuses to compile.
+#
+# Rejecting is also why this is not a ``supports()`` check. Declining the op
+# would let selection fall back to ``PandasReadCSV`` inside an otherwise-polars
+# plan, feeding a pandas frame into polars operators -- a later, stranger crash
+# than the one raised here.
+
+#: pandas CSV option -> polars CSV option, same meaning, same value.
+_POLARS_CSV_RENAMES = {
+    "sep": "separator",
+    "delimiter": "separator",
+    "usecols": "columns",
+    "names": "new_columns",
+    "nrows": "n_rows",
+    "skiprows": "skip_rows",
+    "na_values": "null_values",
+    "comment": "comment_prefix",
+    "quotechar": "quote_char",
+    "low_memory": "low_memory",
+    "storage_options": "storage_options",
+}
+
+#: pandas parquet option -> polars parquet option. polars takes no positional
+#: options at all, hence the ``read_args`` guard in ``_translate_read_options``.
+_POLARS_PARQUET_RENAMES = {
+    "columns": "columns",
+    "storage_options": "storage_options",
+}
+
+
+def _translate_header(value):
+    """pandas ``header`` -> polars ``has_header``.
+
+    pandas takes a row *index* (0 = the first row is the header, ``None`` = no
+    header); polars takes a bool. Only the two spellings that mean "first row"
+    and "no header" carry over -- ``header=2`` (skip two rows, then read a
+    header) has no polars equivalent.
+    """
+    if value is None:
+        return "has_header", False
+    if value == 0:
+        return "has_header", True
+    raise ValueError(
+        f"header={value!r} has no polars equivalent (polars' has_header is a "
+        f"bool: only header=0 and header=None translate).")
+
+
+def _translate_encoding(value):
+    """pandas ``encoding`` -> polars ``encoding``.
+
+    Same option name, much narrower domain: polars reads ``utf8`` or
+    ``utf8-lossy`` only, so every other codec pandas accepts is a rejection.
+    """
+    if value is None or str(value).lower().replace("-", "") in ("utf8",):
+        return "encoding", "utf8"
+    if str(value).lower() == "utf8-lossy":
+        return "encoding", "utf8-lossy"
+    raise ValueError(
+        f"encoding={value!r} has no polars equivalent (polars reads 'utf8' or "
+        f"'utf8-lossy' only).")
+
+
+#: pandas option -> callable(value) -> (polars option, polars value), for the
+#: options that need the value rewritten and not just the name.
+_POLARS_CSV_VALUE_TRANSLATORS = {
+    "header": _translate_header,
+    "encoding": _translate_encoding,
+}
+
+
+def _check_read_options(read_args, read_kwargs, renames, translators, reader):
+    """Reject read options that have no polars counterpart, by name.
+
+    Which options a source carries is known when the plan is built, so an
+    untranslatable one should fail the plan rather than the run -- the same
+    reason the backend itself is bound at plan time. Values can still be
+    ``OperandRef``s at that point, so the value *translators* run later, in
+    ``process``.
+    """
+    if read_args:
+        raise ValueError(
+            f"{reader} cannot take positional read options {list(read_args)!r}: "
+            f"the polars readers accept only the path positionally, so a "
+            f"pandas positional argument would bind to a different option.")
+    unsupported = sorted(name for name in (read_kwargs or {})
+                         if name not in renames and name not in translators)
+    if unsupported:
+        raise ValueError(
+            f"{reader} has no polars equivalent for read option(s) "
+            f"{unsupported}. Read this source with the pandas backend, or drop "
+            f"the option.")
+
+
+def _translate_read_options(read_args, read_kwargs, renames, translators, reader):
+    """Rewrite pandas-spelled read options into their polars spelling.
+
+    Re-runs :func:`_check_read_options` so a graph-fed source op reaching this
+    with an option the plan-time check never saw still fails loudly.
+    """
+    _check_read_options(read_args, read_kwargs, renames, translators, reader)
+    translated = {}
+    for name, value in (read_kwargs or {}).items():
+        if name in translators:
+            new_name, new_value = translators[name](value)
+            translated[new_name] = new_value
+        else:
+            translated[renames[name]] = value
+    return translated
 
 
 class FileReadOp(PhysicalOp):
@@ -73,9 +197,19 @@ class PandasReadCSV(ReadCSV):
 class PolarsReadCSV(ReadCSV):
     is_abstract = False
 
+    _RENAMES = _POLARS_CSV_RENAMES
+    _VALUE_TRANSLATORS = _POLARS_CSV_VALUE_TRANSLATORS
+
+    def on_impl_selected(self, ctx) -> None:
+        _check_read_options(self.read_args, self.read_kwargs, self._RENAMES,
+                            self._VALUE_TRANSLATORS, type(self).__name__)
+
     def process(self, mode: str, inputs: list):
         file_path, read_args, read_kwargs = self._resolve(inputs)
-        return pl.read_csv(file_path, *read_args, **read_kwargs)
+        read_kwargs = _translate_read_options(
+            read_args, read_kwargs, self._RENAMES, self._VALUE_TRANSLATORS,
+            type(self).__name__)
+        return pl.read_csv(file_path, **read_kwargs)
 
 
 class ReadParquet(FileReadOp):
@@ -96,9 +230,19 @@ class PandasReadParquet(ReadParquet):
 class PolarsReadParquet(ReadParquet):
     is_abstract = False
 
+    _RENAMES = _POLARS_PARQUET_RENAMES
+    _VALUE_TRANSLATORS = {}
+
+    def on_impl_selected(self, ctx) -> None:
+        _check_read_options(self.read_args, self.read_kwargs, self._RENAMES,
+                            self._VALUE_TRANSLATORS, type(self).__name__)
+
     def process(self, mode: str, inputs: list):
         file_path, read_args, read_kwargs = self._resolve(inputs)
-        return pl.read_parquet(file_path, *read_args, **read_kwargs)
+        read_kwargs = _translate_read_options(
+            read_args, read_kwargs, self._RENAMES, self._VALUE_TRANSLATORS,
+            type(self).__name__)
+        return pl.read_parquet(file_path, **read_kwargs)
 
 
 class NumpyLoad(FileReadOp):

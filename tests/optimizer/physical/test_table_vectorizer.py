@@ -44,7 +44,6 @@ def capture_std_out(capfd):
 
 def _ctx():
     return PlanContext(
-        backend="pandas",
         pandas_query=False,
         rechunk=True,
         parallelism=1,

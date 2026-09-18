@@ -43,7 +43,11 @@ from stratum.optimizer.logical._dataframe_ops import ConcatOp
 from stratum.optimizer.logical._ops import PredictorOp, TransformerOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from tests._helpers import csv_file
-from tests.optimizer.logical.test_dataframe_ops import force_polars
+from stratum.optimizer._optimize import SearchConfig
+from stratum.optimizer.logical._scoring import resolve_scoring
+from stratum.optimizer.physical import FlagBasedSelector
+from stratum.frontend._skrub_graph import get_data
+from stratum.runtime._scheduler import SequentialScheduler
 
 
 def make_orders(n=60):
@@ -107,21 +111,28 @@ def build_pipeline(file_path, model=None):
     return X_vec.skb.apply(model, y=y)
 
 
-def _optimize(dag):
-    return optimize_(dag, OptConfig(dataframe_ops=True))[0]
+def _optimize(dag, selector=None, pandas_query=False):
+    return optimize_(dag, OptConfig(dataframe_ops=True, selector=selector,
+                                    pandas_query=pandas_query))[0]
 
 
-@pytest.fixture(params=[False, True], ids=["pandas", "polars"])
-def polars(request):
-    with force_polars(request.param):
-        yield request.param
+@pytest.fixture(params=["pandas", "polars"])
+def backend(request):
+    """The backend to plan against, as a selector pinned to it.
+
+    Yielded as a selector rather than set as a flag: the backend is the
+    selector's own state, so a test that does not thread it into ``optimize``
+    is not testing that backend at all.
+    """
+    return FlagBasedSelector(backend=request.param)
 
 
-def test_frame_ops_pipeline_plan(polars):
+def test_frame_ops_pipeline_plan(backend):
     """Every logical abstraction is recognised, and the compiling pass binds the
-    frame abstractions to concrete physical implementations."""
+    frame abstractions to concrete physical implementations -- on either
+    backend, since each frame family has a pandas and a polars impl."""
     with csv_file(make_orders()) as path:
-        ops = _optimize(build_pipeline(path))
+        ops = _optimize(build_pipeline(path), backend)
 
     # The frame abstractions each appear and are compiled to a PhysicalOp -- no
     # abstract frame op survives to execution.
@@ -141,7 +152,7 @@ def test_frame_ops_pipeline_plan(polars):
     assert any(isinstance(o, ConcatOp) for o in ops)
 
 
-def test_transformer_binds_default_selector(polars):
+def test_transformer_binds_default_selector():
     """The configured default keeps the StringEncoder on the skrub backend.
 
     The legacy ``rust_backend`` flag remains available to concrete adapters, but
@@ -168,17 +179,18 @@ def test_transformer_binds_default_selector(polars):
 def test_selection_binds_query_impl_under_flag():
     """The *same* logical MASK ``SelectionOp`` binds to different pandas impls
     depending on the plan context: boolean-mask indexing by default, the
-    ``DataFrame.query()`` fast path when ``pandas_query`` is on. The choice is a
-    plan-time bind, so no ``pandas_query`` branch survives into execution.
+    ``DataFrame.query()`` fast path when ``OptConfig.pandas_query`` is on. The
+    choice is a plan-time bind, so no ``pandas_query`` branch survives into
+    execution.
 
-    Pandas-only: the flag has no effect on the polars backend, so this test does
-    not use the ``polars`` fixture."""
+    Pandas-only: the setting has no effect on the polars backend, so this test
+    does not use the ``backend`` fixture."""
     from stratum.optimizer.physical._selection_execs import (
         PandasIndexSelectionOp, PandasQuerySelectionOp)
 
-    def selection_impl(pandas_query):
-        with csv_file(make_orders()) as path, st.config(pandas_query=pandas_query):
-            ops = _optimize(build_pipeline(path))
+    def selection_impl(enabled):
+        with csv_file(make_orders()) as path:
+            ops = _optimize(build_pipeline(path), pandas_query=enabled)
         sels = [o for o in ops if isinstance(o, SelectionOp)]
         assert len(sels) == 1
         # The predicate (`status == "completed" & quantity > 0`) is fully
@@ -187,28 +199,43 @@ def test_selection_binds_query_impl_under_flag():
         return sels[0]
 
     # Default: boolean-mask indexing.
-    assert isinstance(selection_impl(pandas_query=False), PandasIndexSelectionOp)
+    assert isinstance(selection_impl(enabled=False), PandasIndexSelectionOp)
     # pandas_query on: the query() fast path is bound in at plan time.
-    assert isinstance(selection_impl(pandas_query=True), PandasQuerySelectionOp)
+    assert isinstance(selection_impl(enabled=True), PandasQuerySelectionOp)
 
 
 def test_query_selection_trains_end_to_end():
     """With ``pandas_query`` on, the query fast path runs through the scheduler
-    and the pipeline still trains and scores end-to-end (pandas backend)."""
+    and the pipeline still trains and scores end-to-end (pandas backend).
+
+    Planned and scheduled directly rather than through ``make_grid_search``:
+    ``pandas_query`` is an optimizer-internal setting on ``OptConfig``, and
+    ``make_grid_search`` is a skrub drop-in (ADR 0002) that takes no optimizer
+    config, so it always plans with the defaults.
+    """
     scorer = make_scorer(r2_score)
     with csv_file(make_orders()) as path:
         preds = build_pipeline(path)
-        with st.config(scheduler=True, rust_backend=False, pandas_query=True, explain=("logical", "physical_impl")):
-            search = preds.skb.make_grid_search(fitted=True, cv=2, scoring=scorer)
-            assert search.results_ is not None
-            assert len(search.results_) > 0
+        env = get_data(preds)
+        search = SearchConfig(metric=resolve_scoring(scorer))
+        with st.config(rust_backend=False, explain=("logical", "physical_impl")):
+            plan, split_pos, flagged = optimize_(
+                preds, OptConfig(dataframe_ops=True, pandas_query=True),
+                env=env, search=search)
+        # The query fast path is what is scheduled, not just what was planned.
+        assert any(type(o).__name__ == "PandasQuerySelectionOp" for o in plan)
+        sched = SequentialScheduler(plan, split_pos, flagged)
+        sched.grid_search(cv=2)
+        assert sched.results_ is not None
+        assert len(sched.results_) > 0
 
 
-def test_frame_ops_pipeline_grid_search(polars):
+def test_frame_ops_pipeline_grid_search():
     """The compiled plan trains and scores end-to-end through Stratum's
     scheduler, driven by ``make_grid_search`` -- the same entry point the other
-    application tests use. The legacy backend flag is varied by the fixture,
-    but the default selector still produces one pandas pipeline. The pipeline
+    application tests use. ``make_grid_search`` builds its own plan, so this
+    runs on the configured selector (the pandas-first default); the polars route
+    through the scheduler is covered by ``test_selector_pipeline``. The pipeline
     carries a single candidate (no ``choose_from``), which grid search handles
     as a one-pipeline search."""
     scorer = make_scorer(r2_score)

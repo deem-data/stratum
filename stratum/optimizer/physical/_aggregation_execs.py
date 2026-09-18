@@ -1,8 +1,8 @@
 """Physical implementations of ``AggregateOp`` (fused groupby-aggregate).
 
 Same-shape backend-variant family: the concrete impls subclass the logical
-``AggregateOp``. Only pandas is implemented; the polars impl raises (as the
-logical op did under ``force_polars``) until a polars backend lands.
+``AggregateOp``. Only pandas is implemented; the polars impl raises until a
+polars backend lands.
 """
 from __future__ import annotations
 
