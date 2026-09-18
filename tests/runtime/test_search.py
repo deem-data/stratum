@@ -163,6 +163,34 @@ class SearchTest(RuntimeTest):
         pred = X.skb.apply(DummyRegressor(), y=y)
         st._api.grid_search(pred, scoring="neg_mean_squared_error")
 
+    def test_fused_assign_chain_scores_like_skrub(self):
+        """Chained assigns (map fusion on by default) with a named metric match skrub."""
+        data = st.as_data_op(self.df)
+        X = data[["x"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        X = X.assign(x2=X["x"] * 2)
+        X = X.assign(x3=X["x2"] + 1)
+        pred = X.skb.apply(DummyRegressor(), y=y)
+        cv = KFold(n_splits=3, shuffle=True, random_state=42)
+        ours = st._api.grid_search(pred, cv=cv, scoring="neg_mean_squared_error")
+        theirs = pred.skb.make_grid_search(
+            cv=cv, fitted=True, scoring="neg_mean_squared_error")
+        np.testing.assert_allclose(
+            theirs.results_["mean_test_score"], ours.results_["scores"], rtol=1e-9)
+
+    def test_loc_then_assign_chain_scores_like_skrub(self):
+        """``.loc`` upstream of fused assigns still scores like skrub."""
+        data = st.as_data_op(self.df)
+        X = data.loc[data["x"] > 0, ["x"]].skb.mark_as_X()
+        y = data.loc[data["x"] > 0, "y"].skb.mark_as_y()
+        X = X.assign(x2=X["x"] * 2).assign(x3=X["x"] + 1)
+        pred = X.skb.apply(DummyRegressor(), y=y)
+        cv = KFold(n_splits=2, shuffle=True, random_state=0)
+        ours = st._api.grid_search(pred, cv=cv, scoring="r2")
+        theirs = pred.skb.make_grid_search(cv=cv, fitted=True, scoring="r2")
+        np.testing.assert_allclose(
+            theirs.results_["mean_test_score"], ours.results_["scores"], rtol=1e-9)
+
 
 class CrossValidationSplitterTest(unittest.TestCase):
     """Regression tests for issue #199."""

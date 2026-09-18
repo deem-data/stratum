@@ -14,6 +14,7 @@ op's resolved inputs and the execution mode.
 """
 from __future__ import annotations
 import operator
+from typing import Mapping
 
 import polars as pl
 import pandas as pd
@@ -42,18 +43,24 @@ class EvalContext:
     ``frame`` is evaluated against (the op's primary operand); ``inputs`` are the
     op's resolved input values (read by :class:`OperandLeaf`); ``mode`` is
     ``fit_transform`` or ``predict`` (unused by the current stateless grammar).
-    """
-    __slots__ = ("frame", "inputs", "mode")
 
-    def __init__(self, frame, inputs, mode: str = "fit_transform"):
+    ``memo``, when set, caches ``to_pandas`` / ``to_polars`` results by expression
+    *structure* (``__eq__`` / ``__hash__``) so shared prefixes from assign-map
+    fusion evaluate once inside one map kernel.
+    """
+    __slots__ = ("frame", "inputs", "mode", "memo")
+
+    def __init__(self, frame, inputs, mode: str = "fit_transform",
+                 memo: dict | None = None):
         self.frame = frame
         self.inputs = inputs
         self.mode = mode
+        self.memo = memo
 
 
 class ColumnExpr:
     """Base class for column-expression nodes."""
-    __slots__ = ()
+    __slots__ = ("_hash_cache",)
 
     def _key(self):
         raise NotImplementedError
@@ -62,15 +69,42 @@ class ColumnExpr:
         return type(self) is type(other) and self._key() == other._key()
 
     def __hash__(self):
-        return hash((type(self).__name__, self._key()))
+        # Cache: structural memo lookups on deep inlined towers would otherwise
+        # re-hash O(depth) per node and fall back into O(n²) Python work.
+        try:
+            return self._hash_cache
+        except AttributeError:
+            h = hash((type(self).__name__, self._key()))
+            self._hash_cache = h
+            return h
 
     # TODO we should move this to the physical operator selection later
     def to_pandas(self, ctx: EvalContext):
         """Evaluate the expression against ``ctx.frame`` (a pandas frame)."""
-        raise NotImplementedError
+        memo = ctx.memo
+        if memo is None:
+            return self._to_pandas(ctx)
+        if self in memo:
+            return memo[self]
+        result = self._to_pandas(ctx)
+        memo[self] = result
+        return result
 
     def to_polars(self, ctx: EvalContext):
         """Evaluate on the polars backend, returning a lazy ``pl.Expr``."""
+        memo = ctx.memo
+        if memo is None:
+            return self._to_polars(ctx)
+        if self in memo:
+            return memo[self]
+        result = self._to_polars(ctx)
+        memo[self] = result
+        return result
+
+    def _to_pandas(self, ctx: EvalContext):
+        raise NotImplementedError
+
+    def _to_polars(self, ctx: EvalContext):
         raise NotImplementedError
 
     def to_pandas_query(self, params: dict) -> str | None:
@@ -103,10 +137,10 @@ class Col(ColumnExpr):
     def __repr__(self):
         return f"Col({self.name!r})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         return ctx.frame[self.name]
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         return pl.col(self.name)
 
     def to_pandas_query(self, params):
@@ -131,10 +165,10 @@ class Const(ColumnExpr):
     def __repr__(self):
         return f"Const({self.value!r})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         return self.value
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         return pl.lit(self.value)
 
     def to_pandas_query(self, params):
@@ -158,10 +192,10 @@ class OperandLeaf(ColumnExpr):
     def __repr__(self):
         return f"OperandLeaf({self.ref})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         return ctx.inputs[self.ref.k]
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         return ctx.inputs[self.ref.k]
 
     def iter_operand_refs(self):
@@ -186,10 +220,10 @@ class BinOpExpr(ColumnExpr):
     def __repr__(self):
         return f"({self.left!r} {BINARY_SYMBOLS.get(self.op, self.op)} {self.right!r})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         return self.op(self.left.to_pandas(ctx), self.right.to_pandas(ctx))
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         return self.op(self.left.to_polars(ctx), self.right.to_polars(ctx))
 
     def to_pandas_query(self, params):
@@ -225,10 +259,10 @@ class UnaryOpExpr(ColumnExpr):
     def __repr__(self):
         return f"{UNARY_SYMBOLS.get(self.op, self.op)}({self.operand!r})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         return self.op(self.operand.to_pandas(ctx))
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         return self.op(self.operand.to_polars(ctx))
 
     def to_pandas_query(self, params):
@@ -266,11 +300,11 @@ class StrExpr(ColumnExpr):
                           + [f"{k}={v!r}" for k, v in self.kwargs.items()])
         return f"str.{self.method}({inner})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         obj = self.operand.to_pandas(ctx)
         return getattr(obj.str, self.method)(*self.args, **self.kwargs)
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         obj = self.operand.to_polars(ctx)
         name = STR_POLARS_METHODS.get(self.method, self.method)
         return getattr(obj.str, name)(*self.args, **self.kwargs)
@@ -301,11 +335,11 @@ class DtExpr(ColumnExpr):
     def __repr__(self):
         return f"dt.{self.attr}({self.operand!r})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         obj = self.operand.to_pandas(ctx)
         return getattr(obj.dt, self.attr)
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         obj = self.operand.to_polars(ctx)
         if self.attr == "is_month_end":
             return obj.dt.month_end() == obj
@@ -338,11 +372,11 @@ class DatetimeExpr(ColumnExpr):
     def __repr__(self):
         return f"to_datetime({self.operand!r})"
 
-    def to_pandas(self, ctx):
+    def _to_pandas(self, ctx):
         obj = self.operand.to_pandas(ctx)
         return pd.to_datetime(obj, *self.args, **self.kwargs)
 
-    def to_polars(self, ctx):
+    def _to_polars(self, ctx):
         obj = self.operand.to_polars(ctx)
         translated = polars_datetime_kwargs(self.args, self.kwargs)
         if translated is None:
@@ -578,3 +612,114 @@ def fold_column_expr(root_node: Op, src: Op, root_consumer: Op):
     folder = _Folder(src)
     expr = folder.fold(root_node, root_consumer)
     return expr, folder.absorbed, folder.leaf_ops
+
+
+def replace_prior_cols(
+        expr: ColumnExpr,
+        priors: Mapping[ColumnExpr, str],
+        _memo: dict[int, tuple[ColumnExpr, bool]] | None = None,
+) -> tuple[ColumnExpr, bool]:
+    """Replace subtrees equal to ``priors`` keys with ``Col(name)``.
+
+    Used by the polars map kernel to turn fused towers into shallow
+    ``pl.col(prior)`` chains. Returns ``(rewritten, used_prior)``.
+    """
+    if _memo is None:
+        _memo = {}
+    eid = id(expr)
+    if eid in _memo:
+        return _memo[eid]
+
+    if expr in priors:
+        result = (Col(priors[expr]), True)
+        _memo[eid] = result
+        return result
+
+    if isinstance(expr, (Col, Const, OperandLeaf)):
+        result = (expr, False)
+    elif isinstance(expr, BinOpExpr):
+        left, u1 = replace_prior_cols(expr.left, priors, _memo)
+        right, u2 = replace_prior_cols(expr.right, priors, _memo)
+        used = u1 or u2
+        out = (expr if left is expr.left and right is expr.right
+               else BinOpExpr(expr.op, left, right))
+        result = (out, used)
+    elif isinstance(expr, UnaryOpExpr):
+        operand, used = replace_prior_cols(expr.operand, priors, _memo)
+        out = (expr if operand is expr.operand
+               else UnaryOpExpr(expr.op, operand))
+        result = (out, used)
+    elif isinstance(expr, StrExpr):
+        operand, used = replace_prior_cols(expr.operand, priors, _memo)
+        out = (expr if operand is expr.operand
+               else StrExpr(operand, expr.method, expr.args, expr.kwargs))
+        result = (out, used)
+    elif isinstance(expr, DtExpr):
+        operand, used = replace_prior_cols(expr.operand, priors, _memo)
+        out = (expr if operand is expr.operand
+               else DtExpr(operand, expr.attr))
+        result = (out, used)
+    elif isinstance(expr, DatetimeExpr):
+        operand, used = replace_prior_cols(expr.operand, priors, _memo)
+        out = (expr if operand is expr.operand
+               else DatetimeExpr(operand, expr.args, expr.kwargs))
+        result = (out, used)
+    else:
+        raise TypeError(
+            f"replace_prior_cols: unsupported ColumnExpr node {type(expr).__name__}")
+
+    _memo[eid] = result
+    return result
+
+
+def substitute_cols(expr: ColumnExpr, bindings: Mapping[str, ColumnExpr],
+                    _memo: dict[int, ColumnExpr] | None = None) -> ColumnExpr:
+    """Replace ``Col(name)`` with ``bindings[name]`` when present.
+
+    Binding values are already source-relative and are not re-walked.
+    That preserves simultaneous-assign semantics inside one original map.
+
+    Bindings are reused by identity (expressions are immutable), so fused
+    towers share prefixes instead of deep-cloning. Within one call, identity
+    memoization still rewrites each input node once so diamonds in the
+    *source* expr stay shared.
+    """
+    if _memo is None:
+        _memo = {}
+    eid = id(expr)
+    if eid in _memo:
+        return _memo[eid]
+
+    if isinstance(expr, Col):
+        # Bindings are not re-walked (simultaneous rule within one map stage).
+        bound = bindings.get(expr.name)
+        result = expr if bound is None else bound
+    elif isinstance(expr, (Const, OperandLeaf)):
+        result = expr
+    elif isinstance(expr, BinOpExpr):
+        left = substitute_cols(expr.left, bindings, _memo)
+        right = substitute_cols(expr.right, bindings, _memo)
+        result = (expr if left is expr.left and right is expr.right
+                  else BinOpExpr(expr.op, left, right))
+    elif isinstance(expr, UnaryOpExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else UnaryOpExpr(expr.op, operand))
+    elif isinstance(expr, StrExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else StrExpr(operand, expr.method, expr.args, expr.kwargs))
+    elif isinstance(expr, DtExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else DtExpr(operand, expr.attr))
+    elif isinstance(expr, DatetimeExpr):
+        operand = substitute_cols(expr.operand, bindings, _memo)
+        result = (expr if operand is expr.operand
+                  else DatetimeExpr(operand, expr.args, expr.kwargs))
+    else:
+        raise TypeError(
+            f"substitute_cols: unsupported ColumnExpr node {type(expr).__name__}")
+
+    _memo[eid] = result
+    return result

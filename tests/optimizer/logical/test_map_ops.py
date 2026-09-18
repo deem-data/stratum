@@ -1,5 +1,6 @@
 import operator
 import unittest
+from unittest import mock
 
 import pytest
 import numpy as np
@@ -12,7 +13,8 @@ from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._projection_ops import (
     AssignOp, DatetimeConversionOp, GetAttrProjectionOp)
 from stratum.optimizer.logical._column_expr import (
-    BinOpExpr, Col, Const, DatetimeExpr, DtExpr, OperandLeaf, StrExpr, _Folder)
+    BinOpExpr, Col, Const, DatetimeExpr, DtExpr, EvalContext, OperandLeaf, StrExpr,
+    _Folder)
 from stratum.optimizer.logical._ops import (
     BinOp, GetItemOp, Op, OperandRef, UnaryOp)
 from .test_dataframe_ops import (
@@ -207,6 +209,25 @@ class TestAssignMapProcess(unittest.TestCase):
         self.assertIsNot(op.entries, cloned.entries)
         self.assertIs(op.entries["y"], cloned.entries["y"])
 
+    def test_eval_memo_shares_structurally_equal_subtrees(self):
+        left = BinOpExpr(operator.mul, Col("x"), Const(2))
+        right = BinOpExpr(operator.mul, Col("x"), Const(2))
+        self.assertIsNot(left, right)
+        expr = BinOpExpr(operator.add, left, right)
+        calls = {"n": 0}
+        orig = BinOpExpr._to_pandas
+
+        def counting(self, ctx):
+            calls["n"] += 1
+            return orig(self, ctx)
+
+        ctx = EvalContext(frame=self.df, inputs=[self.df], memo={})
+        with mock.patch.object(BinOpExpr, "_to_pandas", counting):
+            result = expr.to_pandas(ctx)
+        self.assertEqual([4, 8, 12], result.tolist())
+        self.assertEqual(2, calls["n"])  # add once + mul once
+        self.assertIs(ctx.memo[left], ctx.memo[right])
+
 
 class TestMapStructureKey(unittest.TestCase):
     """MapOps expose structural keys so CSE can dedup identical maps."""
@@ -322,21 +343,34 @@ def test_assign_pipeline_evaluates(polars):
 
 
 def test_chained_assign_maps_evaluate(polars):
-    # Three chained assigns, each reading a column produced by the previous one:
-    # every assign folds into its own map, and Col refs resolve against the
-    # previous map's output frame.
+    # Three chained assigns fuse into one map; Col refs are inlined against the
+    # original source so sequential assign semantics are preserved.
     df = pd.DataFrame({"x": [1, 2, 3]})
     src = st.as_data_op(df)
     d1 = src.assign(x2=src["x"] * 2)
     d2 = d1.assign(x4=d1["x2"] * 2)
     d3 = d2.assign(x8=d2["x4"] * 2)
     ops = optimize(d3, OptConfig(dataframe_ops=True))
-    assert 3 == len([o for o in ops if isinstance(o, AssignMapOp)])
-    assert 4 == len(ops)  # source + three maps
+    assert 1 == len([o for o in ops if isinstance(o, AssignMapOp)])
+    assert 2 == len(ops)  # source + fused map
     result = st._api.evaluate(d3)
     assert [2, 4, 6] == list(result["x2"])
     assert [4, 8, 12] == list(result["x4"])
     assert [8, 16, 24] == list(result["x8"])
+
+
+def test_chained_assign_maps_unfused_when_disabled(polars):
+    from stratum.optimizer._dataframe_rewrites import DataframeRewritesConfig
+    df = pd.DataFrame({"x": [1, 2, 3]})
+    src = st.as_data_op(df)
+    d1 = src.assign(x2=src["x"] * 2)
+    d2 = d1.assign(x4=d1["x2"] * 2)
+    d3 = d2.assign(x8=d2["x4"] * 2)
+    ops = optimize(d3, OptConfig(
+        dataframe_ops=True,
+        dataframe_rewrite_config=DataframeRewritesConfig(fuse_assign_maps=False)))
+    assert 3 == len([o for o in ops if isinstance(o, AssignMapOp)])
+    assert 4 == len(ops)  # source + three maps
 
 
 def test_assign_overwrite_and_read_original_column(polars):
