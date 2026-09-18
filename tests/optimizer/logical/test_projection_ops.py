@@ -12,6 +12,7 @@ from stratum.optimizer.logical._projection_ops import (
     StringMethodOp, make_datetime_conversion_op, make_frame_get_attr,
     make_string_method_op, polars_datetime_kwargs)
 from stratum.optimizer.logical._map_ops import AssignMapOp
+from stratum.optimizer.logical._column_methods import ColumnMethodOp
 from stratum.optimizer.logical._column_expr import Col, DtExpr
 from stratum.optimizer.logical._ops import (
     CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType,
@@ -68,6 +69,14 @@ class TestProjectionRewrites(unittest.TestCase):
                           "month": DtExpr(Col("datetime"), "month")},
                          map_op.entries)
         self.assertIsInstance(ops[-1], MethodCallOp)  # the trailing .copy()
+
+    def test_supported_series_method_gets_typed_op(self):
+        data = st.as_data_op(self.df)["x"].astype("float32")
+        ops = optimize(data, OptConfig(dataframe_ops=True))
+        method = next(op for op in ops if isinstance(op, ColumnMethodOp))
+        self.assertEqual("astype", method.method)
+        self.assertIs(OutputType.SERIES, method.output_type)
+        self.assertFalse(any(isinstance(op, MethodCallOp) for op in ops))
 
 
 class TestColumnProjectionOp(unittest.TestCase):

@@ -93,7 +93,9 @@ jobs:
           maturin develop --release
 
       - name: Install project with test dependencies
-        run: uv sync --extra test
+        # `cpu` pins the CPU torch build: the runners have no GPU, and the
+        # cu126 build would pull ~2.8 GB of nvidia wheels on every Linux job.
+        run: uv sync --extra test --extra cpu
 
       - name: Run Python tests with coverage
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'

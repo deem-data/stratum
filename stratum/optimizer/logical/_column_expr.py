@@ -19,6 +19,9 @@ import polars as pl
 import pandas as pd
 
 from stratum.optimizer.logical._ops import OperandRef, BinOp, UnaryOp, GetItemOp, Op
+from stratum.optimizer.logical._base import config_key
+from stratum.optimizer.logical._column_methods import (
+    ColumnMethodOp, get_column_method_spec, polars_dtype)
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, DatetimeConversionOp, GetAttrProjectionOp, StringMethodOp,
     STR_POLARS_METHODS, polars_datetime_kwargs)
@@ -360,6 +363,111 @@ class DatetimeExpr(ColumnExpr):
                             self.args, self.kwargs)
 
 
+def _iter_value_refs(value):
+    if isinstance(value, ColumnExpr):
+        yield from value.iter_operand_refs()
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_value_refs(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_value_refs(item)
+
+
+def _remap_expr_value(value, mapping):
+    if isinstance(value, ColumnExpr):
+        return value.remap_operand_refs(mapping)
+    if isinstance(value, tuple):
+        return tuple(_remap_expr_value(item, mapping) for item in value)
+    if isinstance(value, list):
+        return [_remap_expr_value(item, mapping) for item in value]
+    if isinstance(value, dict):
+        return {key: _remap_expr_value(item, mapping)
+                for key, item in value.items()}
+    return value
+
+
+def _eval_expr_value(value, ctx, backend):
+    if isinstance(value, ColumnExpr):
+        return getattr(value, f"to_{backend}")(ctx)
+    if isinstance(value, tuple):
+        return tuple(_eval_expr_value(item, ctx, backend) for item in value)
+    if isinstance(value, list):
+        return [_eval_expr_value(item, ctx, backend) for item in value]
+    if isinstance(value, dict):
+        return {key: _eval_expr_value(item, ctx, backend)
+                for key, item in value.items()}
+    return value
+
+
+def _polars_expr_dtype(expr, ctx):
+    # FIXME(#216): this resolves only the two shapes it pattern-matches and returns
+    # None for every other operand, which is what makes the NaN handling in
+    # _polars_fillna / _polars_notna quietly backend-dependent. Asking polars
+    # for the expression's own output dtype (a schema-only resolve, e.g.
+    # ctx.frame.lazy().select(expr).collect_schema()) would answer for any expr.
+    if isinstance(expr, Col) and isinstance(ctx.frame, pl.DataFrame):
+        return ctx.frame.schema.get(expr.name)
+    if isinstance(expr, ColumnMethodExpr) and expr.method == "astype":
+        dtype = expr.args[0] if expr.args else expr.kwargs.get("dtype")
+        if not isinstance(dtype, ColumnExpr):
+            return polars_dtype(dtype)
+    return None
+
+
+class ColumnMethodExpr(ColumnExpr):
+    """A registry-backed, row-local Series method call."""
+
+    __slots__ = ("operand", "method", "args", "kwargs")
+
+    def __init__(self, operand: ColumnExpr, method: str, args=(), kwargs=None):
+        self.operand = operand
+        self.method = method
+        self.args = tuple(args or ())
+        self.kwargs = dict(kwargs or {})
+
+    def _key(self):
+        return (
+            self.operand,
+            self.method,
+            config_key(self.args),
+            config_key(self.kwargs),
+        )
+
+    def __repr__(self):
+        return f"{self.method}({self.operand!r})"
+
+    def to_pandas(self, ctx):
+        spec = get_column_method_spec(self.method)
+        assert spec is not None
+        obj = self.operand.to_pandas(ctx)
+        args = _eval_expr_value(self.args, ctx, "pandas")
+        kwargs = _eval_expr_value(self.kwargs, ctx, "pandas")
+        return spec.pandas_eval(obj, list(args), kwargs, None)
+
+    def to_polars(self, ctx):
+        spec = get_column_method_spec(self.method)
+        assert spec is not None
+        obj = self.operand.to_polars(ctx)
+        args = _eval_expr_value(self.args, ctx, "polars")
+        kwargs = _eval_expr_value(self.kwargs, ctx, "polars")
+        dtype = _polars_expr_dtype(self.operand, ctx)
+        return spec.polars_eval(obj, list(args), kwargs, dtype)
+
+    def iter_operand_refs(self):
+        yield from self.operand.iter_operand_refs()
+        yield from _iter_value_refs(self.args)
+        yield from _iter_value_refs(self.kwargs)
+
+    def remap_operand_refs(self, mapping):
+        return ColumnMethodExpr(
+            self.operand.remap_operand_refs(mapping),
+            self.method,
+            _remap_expr_value(self.args, mapping),
+            _remap_expr_value(self.kwargs, mapping),
+        )
+
+
 # --- Conversion: op subgraph -> ColumnExpr -----------------------------------
 
 class _Folder:
@@ -415,6 +523,8 @@ class _Folder:
             # spelling. The unfused op handles the rest through pandas.
             return (self._has_literal_call_args(node)
                     and polars_datetime_kwargs(node.args, node.kwargs) is not None)
+        if isinstance(node, ColumnMethodOp):
+            return True
         if isinstance(node, GetAttrProjectionOp):
             # Only the fused datetime accessor (.dt.<attr>); .str is already fused
             # into StringMethodOp during frame extraction.
@@ -439,6 +549,11 @@ class _Folder:
         if isinstance(node, (StringMethodOp, DatetimeConversionOp,
                              GetAttrProjectionOp)):
             return [node.inputs[0]]
+        if isinstance(node, ColumnMethodOp):
+            # Every remaining input is referenced by args/kwargs. Returning all
+            # inputs lets expression-valued method arguments join the fold cone;
+            # non-foldable/external producers become OperandLeafs later.
+            return list(node.inputs)
         return []
 
     # --- pass 1: discover the foldable subgraph -----------------------------------
@@ -536,6 +651,11 @@ class _Folder:
             operand = self._resolve(node.inputs[0], absorbable, memo)
             return DatetimeExpr(operand, tuple(node.args or ()),
                                 dict(node.kwargs or {}))
+        if isinstance(node, ColumnMethodOp):
+            operand = self._resolve(node.inputs[0], absorbable, memo)
+            args = self._method_value(node.args or (), node, absorbable, memo)
+            kwargs = self._method_value(node.kwargs or {}, node, absorbable, memo)
+            return ColumnMethodExpr(operand, node.method, args, kwargs)
         if isinstance(node, GetAttrProjectionOp):
             operand = self._resolve(node.inputs[0], absorbable, memo)
             return DtExpr(operand, node.attr_name[1])
@@ -546,6 +666,21 @@ class _Folder:
         if isinstance(operand, OperandRef):
             return self._resolve(parent.inputs[operand.k], absorbable, memo)
         return Const(operand)
+
+    def _method_value(self, value, parent: Op, absorbable: set[int],
+                      memo: dict[int, ColumnExpr]):
+        if isinstance(value, OperandRef):
+            return self._resolve(parent.inputs[value.k], absorbable, memo)
+        if isinstance(value, tuple):
+            return tuple(self._method_value(item, parent, absorbable, memo)
+                         for item in value)
+        if isinstance(value, list):
+            return [self._method_value(item, parent, absorbable, memo)
+                    for item in value]
+        if isinstance(value, dict):
+            return {key: self._method_value(item, parent, absorbable, memo)
+                    for key, item in value.items()}
+        return value
 
     def _resolve(self, node: Op, absorbable: set[int],
                  memo: dict[int, ColumnExpr]) -> ColumnExpr:

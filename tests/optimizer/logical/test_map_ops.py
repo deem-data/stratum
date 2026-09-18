@@ -12,7 +12,9 @@ from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._projection_ops import (
     AssignOp, DatetimeConversionOp, GetAttrProjectionOp)
 from stratum.optimizer.logical._column_expr import (
-    BinOpExpr, Col, Const, DatetimeExpr, DtExpr, OperandLeaf, StrExpr, _Folder)
+    BinOpExpr, Col, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, OperandLeaf,
+    StrExpr, _Folder)
+from stratum.optimizer.logical._column_methods import ColumnMethodOp
 from stratum.optimizer.logical._ops import (
     BinOp, GetItemOp, Op, OperandRef, UnaryOp)
 from .test_dataframe_ops import (
@@ -78,6 +80,73 @@ class TestAssignMapFolding(unittest.TestCase):
         out = src.assign(c=src["s"].str.count("1"))
         map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
         self.assertEqual({"c": StrExpr(Col("s"), "count", ("1",))}, map_op.entries)
+
+    def test_fillna_astype_chain_folds(self):
+        src = st.as_data_op(self.df)
+        out = src.assign(c=src["c1"].fillna(0).astype("float32"))
+        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
+        self.assertEqual(
+            ColumnMethodExpr(
+                ColumnMethodExpr(Col("c1"), "fillna", (0,)),
+                "astype",
+                ("float32",),
+            ),
+            map_op.entries["c"],
+        )
+        self.assertEqual(1, len(map_op.inputs))
+
+    def test_unsupported_astype_options_stay_as_leaf(self):
+        src = st.as_data_op(self.df)
+        converted = src["c1"].astype("float32", errors="ignore")
+        map_op = _one(
+            self,
+            optimize(src.assign(c=converted), OptConfig(dataframe_ops=True)),
+            AssignMapOp,
+        )
+        self.assertIsInstance(map_op.entries["c"], OperandLeaf)
+
+    def test_row_local_methods_fold_with_expression_arguments(self):
+        src = st.as_data_op(self.df)
+        c1 = src["c1"]
+        out = src.assign(
+            clipped=c1.clip(lower=1, upper=2),
+            kept=c1.where(c1 > 1, 0),
+            member=src["s"].isin(["a1", "missing"]),
+            present=c1.notna(),
+        )
+        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
+
+        self.assertEqual(1, len(map_op.inputs))
+        self.assertEqual(
+            ColumnMethodExpr(Col("c1"), "clip", kwargs={"lower": 1, "upper": 2}),
+            map_op.entries["clipped"],
+        )
+        self.assertEqual(
+            ColumnMethodExpr(
+                Col("c1"),
+                "where",
+                (BinOpExpr(operator.gt, Col("c1"), Const(1)), 0),
+            ),
+            map_op.entries["kept"],
+        )
+        self.assertEqual(
+            ColumnMethodExpr(Col("s"), "isin", (["a1", "missing"],)),
+            map_op.entries["member"],
+        )
+        self.assertEqual(
+            ColumnMethodExpr(Col("c1"), "notna"),
+            map_op.entries["present"],
+        )
+
+    def test_unsupported_fillna_options_stay_as_leaf(self):
+        src = st.as_data_op(self.df)
+        filled = src["c1"].fillna(0, limit=1)
+        map_op = _one(
+            self,
+            optimize(src.assign(c=filled), OptConfig(dataframe_ops=True)),
+            AssignMapOp,
+        )
+        self.assertIsInstance(map_op.entries["c"], OperandLeaf)
 
     def test_scalar_constant_folds_to_const(self):
         src = st.as_data_op(self.df)
@@ -252,6 +321,28 @@ class TestMapExprRefContract(unittest.TestCase):
         expr = DtExpr(DatetimeExpr(Col("d")), "month")
         self.assertEqual([], list(expr.iter_operand_refs()))
         self.assertEqual(expr, expr.remap_operand_refs({}))
+
+    def test_method_expression_remaps_refs_in_arguments(self):
+        expr = ColumnMethodExpr(
+            OperandLeaf(OperandRef(1)),
+            "where",
+            (
+                OperandLeaf(OperandRef(2)),
+                OperandLeaf(OperandRef(3)),
+            ),
+        )
+        self.assertEqual([1, 2, 3], [ref.k for ref in expr.iter_operand_refs()])
+        self.assertEqual(
+            ColumnMethodExpr(
+                OperandLeaf(OperandRef(4)),
+                "where",
+                (
+                    OperandLeaf(OperandRef(5)),
+                    OperandLeaf(OperandRef(6)),
+                ),
+            ),
+            expr.remap_operand_refs({1: 4, 2: 5, 3: 6}),
+        )
 
 
 class TestFolderEdgeCases(unittest.TestCase):
@@ -513,6 +604,110 @@ def test_wide_assign_evaluates(polars):
     for i in range(8):
         assert [1 * i + 3, 2 * i + 4] == list(result[f"c{i}"]), f"c{i}"
     assert [-1, -1] == list(result["marker"])
+
+
+def test_ttt_shaped_wide_fillna_astype_collapses_to_one_map():
+    """The dominant TTT pattern is one map, not three ops per column."""
+    columns = [f"direct_{i}" for i in range(32)]
+    df = pd.DataFrame({name: [1.0, np.nan] for name in columns})
+    src = st.as_data_op(df)
+    out = src.assign(
+        **{name: src[name].fillna(0.0).astype("float32") for name in columns}
+    )
+
+    ops = optimize(out, OptConfig(dataframe_ops=True))
+    map_op = _one(unittest.TestCase(), ops, AssignMapOp)
+
+    assert 2 == len(ops)  # source + one map (formerly 98 logical nodes)
+    assert 32 == len(map_op.entries)
+    assert 1 == len(map_op.inputs)  # no per-column OperandLeaf inputs
+
+
+def test_fillna_astype_pipeline_evaluates(polars):
+    df = pd.DataFrame({"x": [1.0, np.nan, 3.0]})
+    src = st.as_data_op(df)
+    out = src.assign(x=src["x"].fillna(0.0).astype("float32"))
+
+    ops = optimize(out, OptConfig(dataframe_ops=True))
+    assert not any(isinstance(op, ColumnMethodOp) for op in ops)
+
+    result = st._api.evaluate(out)
+    np.testing.assert_array_equal(
+        np.asarray(list(result["x"]), dtype=np.float32),
+        np.asarray([1.0, 0.0, 3.0], dtype=np.float32),
+    )
+    if isinstance(result, pl.DataFrame):
+        assert pl.Float32 == result.schema["x"]
+    else:
+        assert np.dtype("float32") == result["x"].dtype
+
+
+def test_folded_fillna_astype_executes_on_polars():
+    expr = ColumnMethodExpr(
+        ColumnMethodExpr(Col("x"), "fillna", (0.0,)),
+        "astype",
+        ("float32",),
+    )
+    op = AssignMapOp(entries={"x": expr})
+    with force_polars():
+        result = run_op(op, pl.DataFrame({"x": [1.0, float("nan"), None]}))
+    assert [1.0, 0.0, 0.0] == result["x"].to_list()
+    assert pl.Float32 == result.schema["x"]
+
+
+def test_standalone_fillna_handles_polars_nan_and_null():
+    series = pl.Series("x", [1.0, float("nan"), None])
+    op = ColumnMethodOp(method="fillna", args=(0.0,))
+    with force_polars():
+        result = run_op(op, series)
+    assert [1.0, 0.0, 0.0] == result.to_list()
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_row_local_method_pipeline_evaluates(use_polars):
+    frame = pd.DataFrame({
+        "x": [0.0, 2.0, np.nan],
+        "s": ["yes", "no", "yes"],
+    })
+    src = st.as_data_op(frame)
+    x = src["x"]
+    out = src.assign(
+        clipped=x.clip(lower=1.0, upper=1.5),
+        kept=x.where(x > 1.0, 0.0),
+        member=src["s"].isin(["yes"]),
+        present=x.notna(),
+    )
+    map_op = _one(
+        unittest.TestCase(),
+        optimize(out, OptConfig(dataframe_ops=True)),
+        AssignMapOp,
+    )
+
+    input_frame = pl.from_pandas(frame) if use_polars else frame
+    logical_map = AssignMapOp(entries=map_op.entries)
+    with force_polars(use_polars):
+        result = run_op(logical_map, input_frame)
+
+    np.testing.assert_allclose(
+        np.asarray(list(result["clipped"]), dtype=float),
+        np.asarray([1.0, 1.5, np.nan]),
+        equal_nan=True,
+    )
+    assert [0.0, 2.0, 0.0] == list(result["kept"])
+    assert [True, False, True] == list(result["member"])
+    assert [True, True, False] == list(result["present"])
+
+
+def test_notna_is_foldable_in_selection_predicate():
+    frame = pd.DataFrame({"x": [1.0, np.nan, 2.0]})
+    src = st.as_data_op(frame)
+    out = src[src["x"].notna()]
+    ops = optimize(out, OptConfig(dataframe_ops=True))
+    from stratum.optimizer.logical._selection_ops import SelectionOp
+
+    selection = _one(unittest.TestCase(), ops, SelectionOp)
+    assert ColumnMethodExpr(Col("x"), "notna") == selection.predicate
+    assert 2 == len(ops)
 
 
 if __name__ == "__main__":

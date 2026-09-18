@@ -23,6 +23,8 @@ from stratum.optimizer.logical._projection_ops import (
     make_datetime_conversion_op, make_frame_get_attr, make_string_method_op,
     resolve_selector_columns)
 from stratum.optimizer.logical._map_ops import MapOp, AssignMapOp, make_assign_map_op
+from stratum.optimizer.logical._column_methods import (
+    ColumnMethodOp, is_supported_column_method, make_column_method_op)
 from stratum.optimizer.logical._join_ops import (
     JoinOp, _MERGE_POSITIONAL, _JOIN_POSITIONAL, _JOIN_OP_FIELDS, make_join_op,
     _make_chained_join_op)
@@ -139,6 +141,8 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 # enclosing `df[...]` then sees a mask and folds the chain into a
                 # StrExpr predicate, matching the StringMethodOp directly.
                 new_op = make_string_method_op(op)
+            elif is_supported_column_method(op):
+                new_op = make_column_method_op(op)
             elif op.method_name == "groupby":
                 # Leave groupby as-is; mark it as a dataframe op so the following
                 # aggregation call is visited and can fuse with it.

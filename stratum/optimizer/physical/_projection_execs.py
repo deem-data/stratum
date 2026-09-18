@@ -23,6 +23,8 @@ from stratum.optimizer.logical._projection_ops import (
     DatetimeConversionOp, DropOp, GetAttrProjectionOp, MetadataOp, ProjectionOp,
     StringMethodOp, STR_POLARS_METHODS, polars_datetime_kwargs,
     resolve_selector_columns)
+from stratum.optimizer.logical._column_methods import (
+    ColumnMethodOp, get_column_method_spec)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 
@@ -51,6 +53,24 @@ class PolarsProjectionOp(ProjectionOp, PhysicalOp):
         if self.func is not None:
             return self.func(_obj, *_args, **_kwargs)
         raise TypeError("ProjectionOp requires either `func` or `method` to be set.")
+
+
+# --- ColumnMethodOp (astype/fillna/clip/where/isin/notna) --------------------
+
+@physical_impl(of=ColumnMethodOp, backend="pandas")
+class PandasColumnMethodOp(ColumnMethodOp, PhysicalOp):
+    def process(self, mode: str, inputs: list):
+        obj, args, kwargs = self.resolved_call(inputs)
+        spec = get_column_method_spec(self.method)
+        return spec.pandas_eval(obj, args, kwargs, getattr(obj, "dtype", None))
+
+
+@physical_impl(of=ColumnMethodOp, backend="polars")
+class PolarsColumnMethodOp(ColumnMethodOp, PhysicalOp):
+    def process(self, mode: str, inputs: list):
+        obj, args, kwargs = self.resolved_call(inputs)
+        spec = get_column_method_spec(self.method)
+        return spec.polars_eval(obj, args, kwargs, getattr(obj, "dtype", None))
 
 
 # --- MetadataOp (e.g. rename) -------------------------------------------------

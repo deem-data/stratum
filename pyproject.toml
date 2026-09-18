@@ -45,6 +45,17 @@ test = [
     "lightgbm>=4.6.0",
     "xgboost>=3.1.1",
 ]
+# torch is only needed by tests/application/test_ttt_task.py, and which build of
+# it you want depends on the machine, so it rides in its own extra rather than
+# in `test`. Pick exactly one alongside `test`: `cpu` on CI and on any box
+# without an NVIDIA GPU, `cu126` on the GPU box. They are declared conflicting
+# below so uv resolves a separate lock branch for each.
+cpu = [
+    "torch>=2.13.0",
+]
+cu126 = [
+    "torch>=2.13.0",
+]
 benchmark = [
     "psutil>=7.2"
 ]
@@ -68,6 +79,38 @@ cache-keys = [
     {file = "_rust/Cargo.toml"},
     {file = "_rust/Cargo.lock"},
     {file = "_rust/**/*.rs"},
+]
+# The `cpu` / `cu126` torch extras are mutually exclusive; see the note above
+# the pytorch indexes below.
+conflicts = [[{ extra = "cpu" }, { extra = "cu126" }]]
+
+# The default PyPI torch wheel is built against CUDA 13.0, which the GPU box's
+# driver (12.7) refuses -- torch.cuda.is_available() comes back False and every
+# pipeline silently falls back to CPU. That box needs the cu126 build.
+#
+# CI does not: `torch+cu126` drags in 16 nvidia/triton wheels totalling ~2.8 GB
+# on each of the four Linux jobs, and none of them has a GPU. `torch+cpu` has no
+# nvidia dependencies at all. A `sys_platform` marker cannot tell the two Linux
+# machines apart, so the choice is made by extra instead -- hence the conflict
+# declaration, which makes uv lock a branch per flavour.
+#
+# Both sources stay gated on Linux: neither index publishes macOS arm64 wheels,
+# so macOS and Windows resolve torch from PyPI (MPS / CPU builds) under either
+# extra.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu126", extra = "cu126", marker = "sys_platform == 'linux'" },
 ]
 
 [dependency-groups]
