@@ -123,10 +123,20 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
 
 
     def test_application_polars(self):
+        """The same pipeline on the polars impls, end to end.
+
+        ``implementation_selector="greedy"`` is how a user reaches polars:
+        ``make_grid_search`` builds its own plan, so the selector has to come
+        from the config rather than an injected one. Greedy ranks polars above
+        pandas for every frame family, so the whole pipeline binds polars --
+        which the ``force_polars=True`` this used to pass never did, leaving it
+        a duplicate of ``test_application`` under a misleading name (#217).
+        """
         scorer = make_scorer(r2_score)
         with csv_file(make_data()) as path:
             preds = define_pipeline(path)
-            with st.config(DEBUG=False, open_graph=False, scheduler=True, rust_backend=False, force_polars=True):
+            with st.config(DEBUG=False, open_graph=False, scheduler=True,
+                           rust_backend=False, implementation_selector="greedy"):
                 search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
                 self.assertIsNotNone(search.results_)
                 self.assertGreater(len(search.results_), 0)

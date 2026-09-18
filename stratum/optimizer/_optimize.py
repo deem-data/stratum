@@ -73,7 +73,22 @@ class OptConfig():
         algebraic_rewrites: bool = True,
         algebraic_rewrite_config: AlgebraicRewritesConfig | None = None,
         propagate_schema: bool = True,
+        selector: ImplementationSelector | None = None,
+        pandas_query: bool = False,
     ):
+        """``selector`` overrides the implementation-selection policy for this
+        plan. Left ``None``, the policy named by ``FLAGS.implementation_selector``
+        is used, which is the only route users have. Passing one is how a caller
+        reaches a policy that has no config name -- notably
+        ``FlagBasedSelector(backend="polars")``, which pins a plan to one
+        dataframe backend so the polars impls can be exercised directly.
+
+        ``pandas_query`` lets ``PandasQuerySelectionOp`` bid for a MASK selection
+        whose predicate compiles to a query string. It lives here, on the
+        optimizer's own config, because it is a technical impl choice between two
+        pandas selection kernels rather than anything a user should reason about:
+        no ``set_config`` parameter reaches it, and ``make_grid_search`` (a skrub
+        drop-in, ADR 0002) builds its plan with the default."""
         self.cse = cse
         self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
@@ -83,6 +98,8 @@ class OptConfig():
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
         self.propagate_schema = propagate_schema
+        self.selector = selector
+        self.pandas_query = pandas_query
 
 def _debug_show_graph(root: Op, name: str):
     if FLAGS.debug_graph:
@@ -140,7 +157,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
 
     # Steps 2 & 3 read the config that drives operator selection once, here, so
     # execution carries no operator-selection control flow.
-    ctx = PlanContext.from_flags()
+    ctx = PlanContext.from_flags(config)
 
     # Step 2: lower logical ops to physical ops.
     root = lower_to_physical(root, ctx)
@@ -150,7 +167,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
 
     # Step 3: physical optimization (implementation selection + linearization).
     # TODO: May need physical-level rewrites before or after operator selection
-    result = physical_optimize(root, ctx)
+    result = physical_optimize(root, ctx, selector=config.selector)
 
     log_time("Optimization took in total", start)
     return result

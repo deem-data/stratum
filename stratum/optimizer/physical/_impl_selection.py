@@ -119,16 +119,33 @@ def get_implementation_selector(mode: str) -> ImplementationSelector:
 
 
 class FlagBasedSelector(ImplementationSelector):
-    """Reproduces the legacy flag-driven behaviour from the plan context.
+    """Pin every frame op to one named dataframe backend.
 
     Preference order: a Rust kernel when ``ctx.prefer_rust`` (the old
     ``allow_patch and rust_backend`` gate, decided per op by ``supports``), then
-    the impl matching the frame backend (``force_polars``), then a
-    backend-agnostic impl (sklearn/skrub estimators, numpy sources).
+    the impl matching :attr:`backend`, then a backend-agnostic impl
+    (sklearn/skrub estimators, numpy sources).
+
+    The backend is constructor state rather than a field on the plan context:
+    it is a selection policy, so the selector that acts on it is the only thing
+    that should carry it. Returning ``None`` when no candidate matches is what
+    makes that pin strict -- an abstract op then survives selection and
+    :func:`_assert_no_abstract_ops` fails the plan, instead of the op silently
+    running on the other backend.
+
+    Not registered in :data:`_IMPLEMENTATION_SELECTOR_FACTORIES`: a pinned
+    backend is a testing tool (``OptConfig(selector=...)``), not a user-facing
+    mode. Users reach polars through ``implementation_selector="greedy"``.
     """
 
     #: Backends whose impls run regardless of the chosen frame backend.
     _BACKEND_AGNOSTIC = ("sklearn-skrub", "numpy")
+
+    def __init__(self, backend: str = "pandas"):
+        self.backend = backend
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(backend={self.backend!r})"
 
     def choose(self, op: IRNode, candidates: list[PhysicalImpl],
                ctx: PlanContext) -> PhysicalImpl | None:
@@ -139,7 +156,7 @@ class FlagBasedSelector(ImplementationSelector):
                 if impl.backend_name == "rust":
                     return impl
         for impl in candidates:
-            if impl.backend_name == ctx.backend:
+            if impl.backend_name == self.backend:
                 return impl
         for impl in candidates:
             if impl.backend_name in self._BACKEND_AGNOSTIC:
@@ -196,21 +213,22 @@ def select_implementations(root: IRNode, ctx: PlanContext,
     for op in topological_iterator(root):
         bind_op(op, ctx, registry=registry, selector=selector)
     log_time("implementation selection took", start)
-    _assert_no_abstract_ops(root, ctx)
+    _assert_no_abstract_ops(root, selector)
     return root
 
 
-def _assert_no_abstract_ops(root: IRNode, ctx: PlanContext) -> None:
+def _assert_no_abstract_ops(root: IRNode,
+                            selector: ImplementationSelector) -> None:
     """Guard: no abstract physical op may reach the scheduler.
 
-    A surviving abstract op means lowering produced it but no registered
-    candidate matched the plan context -- its ``process`` would raise at run
-    time. Fail loudly at plan time instead.
+    A surviving abstract op means lowering produced it but the selector chose
+    nothing for it -- its ``process`` would raise at run time. Fail loudly at
+    plan time instead.
     """
     for op in topological_iterator(root):
         if isinstance(op, PhysicalOp) and getattr(op, "is_abstract", False):
             raise RuntimeError(
                 f"Abstract physical op {op!r} survived implementation selection; "
-                f"no registered implementation matched backend {ctx.backend!r}. "
+                f"{selector!r} matched none of its registered implementations. "
                 f"Register one with @physical_impl or fix its supports() checks."
             )

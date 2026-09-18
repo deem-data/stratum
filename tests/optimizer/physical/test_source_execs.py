@@ -1,10 +1,12 @@
 """Physical source operators: lowering, implementation selection, and the
 central guarantee that execution carries no operator-selection control flow.
 
-The branch-free tests build a plan under one backend, then flip the global
-``force_polars`` flag before executing. Because the backend was chosen at plan
-time (baked into the concrete op class), the flip must have *no* effect on the
-result -- if it did, some ``process`` would still be reading the flag at runtime.
+The backend is not ambient state to flip: it belongs to the
+:class:`FlagBasedSelector` a plan was built with, and is baked into the concrete
+op class from there. So the branch-free tests build two plans from the *same*
+logical DAG with two different selectors and execute both -- each keeps its own
+backend, and re-executing either is stable, which is only true if no ``process``
+consults anything outside the op.
 """
 import unittest
 
@@ -13,7 +15,6 @@ import pandas as pd
 import polars as pl
 
 import stratum as st
-from stratum._config import config
 from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.physical._impl_selection import FlagBasedSelector
 from stratum.optimizer.physical._plan_context import PlanContext
@@ -25,7 +26,11 @@ from stratum.optimizer.physical._source_execs import (
     ReadCSV, ReadParquet, lower_data_source)
 from stratum.runtime._buffer_pool import BufferPool
 from tests._helpers import csv_file, npy_file, parquet_file
-from tests.optimizer.logical.test_dataframe_ops import force_polars
+
+
+def polars_conf(**kwargs):
+    """An ``OptConfig`` that pins the plan to the polars impls."""
+    return OptConfig(selector=FlagBasedSelector(backend="polars"), **kwargs)
 
 
 def run_plan(ops, mode="fit_transform"):
@@ -35,14 +40,6 @@ def run_plan(ops, mode="fit_transform"):
         inputs = [pool.pin(key) for key in op.inputs]
         pool.put(op, op.process(mode, inputs))
     return pool.pin(ops[-1])
-
-
-class TestPlanContext(unittest.TestCase):
-    def test_backend_from_flags(self):
-        with force_polars(False):
-            self.assertEqual("pandas", PlanContext.from_flags().backend)
-        with force_polars(True):
-            self.assertEqual("polars", PlanContext.from_flags().backend)
 
 
 class TestSourceImplSelection(unittest.TestCase):
@@ -57,27 +54,34 @@ class TestSourceImplSelection(unittest.TestCase):
     def test_default_selector_prefers_pandas_in_memory_frame(self):
         ops, *_ = optimize(st.as_data_op(self.df))
         self.assertIsInstance(ops[0], PandasInMemoryFrame)
-        with force_polars(True):
-            ops, *_ = optimize(st.as_data_op(self.df))
-        self.assertIsInstance(ops[0], PandasInMemoryFrame)
+
+    def test_polars_pinned_selector_binds_polars_in_memory_frame(self):
+        ops, *_ = optimize(st.as_data_op(self.df), polars_conf())
+        self.assertIsInstance(ops[0], PolarsInMemoryFrame)
 
     def test_default_selector_prefers_pandas_read_csv(self):
         with self._read_csv_ops() as path:
             data = st.as_data_op(path).skb.apply_func(pd.read_csv)
             ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], PandasReadCSV)
-            with force_polars(True):
-                ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
-            self.assertIsInstance(ops[-1], PandasReadCSV)
+
+    def test_polars_pinned_selector_binds_polars_read_csv(self):
+        with self._read_csv_ops() as path:
+            data = st.as_data_op(path).skb.apply_func(pd.read_csv)
+            ops, *_ = optimize(data, polars_conf(dataframe_ops=True))
+            self.assertIsInstance(ops[-1], PolarsReadCSV)
 
     def test_default_selector_prefers_pandas_read_parquet(self):
         with parquet_file(self.df) as path:
             data = st.as_data_op(path).skb.apply_func(pd.read_parquet)
             ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], PandasReadParquet)
-            with force_polars(True):
-                ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
-            self.assertIsInstance(ops[-1], PandasReadParquet)
+
+    def test_polars_pinned_selector_binds_polars_read_parquet(self):
+        with parquet_file(self.df) as path:
+            data = st.as_data_op(path).skb.apply_func(pd.read_parquet)
+            ops, *_ = optimize(data, polars_conf(dataframe_ops=True))
+            self.assertIsInstance(ops[-1], PolarsReadParquet)
 
     def test_npy_is_single_impl(self):
         # np.load yields an ndarray; a single concrete impl serves both backends.
@@ -85,8 +89,7 @@ class TestSourceImplSelection(unittest.TestCase):
             data = st.as_data_op(path).skb.apply_func(np.load)
             ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
             self.assertIsInstance(ops[-1], NumpyLoad)
-            with force_polars(True):
-                ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
+            ops, *_ = optimize(data, polars_conf(dataframe_ops=True))
             self.assertIsInstance(ops[-1], NumpyLoad)
 
     def test_abstract_bases_are_abstract(self):
@@ -119,24 +122,21 @@ class TestSourcesInRegistry(unittest.TestCase):
 
     def test_flag_selector_picks_backend_match(self):
         candidates = list(self.registry.candidates_for(ReadCSV))
-        selector = FlagBasedSelector()
         op = ReadCSV(file_path="x.csv")
-        with force_polars(False):
-            chosen = selector.choose(op, candidates, PlanContext.from_flags())
-        self.assertIs(PandasReadCSV, chosen.impl_class)
-        with force_polars(True):
-            chosen = selector.choose(op, candidates, PlanContext.from_flags())
-        self.assertIs(PolarsReadCSV, chosen.impl_class)
+        ctx = PlanContext.from_flags()
+        for backend, expected in (("pandas", PandasReadCSV),
+                                  ("polars", PolarsReadCSV)):
+            chosen = FlagBasedSelector(backend=backend).choose(op, candidates, ctx)
+            self.assertIs(expected, chosen.impl_class)
 
     def test_flag_selector_falls_back_to_backend_agnostic(self):
         # NumpyLoad's only candidate is backend "numpy"; it is chosen under
         # either frame backend.
         candidates = list(self.registry.candidates_for(NumpyLoad))
-        selector = FlagBasedSelector()
         op = NumpyLoad(file_path="x.npy")
-        for polars in (False, True):
-            with force_polars(polars):
-                chosen = selector.choose(op, candidates, PlanContext.from_flags())
+        ctx = PlanContext.from_flags()
+        for backend in ("pandas", "polars"):
+            chosen = FlagBasedSelector(backend=backend).choose(op, candidates, ctx)
             self.assertIs(NumpyLoad, chosen.impl_class)
 
 
@@ -192,40 +192,108 @@ class TestConcreteSourceProcess(unittest.TestCase):
 
 
 class TestExecutionIsBranchFree(unittest.TestCase):
-    """The backend is fixed at plan time: flipping the flag at run time is a no-op."""
+    """The backend is fixed at plan time, by the selector the plan was built with.
+
+    There is no run-time flag left to flip -- which is the point. What is still
+    worth pinning is that the *same* logical DAG yields two independent plans
+    under two selectors, each keeping its own backend through execution and
+    across repeated runs.
+    """
 
     def setUp(self):
         self.df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
 
-    def test_in_memory_pandas_plan_ignores_runtime_flag(self):
-        ops, *_ = optimize(st.as_data_op(self.df))  # planned as pandas
-        with force_polars(True):                     # flag flipped for execution
-            result = run_plan(ops)
-        self.assertIsInstance(result, pd.DataFrame)
+    def _both_plans(self, dag, conf_kwargs=None):
+        conf_kwargs = conf_kwargs or {}
+        pandas_ops, *_ = optimize(dag, OptConfig(**conf_kwargs))
+        polars_ops, *_ = optimize(dag, polars_conf(**conf_kwargs))
+        return pandas_ops, polars_ops
 
-    def test_default_in_memory_plan_ignores_backend_flag(self):
-        with force_polars(True):
-            ops, *_ = optimize(st.as_data_op(self.df))  # default still plans pandas
-        with force_polars(False):
-            result = run_plan(ops)
-        self.assertIsInstance(result, pd.DataFrame)
+    def test_in_memory_plans_keep_their_own_backend(self):
+        pandas_ops, polars_ops = self._both_plans(st.as_data_op(self.df))
+        self.assertIsInstance(run_plan(pandas_ops), pd.DataFrame)
+        self.assertIsInstance(run_plan(polars_ops), pl.DataFrame)
+        # Re-running either plan is stable: nothing outside the op is consulted.
+        self.assertIsInstance(run_plan(pandas_ops), pd.DataFrame)
+        self.assertIsInstance(run_plan(polars_ops), pl.DataFrame)
 
-    def test_read_csv_pandas_plan_ignores_runtime_flag(self):
+    def test_read_csv_plans_keep_their_own_backend(self):
         with csv_file(self.df) as path:
             data = st.as_data_op(path).skb.apply_func(pd.read_csv)
-            ops, *_ = optimize(data, OptConfig(dataframe_ops=True))  # pandas plan
-            with force_polars(True):
-                result = run_plan(ops)
-        self.assertIsInstance(result, pd.DataFrame)
+            pandas_ops, polars_ops = self._both_plans(
+                data, {"dataframe_ops": True})
+            self.assertIsInstance(run_plan(pandas_ops), pd.DataFrame)
+            self.assertIsInstance(run_plan(polars_ops), pl.DataFrame)
+            self.assertIsInstance(run_plan(pandas_ops), pd.DataFrame)
 
-    def test_default_read_csv_plan_ignores_backend_flag(self):
+
+class TestPolarsReadOptionTranslation(unittest.TestCase):
+    """pandas-spelled read options reach the polars readers and must be rewritten.
+
+    A source op can only ever have been built from ``pd.read_csv`` /
+    ``pd.read_parquet`` (the only readers ``_READ_FORMATS`` recognises), so its
+    options are always in pandas spelling -- polars renames most of them.
+    """
+
+    def setUp(self):
+        self.df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6],
+                                "unused": ["a", "b", "c"]})
+
+    def test_usecols_becomes_columns(self):
         with csv_file(self.df) as path:
-            data = st.as_data_op(path).skb.apply_func(pd.read_csv)
-            with force_polars(True):
-                ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
-            with force_polars(False):
-                result = run_plan(ops)
-        self.assertIsInstance(result, pd.DataFrame)
+            op = PolarsReadCSV(file_path=path, read_kwargs={"usecols": ["x", "y"]})
+            self.assertEqual(["x", "y"], op.process("fit_transform", []).columns)
+
+    def test_sep_becomes_separator(self):
+        with csv_file(self.df, sep=";") as path:
+            op = PolarsReadCSV(file_path=path, read_kwargs={"sep": ";"})
+            self.assertEqual(["x", "y", "unused"],
+                             op.process("fit_transform", []).columns)
+
+    def test_nrows_becomes_n_rows(self):
+        with csv_file(self.df) as path:
+            op = PolarsReadCSV(file_path=path, read_kwargs={"nrows": 2})
+            self.assertEqual(2, len(op.process("fit_transform", [])))
+
+    def test_header_none_becomes_has_header_false(self):
+        with csv_file(self.df, header=False) as path:
+            op = PolarsReadCSV(file_path=path, read_kwargs={"header": None})
+            self.assertEqual(3, len(op.process("fit_transform", [])))
+
+    def test_parquet_columns_pass_through(self):
+        with parquet_file(self.df) as path:
+            op = PolarsReadParquet(file_path=path, read_kwargs={"columns": ["x"]})
+            self.assertEqual(["x"], op.process("fit_transform", []).columns)
+
+    def test_untranslatable_option_fails_at_plan_time(self):
+        # index_col has no polars counterpart. Selection binds the op, and
+        # on_impl_selected rejects it there -- before any data is read.
+        with csv_file(self.df) as path:
+            data = st.as_data_op(path).skb.apply_func(pd.read_csv, index_col=0)
+            with self.assertRaises(ValueError) as caught:
+                optimize(data, polars_conf(dataframe_ops=True))
+        self.assertIn("index_col", str(caught.exception))
+
+    def test_untranslatable_option_is_fine_on_pandas(self):
+        with csv_file(self.df) as path:
+            data = st.as_data_op(path).skb.apply_func(pd.read_csv, index_col=0)
+            ops, *_ = optimize(data, OptConfig(dataframe_ops=True))
+        self.assertIsInstance(ops[-1], PandasReadCSV)
+
+    def test_untranslatable_value_is_rejected(self):
+        # header=2 has no has_header spelling; only the name survives the
+        # plan-time check, so this one is caught when the value is resolved.
+        with csv_file(self.df) as path:
+            op = PolarsReadCSV(file_path=path, read_kwargs={"header": 2})
+            with self.assertRaises(ValueError):
+                op.process("fit_transform", [])
+
+    def test_positional_read_options_are_rejected(self):
+        # polars takes only the path positionally, so a pandas positional
+        # option (pd.read_parquet's `engine`) would bind to something else.
+        op = PolarsReadParquet(file_path="x.parquet", read_args=("pyarrow",))
+        with self.assertRaises(ValueError):
+            op.process("fit_transform", [])
 
 
 if __name__ == "__main__":

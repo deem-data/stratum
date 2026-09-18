@@ -75,10 +75,8 @@ class _Flags:
     explain: tuple[str, ...] = ()
     cse: bool = True
     DEBUG: bool = False
-    force_polars: bool = _env_bool("STRATUM_FORCE_POLARS", False)
     implementation_selector: str = _read_implementation_selector(
         os.getenv("STRATUM_IMPLEMENTATION_SELECTOR", "default"))
-    pandas_query: bool = _env_bool("STRATUM_PANDAS_QUERY", False)
     validate_dag: bool = True
     make_selection_op: bool = True
     make_map_op: bool = True
@@ -100,8 +98,6 @@ def set_config(rust_backend: bool | None = None,
     graph_format: str = "svg",
     explain: bool | str | list[str] | None = None,
     DEBUG: bool | None = None,
-    force_polars: bool = False,
-    pandas_query: bool = False,
     cse: bool = True,
     validate_dag: bool = True,
     make_selection_op: bool = True,
@@ -161,19 +157,12 @@ def set_config(rust_backend: bool | None = None,
         DEBUG: bool, default false
             Enable/disable debug mode.
 
-        force_polars: bool, default false
-            Legacy frame-backend flag. It does not override the configured
-            implementation selector.
-
         implementation_selector: str, default "default"
-            Implementation-selection policy. ``"default"`` prefers pandas/
-            sklearn-skrub; ``"greedy"`` prefers efficient backends
-            (rust/polars) first.
-
-        pandas_query: bool, default false
-            Evaluate MASK selections on the pandas backend via ``DataFrame.query()``
-            when the predicate is expressible as a query string (no OperandLeaf / str
-            accessor); otherwise fall back to boolean-mask indexing.
+            Implementation-selection policy, and with it the dataframe backend:
+            ``"default"`` prefers pandas/sklearn-skrub; ``"greedy"`` prefers
+            efficient backends (rust/polars) first. This is the only user-facing
+            way to put a pipeline on polars -- the backend is a property of the
+            selector, not a flag beside it.
     """
     implementation_selector = _read_implementation_selector(implementation_selector)
 
@@ -200,13 +189,8 @@ def set_config(rust_backend: bool | None = None,
     if DEBUG is not None:
         FLAGS.DEBUG = bool(DEBUG)
         os.environ["STRATUM_DEBUG"] = "1" if FLAGS.DEBUG else "0"
-    if force_polars is not None:
-        FLAGS.force_polars = bool(force_polars)
-        os.environ["STRATUM_FORCE_POLARS"] = "1" if FLAGS.force_polars else "0"
     FLAGS.implementation_selector = implementation_selector
     os.environ["STRATUM_IMPLEMENTATION_SELECTOR"] = implementation_selector
-    FLAGS.pandas_query = bool(pandas_query)
-    os.environ["STRATUM_PANDAS_QUERY"] = "1" if FLAGS.pandas_query else "0"
     # TODO: Select between multiple schedulers in the future.
     FLAGS.scheduler = bool(scheduler)
     FLAGS.cse = bool(cse)
@@ -241,5 +225,11 @@ def config(**kwargs):
     try:
         yield
     finally:
-        set_config(**original)
+        # Restore by writing the snapshot back rather than replaying it through
+        # `set_config`: `get_config` dumps every FLAGS field, so a replay only
+        # works while the two stay in exact lockstep, and silently breaks every
+        # `with config(...)` block the moment a field is not a set_config
+        # parameter.
+        for name, value in original.items():
+            setattr(FLAGS, name, value)
         stratum_logger.setLevel(prev_level)

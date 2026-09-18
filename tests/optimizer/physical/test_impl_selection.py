@@ -44,9 +44,9 @@ from stratum.optimizer.physical._transform_execs import StringEncoderOp
 from stratum.optimizer.logical._ops import Op, ValueOp
 
 
-def _ctx(backend="pandas", rust=False):
-    return PlanContext(backend=backend, pandas_query=False, rechunk=True,
-                       parallelism=1, rust_backend=rust, allow_patch=True)
+def _ctx(rust=False, allow_patch=True):
+    return PlanContext(pandas_query=False, rechunk=True, parallelism=1,
+                       rust_backend=rust, allow_patch=allow_patch)
 
 
 def _impl(op_type, backend, supports=lambda op, ctx: True, impl_class=None):
@@ -76,12 +76,39 @@ class TestFlagBasedSelector(unittest.TestCase):
         selector = FlagBasedSelector()
         rust = _impl(DummyOp, "rust")
         generic = _impl(DummyOp, "sklearn-skrub")
-        ctx = PlanContext(backend="pandas", pandas_query=False, rechunk=True,
+        ctx = PlanContext(pandas_query=False, rechunk=True,
                           parallelism=1, rust_backend=True, allow_patch=False)
         self.assertIs(generic, selector.choose(DummyOp(), [rust, generic], ctx))
 
     def test_no_candidates_returns_none(self):
         self.assertIsNone(FlagBasedSelector().choose(DummyOp(), [], _ctx()))
+
+    def test_backend_is_selector_state_not_plan_context(self):
+        pandas = _impl(DummyOp, "pandas")
+        polars = _impl(DummyOp, "polars")
+        candidates = [pandas, polars]
+        # One plan context, two selectors, two different binds: the backend
+        # travels with the selector, which is what makes it selectable at all.
+        self.assertIs(pandas, FlagBasedSelector().choose(
+            DummyOp(), candidates, _ctx()))
+        self.assertIs(polars, FlagBasedSelector(backend="polars").choose(
+            DummyOp(), candidates, _ctx()))
+
+    def test_backend_agnostic_impl_serves_either_backend(self):
+        sklearn = _impl(DummyOp, "sklearn-skrub")
+        numpy = _impl(DummyOp, "numpy")
+        for backend in ("pandas", "polars"):
+            selector = FlagBasedSelector(backend=backend)
+            self.assertIs(sklearn, selector.choose(DummyOp(), [sklearn], _ctx()))
+            self.assertIs(numpy, selector.choose(DummyOp(), [numpy], _ctx()))
+
+    def test_pin_is_strict_when_no_candidate_matches(self):
+        # No impl on the pinned backend and none backend-agnostic: the op is
+        # left unbound rather than run on the other backend. select_implementations
+        # then fails the plan for an abstract op (see TestAbstractOpGuard).
+        selector = FlagBasedSelector(backend="polars")
+        self.assertIsNone(
+            selector.choose(DummyOp(), [_impl(DummyOp, "pandas")], _ctx()))
 
 
 class TestDefaultImplementationSelector(unittest.TestCase):
@@ -98,7 +125,7 @@ class TestDefaultImplementationSelector(unittest.TestCase):
             with st.config(implementation_selector="unknown"):
                 pass
 
-    def test_preference_order_is_independent_of_plan_backend(self):
+    def test_preference_order(self):
         selector = DefaultImplementationSelector()
         pandas = _impl(DummyOp, "pandas")
         polars = _impl(DummyOp, "polars")
@@ -107,7 +134,7 @@ class TestDefaultImplementationSelector(unittest.TestCase):
         rust = _impl(DummyOp, "rust")
 
         self.assertIs(pandas, selector.choose(
-            DummyOp(), [rust, polars, numpy, sklearn, pandas], _ctx("polars")))
+            DummyOp(), [rust, polars, numpy, sklearn, pandas], _ctx()))
         self.assertIs(sklearn, selector.choose(
             DummyOp(), [rust, polars, numpy, sklearn], _ctx()))
         self.assertIs(numpy, selector.choose(
@@ -130,7 +157,7 @@ class TestGreedyImplementationSelector(unittest.TestCase):
                 get_implementation_selector("greedy"),
                 GreedyImplementationSelector)
 
-    def test_preference_order_is_independent_of_plan_backend(self):
+    def test_preference_order(self):
         selector = GreedyImplementationSelector()
         pandas = _impl(DummyOp, "pandas")
         polars = _impl(DummyOp, "polars")
@@ -139,7 +166,7 @@ class TestGreedyImplementationSelector(unittest.TestCase):
         rust = _impl(DummyOp, "rust")
 
         self.assertIs(rust, selector.choose(
-            DummyOp(), [pandas, sklearn, numpy, polars, rust], _ctx("pandas")))
+            DummyOp(), [pandas, sklearn, numpy, polars, rust], _ctx()))
         self.assertIs(polars, selector.choose(
             DummyOp(), [pandas, sklearn, numpy, polars], _ctx()))
         self.assertIs(numpy, selector.choose(
