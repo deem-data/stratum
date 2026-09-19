@@ -710,5 +710,64 @@ def test_notna_is_foldable_in_selection_predicate():
     assert 2 == len(ops)
 
 
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_folded_fillna_fills_nan_on_derived_operand(use_polars):
+    # The operand of a folded fillna is usually derived (a / b), and a pl.Expr
+    # carries no dtype of its own: the NaN half used to be skipped for every
+    # operand shape the fast dtype resolver could not name (#216).
+    frame = pd.DataFrame({"a": [1.0, 0.0, 3.0], "b": [2.0, 0.0, 4.0]})
+    expr = ColumnMethodExpr(BinOpExpr(operator.truediv, Col("a"), Col("b")),
+                            "fillna", (-1.0,))
+    op = AssignMapOp(entries={"r": expr})
+    input_frame = pl.from_pandas(frame) if use_polars else frame
+    with force_polars(use_polars):
+        result = run_op(op, input_frame)
+    np.testing.assert_allclose(
+        np.asarray(list(result["r"]), dtype=float), [0.5, -1.0, 0.75])
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_folded_notna_reports_nan_on_derived_operand(use_polars):
+    # pandas reports NaN as missing on derived operands too; polars used to
+    # answer True for NaN whenever the operand dtype was unknown (#216).
+    frame = pd.DataFrame({"a": [1.0, 0.0, 3.0], "b": [2.0, 0.0, 4.0]})
+    expr = ColumnMethodExpr(BinOpExpr(operator.truediv, Col("a"), Col("b")),
+                            "notna")
+    op = AssignMapOp(entries={"r": expr})
+    input_frame = pl.from_pandas(frame) if use_polars else frame
+    with force_polars(use_polars):
+        result = run_op(op, input_frame)
+    assert [True, False, True] == list(result["r"])
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_folded_fillna_fills_nan_after_a_chained_method(use_polars):
+    # A chained method call is exactly the shape the fast dtype resolver
+    # cannot name; the schema probe has to answer for it (#216).
+    frame = pd.DataFrame({"x": [0.0, np.nan, 3.0]})
+    inner = ColumnMethodExpr(Col("x"), "clip", (1.0, 1.5))
+    expr = ColumnMethodExpr(inner, "fillna", (0.0,))
+    op = AssignMapOp(entries={"r": expr})
+    input_frame = pl.from_pandas(frame) if use_polars else frame
+    with force_polars(use_polars):
+        result = run_op(op, input_frame)
+    np.testing.assert_allclose(
+        np.asarray(list(result["r"]), dtype=float), [1.0, 0.0, 1.5])
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_where_series_branch_promotes_fill_value(use_polars):
+    # pandas promotes to the supertype of column and fill value; the polars
+    # Series branch pinned `other` to the column dtype and raised on an int
+    # column with a float fill (#216).
+    op = ColumnMethodOp(method="where", args=(OperandRef(1), 1.5))
+    column = pl.Series([1, 2, 3]) if use_polars else pd.Series([1, 2, 3])
+    condition = pl.Series([True, False, True]) if use_polars \
+        else pd.Series([True, False, True])
+    with force_polars(use_polars):
+        result = run_op(op, column, condition)
+    assert [1.0, 1.5, 3.0] == list(result)
+
+
 if __name__ == "__main__":
     unittest.main()

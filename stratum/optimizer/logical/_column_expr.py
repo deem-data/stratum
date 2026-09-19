@@ -401,11 +401,9 @@ def _eval_expr_value(value, ctx, backend):
 
 
 def _polars_expr_dtype(expr, ctx):
-    # FIXME(#216): this resolves only the two shapes it pattern-matches and returns
-    # None for every other operand, which is what makes the NaN handling in
-    # _polars_fillna / _polars_notna quietly backend-dependent. Asking polars
-    # for the expression's own output dtype (a schema-only resolve, e.g.
-    # ctx.frame.lazy().select(expr).collect_schema()) would answer for any expr.
+    # Fast paths for the two operand shapes whose dtype is known without
+    # asking polars; everything else falls through to the schema-only probe
+    # in ``to_polars``.
     if isinstance(expr, Col) and isinstance(ctx.frame, pl.DataFrame):
         return ctx.frame.schema.get(expr.name)
     if isinstance(expr, ColumnMethodExpr) and expr.method == "astype":
@@ -413,6 +411,32 @@ def _polars_expr_dtype(expr, ctx):
         if not isinstance(dtype, ColumnExpr):
             return polars_dtype(dtype)
     return None
+
+
+def _probe_expr_dtype(expr, ctx):
+    """Schema-only output dtype of a derived operand, or None (#216).
+
+    A ``pl.Expr`` carries no dtype of its own, so the NaN handling in
+    ``_polars_fillna`` / ``_polars_notna`` needs polars to say what the
+    expression produces. Selecting the operand against an empty projection of
+    the frame is a schema resolve: no data is read. Returns None when the
+    operand does not resolve against the frame, which leaves the evaluators
+    with the null-only (NaN-blind) behavior they had before #216.
+    """
+    if not isinstance(expr, pl.Expr):
+        return None
+    frame = ctx.frame
+    if isinstance(frame, pl.DataFrame):
+        lazy = frame.lazy()
+    elif isinstance(frame, pl.LazyFrame):
+        lazy = frame
+    else:
+        return None
+    probe = "_stratum_expr_dtype_probe"
+    try:
+        return lazy.select(expr.alias(probe)).collect_schema().get(probe)
+    except Exception:
+        return None
 
 
 class ColumnMethodExpr(ColumnExpr):
@@ -452,6 +476,8 @@ class ColumnMethodExpr(ColumnExpr):
         args = _eval_expr_value(self.args, ctx, "polars")
         kwargs = _eval_expr_value(self.kwargs, ctx, "polars")
         dtype = _polars_expr_dtype(self.operand, ctx)
+        if dtype is None:
+            dtype = _probe_expr_dtype(obj, ctx)
         return spec.polars_eval(obj, list(args), kwargs, dtype)
 
     def iter_operand_refs(self):
