@@ -44,6 +44,7 @@ test = [
     "coverage[toml]",
     "lightgbm>=4.6.0",
     "xgboost>=3.1.1",
+    "catboost>=1.2.10",
 ]
 # torch is only needed by tests/application/test_ttt_task.py, and which build of
 # it you want depends on the machine, so it rides in its own extra rather than

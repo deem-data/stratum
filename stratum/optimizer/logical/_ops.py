@@ -331,7 +331,11 @@ class BaseEstimatorOp(Op):
         y = (inputs[self.y.k] if isinstance(self.y, OperandRef) else self.y) if fitting else None
         estm = self.original_estimator if fitting else self.estimator
         place_holders = {name: inputs[ref.k] for name, ref in self.param_refs.items()}
-        estm.set_params(**place_holders)
+        # Graph-fed hyperparameters configure the estimator before fitting. In a
+        # response pass ``estm`` is already fitted, and CatBoost rejects any
+        # ``set_params`` call at that point (even an empty one).
+        if fitting and place_holders:
+            estm.set_params(**place_holders)
         cols = inputs[self.cols.k] if isinstance(self.cols, OperandRef) else self.cols
         # A response pass never fits, so (like skrub) the fit group is left unevaluated.
         # Note the difference from skrub: skrub also never *computes* what that group
