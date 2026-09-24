@@ -249,6 +249,7 @@ def build_default_physical_registry() -> PhysicalRegistry:
     # standalone registry construction does not depend on optimizer imports.
     from stratum.optimizer.physical import _source_execs  # noqa: F401
     from stratum.optimizer.physical import _transform_execs  # noqa: F401
+    from stratum.optimizer.physical import _predictor_execs  # noqa: F401
     from stratum.optimizer.physical import _concat_execs  # noqa: F401
     from stratum.optimizer.physical import _join_execs  # noqa: F401
     from stratum.optimizer.physical import _aggregation_execs  # noqa: F401

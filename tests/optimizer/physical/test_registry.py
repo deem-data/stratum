@@ -20,6 +20,18 @@ from stratum.optimizer.physical._source_execs import (
     PolarsReadCSV,
     PolarsReadParquet,
 )
+from stratum.optimizer.physical._predictor_execs import (
+    CatBoostOp,
+    ElasticNetOp,
+    LassoOp,
+    LightGBMOp,
+    LinearRegressionOp,
+    LogisticRegressionOp,
+    RandomForestOp,
+    RidgeOp,
+    SGDOp,
+    XGBoostOp,
+)
 from stratum.optimizer.physical._transform_execs import (RustOneHotEncoder,
                                                         RustStringEncoder,
                                                         SkrubStringEncoder,
@@ -53,6 +65,13 @@ def test_default_registry_discovers_registered_operator_types():
     # The migrated StringEncoder physical op carries both a skrub and a rust impl.
     assert len(registry.candidates_for(StringEncoderOp, backend_name="rust")) == 1
     assert len(registry.candidates_for(StringEncoderOp, backend_name="sklearn-skrub")) == 1
+
+    # Each migrated predictor family carries exactly its sklearn-skrub reference impl.
+    for op_type in (RandomForestOp, LinearRegressionOp, RidgeOp, LassoOp,
+                    ElasticNetOp, LogisticRegressionOp, SGDOp, LightGBMOp,
+                    XGBoostOp, CatBoostOp):
+        (candidate,) = registry.candidates_for(op_type)
+        assert candidate.backend_name == "sklearn-skrub"
 
     source_candidates = {
         ReadCSV: {PandasReadCSV, PolarsReadCSV},

@@ -22,6 +22,7 @@ from .physical._impl_selection import (ImplementationSelector, get_implementatio
 # Importing the physical exec modules and their lowering rules.
 from .physical import _source_execs  # noqa: F401
 from .physical import _transform_execs  # noqa: F401
+from .physical import _predictor_execs  # noqa: F401
 from stratum.frontend._skrub_graph import build_graph
 import logging
 from stratum._config import FLAGS

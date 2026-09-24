@@ -110,3 +110,6 @@ graphs/
 
 # buffer pool spill directory
 **/.stratum/
+
+# catboost training logs (written to the cwd on every fit)
+catboost_info/
