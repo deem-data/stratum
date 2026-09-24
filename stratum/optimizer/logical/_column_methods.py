@@ -33,6 +33,9 @@ class ColumnMethodSpec:
     pandas_eval: MethodEvaluator
     polars_eval: MethodEvaluator
     supports_frame: bool = False
+    #: ``polars_eval`` changes behavior with the operand's dtype, which a folded
+    #: expression only knows for a bare ``Col`` or a literal ``astype`` operand.
+    reads_operand_dtype: bool = False
 
 
 def _is_ref_or_scalar(value) -> bool:
@@ -206,13 +209,15 @@ def _polars_notna(obj, args, kwargs, dtype=None):
     return result
 
 
-def _spec(name, validate, polars_eval, *, supports_frame=False):
+def _spec(name, validate, polars_eval, *, supports_frame=False,
+          reads_operand_dtype=False):
     return ColumnMethodSpec(
         name=name,
         validate=validate,
         pandas_eval=_pandas_method(name),
         polars_eval=polars_eval,
         supports_frame=supports_frame,
+        reads_operand_dtype=reads_operand_dtype,
     )
 
 
@@ -220,11 +225,11 @@ COLUMN_METHOD_SPECS = {
     spec.name: spec
     for spec in (
         _spec("astype", _validate_astype, _polars_astype, supports_frame=True),
-        _spec("fillna", _validate_fillna, _polars_fillna),
+        _spec("fillna", _validate_fillna, _polars_fillna, reads_operand_dtype=True),
         _spec("clip", _validate_clip, _polars_clip),
         _spec("where", _validate_where, _polars_where),
         _spec("isin", _validate_isin, _polars_isin),
-        _spec("notna", _validate_notna, _polars_notna),
+        _spec("notna", _validate_notna, _polars_notna, reads_operand_dtype=True),
     )
 }
 

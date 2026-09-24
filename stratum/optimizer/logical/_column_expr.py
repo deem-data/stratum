@@ -11,15 +11,21 @@ referenced through an :class:`OperandLeaf`.
 
 Evaluation goes through an :class:`EvalContext` carrying the source frame, the
 op's resolved inputs and the execution mode.
+
+Trees may share sub-expressions by identity (a DAG). Structural walks
+(:func:`iter_postorder`, :func:`rewrite_leaves`, operand-ref iteration and
+remapping) visit every shared node once, so their cost is linear in the number
+of distinct nodes rather than in the size of the unfolded tree.
 """
 from __future__ import annotations
+import math
 import operator
+from typing import Callable, Iterable, Mapping
 
 import polars as pl
 import pandas as pd
 
 from stratum.optimizer.logical._ops import OperandRef, BinOp, UnaryOp, GetItemOp, Op
-from stratum.optimizer.logical._base import config_key
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, get_column_method_spec, polars_dtype)
 from stratum.optimizer.logical._projection_ops import (
@@ -45,27 +51,50 @@ class EvalContext:
     ``frame`` is evaluated against (the op's primary operand); ``inputs`` are the
     op's resolved input values (read by :class:`OperandLeaf`); ``mode`` is
     ``fit_transform`` or ``predict`` (unused by the current stateless grammar).
+    ``temps`` holds, per step of a planned map program, what a kernel exposes
+    to ``TempRef``: the evaluated value on pandas, a column reference into the
+    lazy plan on polars. It is ``None`` outside such kernels.
     """
-    __slots__ = ("frame", "inputs", "mode")
+    __slots__ = ("frame", "inputs", "mode", "temps")
 
-    def __init__(self, frame, inputs, mode: str = "fit_transform"):
+    def __init__(self, frame, inputs, mode: str = "fit_transform", temps=None):
         self.frame = frame
         self.inputs = inputs
         self.mode = mode
+        self.temps = temps
 
 
 class ColumnExpr:
     """Base class for column-expression nodes."""
-    __slots__ = ()
+    __slots__ = ("_hash_cache",)
 
     def _key(self):
         raise NotImplementedError
 
     def __eq__(self, other):
+        if self is other:
+            return True
         return type(self) is type(other) and self._key() == other._key()
 
     def __hash__(self):
-        return hash((type(self).__name__, self._key()))
+        # Cached: the key embeds the children, so an uncached hash re-walks the
+        # whole sub-DAG on every lookup.
+        try:
+            return self._hash_cache
+        except AttributeError:
+            h = hash((type(self).__name__, self._key()))
+            self._hash_cache = h
+            return h
+
+    def children(self) -> tuple["ColumnExpr", ...]:
+        """Direct sub-expressions, in a fixed order matching :meth:`with_children`."""
+        raise TypeError(
+            f"ColumnExpr node {type(self).__name__} does not declare its children")
+
+    def with_children(self, children: tuple["ColumnExpr", ...]) -> "ColumnExpr":
+        """Return a copy of this node with ``children`` replacing :meth:`children`."""
+        raise TypeError(
+            f"ColumnExpr node {type(self).__name__} does not declare its children")
 
     # TODO we should move this to the physical operator selection later
     def to_pandas(self, ctx: EvalContext):
@@ -85,15 +114,34 @@ class ColumnExpr:
         return None
 
     def iter_operand_refs(self):
-        """Yield all referenced ``OperandRef`` objects."""
-        return iter(())
+        """Yield the ``OperandRef`` of every distinct ``OperandLeaf`` node."""
+        for node in iter_postorder([self]):
+            if isinstance(node, OperandLeaf):
+                yield node.ref
 
     def remap_operand_refs(self, mapping: dict) -> "ColumnExpr":
-        """Return a copy with operand references remapped."""
+        """Return a copy with operand references remapped (``self`` if unchanged)."""
+        def remap(leaf):
+            if isinstance(leaf, OperandLeaf):
+                return OperandLeaf(OperandRef(mapping[leaf.ref.k]))
+            return None
+        return rewrite_leaves([self], remap)[0]
+
+
+class _Leaf(ColumnExpr):
+    """A node without sub-expressions."""
+    __slots__ = ()
+
+    def children(self):
+        return ()
+
+    def with_children(self, children):
+        if children:
+            raise TypeError(f"{type(self).__name__} has no children")
         return self
 
 
-class Col(ColumnExpr):
+class Col(_Leaf):
     """Reference to a source-frame column."""
     __slots__ = ("name",)
 
@@ -117,7 +165,39 @@ class Col(ColumnExpr):
         return f"`{self.name}`"
 
 
-class Const(ColumnExpr):
+def _scalar_key(value):
+    """Key of a hashable literal that tells apart values Python considers equal.
+
+    1 == 1.0 == True and 0.0 == -0.0 compare equal in Python but give different
+    result dtypes / signs, so the type and the float sign are part of the key.
+    """
+    if isinstance(value, float):
+        return (type(value), value, math.copysign(1.0, value))
+    return (type(value), value)
+
+
+def _literal_key(value):
+    """Hashable key of a node's literal arguments, typed like :func:`_scalar_key`.
+
+    Nested expressions are keyed by themselves, containers are recursed into and
+    unhashable leaves fall back to identity.
+    """
+    if isinstance(value, ColumnExpr):
+        return value
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_literal_key(v) for v in value))
+    if isinstance(value, dict):
+        return ("__dict__", frozenset((k, _literal_key(v)) for k, v in value.items()))
+    if isinstance(value, (set, frozenset)):
+        return ("__set__", frozenset(_literal_key(v) for v in value))
+    try:
+        hash(value)
+    except TypeError:
+        return ("__id__", id(value))
+    return _scalar_key(value)
+
+
+class Const(_Leaf):
     """Literal scalar value."""
     __slots__ = ("value",)
 
@@ -125,11 +205,12 @@ class Const(ColumnExpr):
         self.value = value
 
     def _key(self):
+        value = self.value
         try:
-            hash(self.value)
+            hash(value)
         except TypeError:
-            return ("__id__", id(self.value))
-        return self.value
+            return ("__id__", id(value))
+        return _scalar_key(value)
 
     def __repr__(self):
         return f"Const({self.value!r})"
@@ -148,7 +229,7 @@ class Const(ColumnExpr):
         return f"@{name}"
 
 
-class OperandLeaf(ColumnExpr):
+class OperandLeaf(_Leaf):
     """Reference to an operator input that was not folded."""
     __slots__ = ("ref",)
 
@@ -166,12 +247,6 @@ class OperandLeaf(ColumnExpr):
 
     def to_polars(self, ctx):
         return ctx.inputs[self.ref.k]
-
-    def iter_operand_refs(self):
-        yield self.ref
-
-    def remap_operand_refs(self, mapping):
-        return OperandLeaf(OperandRef(mapping[self.ref.k]))
 
 
 class BinOpExpr(ColumnExpr):
@@ -205,13 +280,12 @@ class BinOpExpr(ColumnExpr):
             return None
         return f"({left} {sym} {right})"
 
-    def iter_operand_refs(self):
-        yield from self.left.iter_operand_refs()
-        yield from self.right.iter_operand_refs()
+    def children(self):
+        return (self.left, self.right)
 
-    def remap_operand_refs(self, mapping):
-        return BinOpExpr(self.op, self.left.remap_operand_refs(mapping),
-                         self.right.remap_operand_refs(mapping))
+    def with_children(self, children):
+        left, right = children
+        return BinOpExpr(self.op, left, right)
 
 
 class UnaryOpExpr(ColumnExpr):
@@ -243,11 +317,12 @@ class UnaryOpExpr(ColumnExpr):
             return None
         return f"({sym}{operand})"
 
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
+    def children(self):
+        return (self.operand,)
 
-    def remap_operand_refs(self, mapping):
-        return UnaryOpExpr(self.op, self.operand.remap_operand_refs(mapping))
+    def with_children(self, children):
+        (operand,) = children
+        return UnaryOpExpr(self.op, operand)
 
 
 class StrExpr(ColumnExpr):
@@ -261,7 +336,8 @@ class StrExpr(ColumnExpr):
         self.kwargs = kwargs or {}
 
     def _key(self):
-        return (self.operand, self.method, self.args, frozenset(self.kwargs.items()))
+        return (self.operand, self.method, _literal_key(self.args),
+                _literal_key(self.kwargs))
 
     def __repr__(self):
         inner = ", ".join([repr(self.operand)]
@@ -278,12 +354,12 @@ class StrExpr(ColumnExpr):
         name = STR_POLARS_METHODS.get(self.method, self.method)
         return getattr(obj.str, name)(*self.args, **self.kwargs)
 
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
+    def children(self):
+        return (self.operand,)
 
-    def remap_operand_refs(self, mapping):
-        return StrExpr(self.operand.remap_operand_refs(mapping),
-                       self.method, self.args, self.kwargs)
+    def with_children(self, children):
+        (operand,) = children
+        return StrExpr(operand, self.method, self.args, self.kwargs)
 
 
 class DtExpr(ColumnExpr):
@@ -315,11 +391,12 @@ class DtExpr(ColumnExpr):
         name = GetAttrProjectionOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
         return getattr(obj.dt, name)()
 
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
+    def children(self):
+        return (self.operand,)
 
-    def remap_operand_refs(self, mapping):
-        return DtExpr(self.operand.remap_operand_refs(mapping), self.attr)
+    def with_children(self, children):
+        (operand,) = children
+        return DtExpr(operand, self.attr)
 
 
 class DatetimeExpr(ColumnExpr):
@@ -336,7 +413,7 @@ class DatetimeExpr(ColumnExpr):
         self.kwargs = kwargs or {}
 
     def _key(self):
-        return (self.operand, self.args, frozenset(self.kwargs.items()))
+        return (self.operand, _literal_key(self.args), _literal_key(self.kwargs))
 
     def __repr__(self):
         return f"to_datetime({self.operand!r})"
@@ -355,34 +432,90 @@ class DatetimeExpr(ColumnExpr):
         # Polars string namespace only accepts string input.
         return obj.str.to_datetime(**translated)
 
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
+    def children(self):
+        return (self.operand,)
 
-    def remap_operand_refs(self, mapping):
-        return DatetimeExpr(self.operand.remap_operand_refs(mapping),
-                            self.args, self.kwargs)
+    def with_children(self, children):
+        (operand,) = children
+        return DatetimeExpr(operand, self.args, self.kwargs)
 
 
-def _iter_value_refs(value):
+# --- DAG walks -----------------------------------------------------------------
+
+def iter_postorder(roots: Iterable[ColumnExpr]) -> list[ColumnExpr]:
+    """Return every distinct node reachable from ``roots``, children first.
+
+    Nodes are deduplicated by identity, so a sub-expression shared by several
+    parents appears once. Iterative, so deep towers do not hit the recursion
+    limit.
+    """
+    order: list[ColumnExpr] = []
+    seen: set[int] = set()
+    for root in roots:
+        stack = [(root, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                order.append(node)
+                continue
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            stack.append((node, True))
+            stack.extend((child, False) for child in reversed(node.children()))
+    return order
+
+
+def rewrite_leaves(roots: list[ColumnExpr],
+                   rewrite: Callable[[ColumnExpr], ColumnExpr | None],
+                   memo: dict[int, ColumnExpr] | None = None) -> list[ColumnExpr]:
+    """Rebuild ``roots`` bottom-up, replacing each leaf ``x`` by ``rewrite(x)``.
+
+    ``rewrite`` returns the replacement, or ``None`` to keep the leaf.
+    Replacements are inserted as-is and not walked. Unchanged sub-DAGs keep
+    their identity and shared nodes are rebuilt once, so sharing in the input
+    carries over to the output. Pass the same ``memo`` across calls to keep
+    sharing between separately rewritten roots.
+    """
+    if memo is None:
+        memo = {}
+    for node in iter_postorder(roots):
+        if id(node) in memo:
+            continue
+        kids = node.children()
+        if not kids:
+            replacement = rewrite(node)
+            memo[id(node)] = node if replacement is None else replacement
+            continue
+        new_kids = tuple(memo[id(c)] for c in kids)
+        unchanged = all(a is b for a, b in zip(kids, new_kids))
+        memo[id(node)] = node if unchanged else node.with_children(new_kids)
+    return [memo[id(root)] for root in roots]
+
+
+def _collect_value_exprs(value, found: list) -> None:
+    """Append every ``ColumnExpr`` nested in ``value`` to ``found``, in order."""
     if isinstance(value, ColumnExpr):
-        yield from value.iter_operand_refs()
+        found.append(value)
     elif isinstance(value, (list, tuple)):
         for item in value:
-            yield from _iter_value_refs(item)
+            _collect_value_exprs(item, found)
     elif isinstance(value, dict):
         for item in value.values():
-            yield from _iter_value_refs(item)
+            _collect_value_exprs(item, found)
 
 
-def _remap_expr_value(value, mapping):
+def _replace_value_exprs(value, replacements):
+    """Rebuild ``value`` taking its nested expressions from ``replacements``,
+    in :func:`_collect_value_exprs` order."""
     if isinstance(value, ColumnExpr):
-        return value.remap_operand_refs(mapping)
+        return next(replacements)
     if isinstance(value, tuple):
-        return tuple(_remap_expr_value(item, mapping) for item in value)
+        return tuple(_replace_value_exprs(item, replacements) for item in value)
     if isinstance(value, list):
-        return [_remap_expr_value(item, mapping) for item in value]
+        return [_replace_value_exprs(item, replacements) for item in value]
     if isinstance(value, dict):
-        return {key: _remap_expr_value(item, mapping)
+        return {key: _replace_value_exprs(item, replacements)
                 for key, item in value.items()}
     return value
 
@@ -415,6 +548,17 @@ def _polars_expr_dtype(expr, ctx):
     return None
 
 
+def has_static_polars_dtype(expr: ColumnExpr) -> bool:
+    """Whether :func:`_polars_expr_dtype` can resolve ``expr``'s dtype from its
+    shape alone: a bare ``Col`` or an ``astype`` with a literal dtype."""
+    if isinstance(expr, Col):
+        return True
+    if isinstance(expr, ColumnMethodExpr) and expr.method == "astype":
+        dtype = expr.args[0] if expr.args else expr.kwargs.get("dtype")
+        return not isinstance(dtype, ColumnExpr)
+    return False
+
+
 class ColumnMethodExpr(ColumnExpr):
     """A registry-backed, row-local Series method call."""
 
@@ -430,8 +574,8 @@ class ColumnMethodExpr(ColumnExpr):
         return (
             self.operand,
             self.method,
-            config_key(self.args),
-            config_key(self.kwargs),
+            _literal_key(self.args),
+            _literal_key(self.kwargs),
         )
 
     def __repr__(self):
@@ -454,18 +598,26 @@ class ColumnMethodExpr(ColumnExpr):
         dtype = _polars_expr_dtype(self.operand, ctx)
         return spec.polars_eval(obj, list(args), kwargs, dtype)
 
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
-        yield from _iter_value_refs(self.args)
-        yield from _iter_value_refs(self.kwargs)
+    @property
+    def reads_operand_dtype(self) -> bool:
+        """Whether the polars result depends on the operand's dtype.
 
-    def remap_operand_refs(self, mapping):
-        return ColumnMethodExpr(
-            self.operand.remap_operand_refs(mapping),
-            self.method,
-            _remap_expr_value(self.args, mapping),
-            _remap_expr_value(self.kwargs, mapping),
-        )
+        ``_polars_expr_dtype`` resolves it only for a bare ``Col`` or a literal
+        ``astype`` operand, so rewrites must not replace such an operand with
+        anything else.
+        """
+        return get_column_method_spec(self.method).reads_operand_dtype
+
+    def children(self):
+        found = [self.operand]
+        _collect_value_exprs((self.args, self.kwargs), found)
+        return tuple(found)
+
+    def with_children(self, children):
+        replacements = iter(children)
+        operand = next(replacements)
+        args, kwargs = _replace_value_exprs((self.args, self.kwargs), replacements)
+        return ColumnMethodExpr(operand, self.method, args, kwargs)
 
 
 # --- Conversion: op subgraph -> ColumnExpr -----------------------------------
@@ -713,3 +865,18 @@ def fold_column_expr(root_node: Op, src: Op, root_consumer: Op):
     folder = _Folder(src)
     expr = folder.fold(root_node, root_consumer)
     return expr, folder.absorbed, folder.leaf_ops
+
+
+def substitute_cols(expr: ColumnExpr, bindings: Mapping[str, ColumnExpr],
+                    memo: dict[int, ColumnExpr] | None = None) -> ColumnExpr:
+    """Replace ``Col(name)`` with ``bindings[name]`` when present.
+
+    Binding values are already source-relative and are not re-walked, which
+    preserves simultaneous-assign semantics inside one original map. Bindings
+    are reused by identity, so fused towers share prefixes instead of
+    deep-cloning. Rewriting several expressions against the same bindings with
+    one shared ``memo`` keeps the sub-expressions they share shared.
+    """
+    def bind(leaf):
+        return bindings.get(leaf.name) if isinstance(leaf, Col) else None
+    return rewrite_leaves([expr], bind, memo)[0]

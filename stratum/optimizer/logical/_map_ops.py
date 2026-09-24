@@ -3,9 +3,15 @@
 A MapOp computes new columns of one source frame from backend-agnostic
 :class:`~stratum.optimizer.logical._column_expr.ColumnExpr` trees. The grammar is
 restricted to natively-lazy computations (arithmetic, boolean logic,
-``.str``/``.dt`` accessors, datetime parsing); on polars all entries compile
-into one ``with_columns`` kernel. Anything outside the grammar stays in the
-graph and feeds the map through an ``OperandLeaf`` input.
+``.str``/``.dt`` accessors, datetime parsing). Anything outside the grammar
+stays in the graph and feeds the map through an ``OperandLeaf`` input.
+
+Physical kernels
+(:mod:`stratum.optimizer.physical._map_execs`) compile the entries into a
+:class:`~stratum.optimizer.physical._map_program.MapProgram` so shared
+sub-expressions evaluate once. On polars that is one ``with_columns`` when
+there are no shared nodes, or a leveled lazy plan (one ``with_columns`` per
+step level, then a final assign and a single ``collect``) when there are.
 
 :class:`AssignMapOp` -- from ``df.assign(...)`` -- is the only map kind so far:
 named, series-valued entries, with input columns passing through.

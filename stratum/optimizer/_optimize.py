@@ -13,6 +13,7 @@ from .logical._split_ops import SplitOutput
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
 from .logical._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
+from ._dataframe_rewrites import dataframe_rewrites, DataframeRewritesConfig
 from ._linearization import linearize_dag
 from ._fit_pass_planning import mark_fit_dead_ops
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
@@ -74,6 +75,8 @@ class OptConfig():
         algebraic_rewrites: bool = True,
         algebraic_rewrite_config: AlgebraicRewritesConfig | None = None,
         propagate_schema: bool = True,
+        dataframe_rewrites: bool = True,
+        dataframe_rewrite_config: DataframeRewritesConfig | None = None,
     ):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
@@ -84,6 +87,10 @@ class OptConfig():
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
         self.propagate_schema = propagate_schema
+        self.dataframe_rewrites = dataframe_rewrites
+        if dataframe_rewrite_config is None:
+            dataframe_rewrite_config = DataframeRewritesConfig()
+        self.dataframe_rewrite_config = dataframe_rewrite_config
 
 def _debug_show_graph(root: Op, name: str):
     if FLAGS.debug_graph:
@@ -121,7 +128,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
 
     1. :func:`logical_optimize` -- compile the Skrub DataOp DAG to the logical
        IR and run all backend-agnostic rewrites (extraction, CSE, choice
-       unrolling, algebraic rewrites).
+       unrolling, algebraic rewrites, dataframe rewrites).
     2. :func:`~stratum.optimizer.physical._lowering.lower_to_physical` -- lower
        logical ops to physical ops (one logical op may become several).
     3. :func:`physical_optimize` -- select a concrete implementation per
@@ -191,6 +198,10 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
         _debug_show_graph(root, "algebraic_rewrite")
 
+    if config.dataframe_rewrites:
+        root = dataframe_rewrites(root, config.dataframe_rewrite_config)
+        _debug_show_graph(root, "dataframe_rewrites")
+
     # Last, so every rewrite above sees the plan shape it was written against. A plan
     # whose choices were not unrolled is not an executable candidate set, so it gets no
     # terminating operator.
@@ -249,7 +260,7 @@ def extract_frame_operators(root):
     for op in topological_iterator(root):
         root, _ = extract_dataframe_op(op, root, FLAGS.make_selection_op,
                                        FLAGS.make_map_op, FLAGS.make_column_projection)
-    log_time("dataframe_rewrite took", start)
+    log_time("frame operator extraction took", start)
     _debug_show_graph(root, "frame_rewrite")
     return root
 
