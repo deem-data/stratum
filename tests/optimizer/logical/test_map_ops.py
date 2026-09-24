@@ -12,8 +12,8 @@ from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._projection_ops import (
     AssignOp, DatetimeConversionOp, GetAttrProjectionOp)
 from stratum.optimizer.logical._column_expr import (
-    BinOpExpr, Col, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, OperandLeaf,
-    StrExpr, _Folder)
+    BinOpExpr, Col, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, EvalContext,
+    OperandLeaf, StrExpr, _Folder, _probe_expr_dtype)
 from stratum.optimizer.logical._column_methods import ColumnMethodOp
 from stratum.optimizer.logical._ops import (
     BinOp, GetItemOp, Op, OperandRef, UnaryOp)
@@ -708,6 +708,208 @@ def test_notna_is_foldable_in_selection_predicate():
     selection = _one(unittest.TestCase(), ops, SelectionOp)
     assert ColumnMethodExpr(Col("x"), "notna") == selection.predicate
     assert 2 == len(ops)
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_folded_fillna_fills_nan_on_derived_operand(use_polars):
+    # The operand of a folded fillna is usually derived (a / b), and a pl.Expr
+    # carries no dtype of its own: the NaN half used to be skipped for every
+    # operand shape the fast dtype resolver could not name (#216).
+    frame = pd.DataFrame({"a": [1.0, 0.0, 3.0], "b": [2.0, 0.0, 4.0]})
+    expr = ColumnMethodExpr(BinOpExpr(operator.truediv, Col("a"), Col("b")),
+                            "fillna", (-1.0,))
+    op = AssignMapOp(entries={"r": expr})
+    input_frame = pl.from_pandas(frame) if use_polars else frame
+    with force_polars(use_polars):
+        result = run_op(op, input_frame)
+    np.testing.assert_allclose(
+        np.asarray(list(result["r"]), dtype=float), [0.5, -1.0, 0.75])
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_folded_notna_reports_nan_on_derived_operand(use_polars):
+    # pandas reports NaN as missing on derived operands too; polars used to
+    # answer True for NaN whenever the operand dtype was unknown (#216).
+    frame = pd.DataFrame({"a": [1.0, 0.0, 3.0], "b": [2.0, 0.0, 4.0]})
+    expr = ColumnMethodExpr(BinOpExpr(operator.truediv, Col("a"), Col("b")),
+                            "notna")
+    op = AssignMapOp(entries={"r": expr})
+    input_frame = pl.from_pandas(frame) if use_polars else frame
+    with force_polars(use_polars):
+        result = run_op(op, input_frame)
+    assert [True, False, True] == list(result["r"])
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_folded_fillna_fills_nan_after_a_chained_method(use_polars):
+    # A chained method call is exactly the shape the fast dtype resolver
+    # cannot name; the schema probe has to answer for it (#216). The polars
+    # input is built directly: from_pandas defaults nan_to_null=True, which
+    # would replace the NaN with a null and let the fill_null half answer
+    # for both (the test passed on main for exactly that reason -- #221
+    # review).
+    frame = pd.DataFrame({"x": [0.0, np.nan, 3.0]})
+    inner = ColumnMethodExpr(Col("x"), "clip", (1.0, 1.5))
+    expr = ColumnMethodExpr(inner, "fillna", (0.0,))
+    op = AssignMapOp(entries={"r": expr})
+    input_frame = pl.DataFrame({"x": [0.0, np.nan, 3.0]}) if use_polars \
+        else frame
+    with force_polars(use_polars):
+        result = run_op(op, input_frame)
+    np.testing.assert_allclose(
+        np.asarray(list(result["r"]), dtype=float), [1.0, 0.0, 1.5])
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_where_series_branch_promotes_fill_value(use_polars):
+    # pandas promotes to the supertype of column and fill value; the polars
+    # Series branch pinned `other` to the column dtype and raised on an int
+    # column with a float fill (#216).
+    op = ColumnMethodOp(method="where", args=(OperandRef(1), 1.5))
+    column = pl.Series([1, 2, 3]) if use_polars else pd.Series([1, 2, 3])
+    condition = pl.Series([True, False, True]) if use_polars \
+        else pd.Series([True, False, True])
+    with force_polars(use_polars):
+        result = run_op(op, column, condition)
+    assert [1.0, 1.5, 3.0] == list(result)
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_where_keeps_narrow_float_dtype(use_polars):
+    # pandas keeps float32 for a scalar fill the column can hold; pl.repeat
+    # inferred the scalar's own dtype and widened Float32 to Float64 (#221
+    # review). when/then/otherwise supertypes without the pin and keeps it.
+    op = ColumnMethodOp(method="where", args=(OperandRef(1), 1.5))
+    column = pl.Series([1.0, 2.0, 3.0], dtype=pl.Float32) if use_polars \
+        else pd.Series([1.0, 2.0, 3.0], dtype="float32")
+    condition = pl.Series([True, False, True]) if use_polars \
+        else pd.Series([True, False, True])
+    with force_polars(use_polars):
+        result = run_op(op, column, condition)
+    assert [1.0, 1.5, 3.0] == list(result)
+    if use_polars:
+        assert pl.Float32 == result.dtype
+    else:
+        assert np.dtype("float32") == result.dtype
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_where_fills_null_not_coerced_nan_on_string_column(use_polars):
+    # NaN is unrepresentable in a string column: pandas keeps the dtype and
+    # fills missing (an object column holding NaN); polars' supertype cast
+    # materialized the string "NaN", so a downstream notna() reported the
+    # row as present (#221 review).
+    op = ColumnMethodOp(method="where", args=(OperandRef(1), np.nan))
+    column = pl.Series(["a", "b", "c"]) if use_polars \
+        else pd.Series(["a", "b", "c"])
+    condition = pl.Series([True, False, True]) if use_polars \
+        else pd.Series([True, False, True])
+    with force_polars(use_polars):
+        result = run_op(op, column, condition)
+    values = list(result)
+    assert values[0] == "a" and values[2] == "c"
+    assert (values[1] is None or values[1] != values[1])  # null or NaN
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_folded_fillna_with_non_numeric_value_fills_nan(use_polars):
+    # fill_null can coerce the result's dtype (a string fill makes it
+    # String); the NaN half ran after that cast and fill_nan raised
+    # InvalidOperationError on the operand it had gated as float (#221
+    # review).
+    frame = pd.DataFrame({"a": [1.0, 0.0, 3.0], "b": [2.0, 0.0, 4.0]})
+    expr = ColumnMethodExpr(BinOpExpr(operator.truediv, Col("a"), Col("b")),
+                            "fillna", ("unknown",))
+    op = AssignMapOp(entries={"r": expr})
+    input_frame = pl.from_pandas(frame) if use_polars else frame
+    with force_polars(use_polars):
+        result = run_op(op, input_frame)
+    values = [str(v) for v in result["r"]]
+    assert values == ["0.5", "unknown", "0.75"]
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_where_on_int_column_promotes_with_nan_fill(use_polars):
+    # NaN on an integer column stays a NaN fill in polars too: pandas promotes
+    # int64 -> float64 and polars' when/then supertype gives the same Float64,
+    # so the null-fill rewrite must NOT fire for integer targets (#221
+    # review).
+    op = ColumnMethodOp(method="where", args=(OperandRef(1), np.nan))
+    column = pl.Series([1, 2, 3]) if use_polars else pd.Series([1, 2, 3])
+    condition = pl.Series([True, False, True]) if use_polars \
+        else pd.Series([True, False, True])
+    with force_polars(use_polars):
+        result = run_op(op, column, condition)
+    if use_polars:
+        assert pl.Float64 == result.dtype
+    else:
+        assert np.dtype("float64") == result.dtype
+    values = list(result)
+    assert values[0] == 1.0 and values[2] == 3.0
+    assert values[1] != values[1]  # NaN
+
+
+# --- Series-operand methods: the operand carries its dtype directly ----------
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_fillna_on_series_operand_with_non_float_dtype(use_polars):
+    # A Series operand's dtype comes from the Series itself, not the frame
+    # probe: a string column gets the null-only fill (NaN is unrepresentable
+    # in String), matching pandas' object-column behavior.
+    op = ColumnMethodOp(method="fillna", args=("x",))
+    column = pl.Series(["a", None, "c"]) if use_polars \
+        else pd.Series(["a", None, "c"], dtype="object")
+    with force_polars(use_polars):
+        result = run_op(op, column)
+    assert ["a", "x", "c"] == list(result)
+
+
+@pytest.mark.parametrize("use_polars", [False, True], ids=["pandas", "polars"])
+def test_fillna_on_series_operand_with_float_dtype_fills_nan(use_polars):
+    # Same fillna semantics on a Series operand with a resolved float dtype:
+    # NaN and null both fill, matching pandas.
+    op = ColumnMethodOp(method="fillna", args=(0.0,))
+    column = pl.Series([1.0, float("nan"), None]) if use_polars \
+        else pd.Series([1.0, float("nan"), None])
+    with force_polars(use_polars):
+        result = run_op(op, column)
+    assert [1.0, 0.0, 0.0] == list(result)
+
+
+# --- _probe_expr_dtype: schema-only dtype probe for derived operands ---------
+
+
+def test_probe_expr_dtype_resolves_against_a_lazyframe():
+    # The probe is frame-shape agnostic: a LazyFrame context resolves through
+    # its own schema without materializing.
+    ctx = EvalContext(frame=pl.LazyFrame({"a": [1.0, float("nan")]}),
+                      inputs=[], mode="fit_transform")
+    assert pl.Float64 == _probe_expr_dtype(pl.col("a"), ctx)
+
+
+def test_probe_expr_dtype_returns_none_for_non_expr_operand():
+    # Only lazy expressions lack a dtype of their own; anything else is left
+    # to the evaluator's own handling.
+    ctx = EvalContext(frame=pl.DataFrame({"a": [1.0]}),
+                      inputs=[], mode="fit_transform")
+    assert _probe_expr_dtype(pl.Series([1.0, 2.0]), ctx) is None
+
+
+def test_probe_expr_dtype_returns_none_when_frame_is_not_a_frame():
+    # The probe resolves against ctx.frame; a context with no frame to
+    # project against answers None.
+    ctx = EvalContext(frame=pl.Series([1.0, 2.0]),
+                      inputs=[], mode="fit_transform")
+    assert _probe_expr_dtype(pl.col("a"), ctx) is None
+
+
+def test_probe_expr_dtype_returns_none_when_resolve_raises():
+    # An operand that cannot resolve (the str namespace on an integer column)
+    # degrades to None instead of raising from the probe: the real
+    # evaluation surfaces the genuine error at collection time.
+    ctx = EvalContext(frame=pl.DataFrame({"a": [1, 2]}),
+                      inputs=[], mode="fit_transform")
+    assert _probe_expr_dtype(pl.col("a").str.replace("1", "2"), ctx) is None
 
 
 if __name__ == "__main__":
