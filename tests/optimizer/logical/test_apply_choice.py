@@ -1,12 +1,15 @@
 """Apply with a Choice estimator: conversion, choice unrolling, and evaluation."""
+from sklearn.decomposition import PCA
 from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import Ridge
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 from skrub._utils import PassThrough
 from stratum._api import evaluate
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer._optimize import choice_unrolling, convert_to_ops
-from stratum.optimizer.logical._ops import ChoiceOp, PredictorOp, TransformerOp
+from stratum.optimizer.logical._ops import ChoiceOp, PredictorOp, TransformerOp, _iter_choices
 import numpy as np
 import pandas as pd
 import stratum as st
@@ -149,6 +152,114 @@ class TestApplyChoice(unittest.TestCase):
         np.testing.assert_allclose(by_id["scale:StandardScaler"].to_numpy(),
                                    StandardScaler().fit_transform(self.df[["a", "b"]]))
         pd.testing.assert_frame_equal(by_id["scale:PassThrough"], self.df[["a", "b"]])
+
+
+class TestApplyParamChoice(unittest.TestCase):
+    """Choices nested in the estimator's parameters (#223) expand at conversion."""
+
+    def setUp(self):
+        self.df = pd.DataFrame({
+            "a": [1.0, 2.0, 3.0, 4.0],
+            "b": [10.0, 20.0, 30.0, 40.0],
+            "y": [1.0, 3.0, 5.0, 7.0],
+        })
+
+    def _predict(self, estimator):
+        data = st.as_data_op(self.df)
+        return data[["a", "b"]].skb.apply(estimator, y=data["y"])
+
+    def _assert_concrete(self, root):
+        for est_op in root.inputs:
+            self.assertEqual(list(_iter_choices(est_op.estimator)), [])
+
+    def test_convert_param_choice(self):
+        root = convert_to_ops(self._predict(
+            Ridge(alpha=st.choose_from([0.1, 1.0], name="alpha"))))
+
+        self.assertIsInstance(root, ChoiceOp)
+        self.assertEqual([op.estimator.alpha for op in root.inputs], [0.1, 1.0])
+        self._assert_concrete(root)
+        self.assertEqual(root.make_outcome_names(), ["alpha:0.1", "alpha:1.0"])
+        # X and y ops are shared across the outcomes.
+        self.assertIs(root.inputs[0].inputs[0], root.inputs[1].inputs[0])
+        self.assertIs(root.inputs[0].inputs[1], root.inputs[1].inputs[1])
+
+    def test_convert_param_choices_are_a_cartesian_product(self):
+        root = convert_to_ops(self._predict(Ridge(
+            alpha=st.choose_from([0.1, 1.0], name="alpha"),
+            fit_intercept=st.choose_bool(name="intercept"))))
+
+        self.assertEqual(len(root.inputs), 4)
+        self.assertEqual({(op.estimator.alpha, op.estimator.fit_intercept) for op in root.inputs},
+                         {(0.1, True), (0.1, False), (1.0, True), (1.0, False)})
+        self.assertEqual(root.make_outcome_names()[0], "alpha:0.1, intercept:True")
+
+    def test_convert_estimator_choice_with_param_choice(self):
+        model = st.choose_from({
+            "ridge": Ridge(alpha=st.choose_from([0.1, 1.0], name="alpha")),
+            "dummy": DummyRegressor(),
+        }, name="model")
+        root = convert_to_ops(self._predict(model))
+
+        # The nested choice only varies under the outcome that holds it, as in skrub.
+        self.assertEqual(root.make_outcome_names(),
+                         ["model:ridge, alpha:0.1", "model:ridge, alpha:1.0", "model:dummy"])
+        self.assertEqual([type(op.estimator).__name__ for op in root.inputs],
+                         ["Ridge", "Ridge", "DummyRegressor"])
+        self._assert_concrete(root)
+
+    def test_convert_choice_in_pipeline_step(self):
+        pipe = Pipeline([("scale", st.choose_from([StandardScaler(), MinMaxScaler()], name="s")),
+                         ("ridge", Ridge())])
+        root = convert_to_ops(self._predict(pipe))
+
+        self.assertEqual([type(op.estimator.steps[0][1]).__name__ for op in root.inputs],
+                         ["StandardScaler", "MinMaxScaler"])
+        self.assertEqual(root.make_outcome_names(), ["s:StandardScaler", "s:MinMaxScaler"])
+        self._assert_concrete(root)
+
+    def test_convert_discretized_numeric_choice(self):
+        root = convert_to_ops(self._predict(
+            Ridge(alpha=st.choose_float(0.1, 10.0, log=True, n_steps=3, name="alpha"))))
+
+        np.testing.assert_allclose([op.estimator.alpha for op in root.inputs], [0.1, 1.0, 10.0])
+        self._assert_concrete(root)
+
+    def test_convert_continuous_numeric_choice_rejected(self):
+        with self.assertRaises(NotImplementedError):
+            convert_to_ops(self._predict(Ridge(alpha=st.choose_float(0.1, 10.0, name="alpha"))))
+
+    def test_convert_match_rejected(self):
+        model = st.choose_from(["low", "high"], name="level")
+        with self.assertRaises(NotImplementedError):
+            convert_to_ops(self._predict(Ridge(alpha=model.match({"low": 0.1, "high": 1.0}))))
+
+    def test_choice_used_twice_in_one_estimator_is_one_dimension(self):
+        k = st.choose_from([1, 2], name="k")
+        pipe = Pipeline([("pca", PCA(n_components=k)), ("knn", KNeighborsRegressor(n_neighbors=k))])
+        root = convert_to_ops(self._predict(pipe))
+
+        # skrub keys a choice by identity: both uses take the same outcome.
+        self.assertEqual([(op.estimator.steps[0][1].n_components,
+                           op.estimator.steps[1][1].n_neighbors) for op in root.inputs],
+                         [(1, 1), (2, 2)])
+        self.assertEqual(root.make_outcome_names(), ["k:1", "k:2"])
+
+    def test_choice_shared_by_two_applies_rejected(self):
+        k = st.choose_from([1, 2], name="k")
+        data = st.as_data_op(self.df)
+        reduced = data[["a", "b"]].skb.apply(PCA(n_components=k))
+        pred = reduced.skb.apply(KNeighborsRegressor(n_neighbors=k), y=data["y"])
+        with self.assertRaises(NotImplementedError) as ctx:
+            convert_to_ops(pred)
+        self.assertIn("more than one operator", str(ctx.exception))
+
+    def test_estimator_without_choice_is_kept(self):
+        ridge = Ridge()
+        root = convert_to_ops(self._predict(ridge))
+
+        self.assertIsInstance(root, PredictorOp)
+        self.assertIs(root.estimator, ridge)
 
 
 if __name__ == "__main__":

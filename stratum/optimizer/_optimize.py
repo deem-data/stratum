@@ -8,7 +8,7 @@ from .logical._op_cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .logical._numeric_ops import extract_numeric_op
 from .logical._candidate_ops import CollectCandidatesOp, ScoreCandidatesOp
-from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op
+from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared
 from .logical._split_ops import SplitOutput
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
@@ -282,6 +282,7 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
     """
     start = start_time()
     children, nodes, parents = get_dataops_graph(dag)
+    check_choices_not_shared(nodes.values())
     order = topological_traverse(nodes, parents, children)
     root_id = order[-1]
 

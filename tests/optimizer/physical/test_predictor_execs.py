@@ -209,6 +209,30 @@ def test_graph_fed_catboost_parameter_is_only_applied_while_fitting():
     assert len(op.process("predict", [X, 2])) == len(X)
 
 
+class _RefusesRefitParams(Ridge):
+    """Rejects any `set_params` once fitted, as CatBoost does."""
+
+    def set_params(self, **params):
+        if hasattr(self, "coef_"):
+            raise RuntimeError("You can't change params of fitted model.")
+        return super().set_params(**params)
+
+
+def test_graph_fed_parameter_is_applied_to_a_fresh_estimator_every_fold():
+    """Each fit starts from an unfitted clone, so the next fold can configure it."""
+    X, y = make_regression(n_samples=20, n_features=2, random_state=0)
+    op = PredictorOp(estimator=_RefusesRefitParams(), y=y, cols=All(), how="no_wrap",
+                     param_refs={"alpha": OperandRef(1)})
+
+    op.process("fit_transform", [X, 2.0])
+    op.process("predict", [X, 2.0])
+    op.process("fit_transform", [X, 3.0])
+
+    assert op.estimator.alpha == 3.0
+    # The prototype the fits are cloned from is never fitted itself.
+    assert not hasattr(op.original_estimator, "coef_")
+
+
 # --- End-to-end: the plan predicts what skrub predicts ------------------------
 
 def _frame(task):

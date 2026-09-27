@@ -1,5 +1,7 @@
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.dummy import DummyClassifier, DummyRegressor
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from stratum import config
 from sklearn.model_selection import GroupKFold, KFold, StratifiedKFold
 from tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1, datetime_pipeline2
@@ -9,6 +11,7 @@ import time
 import unittest
 import pandas as pd
 import numpy as np
+import pytest
 import stratum as st
 import logging
 
@@ -162,6 +165,85 @@ class SearchTest(RuntimeTest):
         X = X.drop(columns=["datetime"])
         pred = X.skb.apply(DummyRegressor(), y=y)
         st._api.grid_search(pred, scoring="neg_mean_squared_error")
+
+
+class RefusesRefitParams(ClassifierMixin, BaseEstimator):
+    """Rejects any `set_params` once fitted, as CatBoost does."""
+
+    def __init__(self, C=1.0):
+        self.C = C
+
+    def set_params(self, **params):
+        if hasattr(self, "model_"):
+            raise RuntimeError("You can't change params of fitted model.")
+        return super().set_params(**params)
+
+    def fit(self, X, y):
+        self.model_ = LogisticRegression(C=self.C).fit(X, y)
+        self.classes_ = self.model_.classes_
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X)
+
+
+class ChoiceSearchTest(unittest.TestCase):
+    """Grid search over estimator and hyperparameter choices scores what skrub scores."""
+
+    def setUp(self):
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(rng.normal(size=(300, 4)), columns=list("abcd"))
+        df["t"] = (df.a > 0).astype(int)
+        self.df = df
+
+    def _plan(self, estimator, preprocessor=None):
+        data = st.var("data", self.df)
+        y = data["t"].skb.mark_as_y()
+        X = data.drop(columns="t").skb.mark_as_X(cv=KFold(3), split_kwargs={})
+        if preprocessor is not None:
+            X = X.skb.apply(preprocessor)
+        return X.skb.apply(estimator, y=y)
+
+    def _assert_matches_skrub(self, pred, n_candidates):
+        expected = pred.skb.make_grid_search(fitted=True, refit=False, scoring="accuracy").results_
+        with config(scheduler=True):
+            results = st._api.grid_search(dag=pred, cv=None, scoring="accuracy").results_
+        self.assertEqual(len(results), n_candidates)
+        self.assertEqual(len(expected), n_candidates)
+        # Both are sorted by score, but ties may be ordered differently.
+        np.testing.assert_allclose(sorted(results["scores"].to_list()),
+                                   sorted(expected["mean_test_score"]))
+        return results
+
+    def test_param_choice(self):
+        # #223: the choice nested in the estimator used to reach `fit` unresolved.
+        pred = self._plan(LogisticRegression(C=st.choose_from([0.01, 1.0], name="C")))
+        results = self._assert_matches_skrub(pred, 2)
+        self.assertEqual(set(results["id"].to_list()), {"C:0.01", "C:1.0"})
+
+    def test_param_choices_in_two_applies(self):
+        pred = self._plan(LogisticRegression(C=st.choose_from([0.01, 1.0], name="C")),
+                          preprocessor=st.choose_from([StandardScaler(), MinMaxScaler()],
+                                                      name="scaler"))
+        self._assert_matches_skrub(pred, 4)
+
+    def test_estimator_choice_refusing_set_params_once_fitted(self):
+        # #224: the second grid point must not reconfigure an already fitted model.
+        model = st.choose_from({"weak": RefusesRefitParams(C=0.01),
+                                "strong": RefusesRefitParams(C=1.0)}, name="model")
+        self._assert_matches_skrub(self._plan(model), 2)
+
+    def test_estimator_choice_catboost(self):
+        # #224, as reported.
+        catboost = pytest.importorskip("catboost")
+
+        class CB(catboost.CatBoostClassifier):
+            def __sklearn_clone__(self):
+                return CB(**self.get_params(deep=False))
+
+        model = st.choose_from({"d2": CB(depth=2, iterations=20, verbose=0),
+                                "d4": CB(depth=4, iterations=20, verbose=0)}, name="model")
+        self._assert_matches_skrub(self._plan(model), 2)
 
 
 class CrossValidationSplitterTest(unittest.TestCase):
