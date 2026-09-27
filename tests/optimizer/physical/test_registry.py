@@ -22,7 +22,11 @@ from stratum.optimizer.physical._source_execs import (
 )
 from stratum.optimizer.physical._predictor_execs import (
     CatBoostOp,
+    DecisionTreeOp,
     ElasticNetOp,
+    ExtraTreesOp,
+    HistGradientBoostingOp,
+    KNeighborsOp,
     LassoOp,
     LightGBMOp,
     LinearRegressionOp,
@@ -67,9 +71,10 @@ def test_default_registry_discovers_registered_operator_types():
     assert len(registry.candidates_for(StringEncoderOp, backend_name="sklearn-skrub")) == 1
 
     # Each migrated predictor family carries exactly its sklearn-skrub reference impl.
-    for op_type in (RandomForestOp, LinearRegressionOp, RidgeOp, LassoOp,
-                    ElasticNetOp, LogisticRegressionOp, SGDOp, LightGBMOp,
-                    XGBoostOp, CatBoostOp):
+    for op_type in (RandomForestOp, ExtraTreesOp, DecisionTreeOp,
+                    HistGradientBoostingOp, KNeighborsOp, LinearRegressionOp,
+                    RidgeOp, LassoOp, ElasticNetOp, LogisticRegressionOp, SGDOp,
+                    LightGBMOp, XGBoostOp, CatBoostOp):
         (candidate,) = registry.candidates_for(op_type)
         assert candidate.backend_name == "sklearn-skrub"
 

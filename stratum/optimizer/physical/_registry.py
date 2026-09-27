@@ -221,21 +221,21 @@ def _register_current_estimator_impls(registry: PhysicalRegistry) -> None:
     # These are transitional registrations for estimator families that do not
     # have abstract physical operators yet. Once those lowerings land, their
     # implementations should be keyed by the corresponding physical type.
-    from stratum.optimizer.logical._ops import PredictorOp, TransformerOp
+    # PredictorOp's pass-through impl is ``PassthroughPredictor`` in _predictor_execs.
+    from stratum.optimizer.logical._ops import TransformerOp
 
-    for op_type in (TransformerOp, PredictorOp):
-        registry.register(
-            PhysicalImpl(
-                op_type=op_type,
-                backend_name="sklearn-skrub",
-                input_format="frame",
-                output_format="frame",
-                supports=lambda op, ctx: True,
-                cost=_placeholder_cost,
-                exec_mem=_placeholder_exec_mem,
-                execute=_current_process_execute,
-            )
+    registry.register(
+        PhysicalImpl(
+            op_type=TransformerOp,
+            backend_name="sklearn-skrub",
+            input_format="frame",
+            output_format="frame",
+            supports=lambda op, ctx: True,
+            cost=_placeholder_cost,
+            exec_mem=_placeholder_exec_mem,
+            execute=_current_process_execute,
         )
+    )
 
 
 """Create the default registry with every known implementation registered."""

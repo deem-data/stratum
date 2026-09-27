@@ -30,22 +30,47 @@ those for LightGBM, XGBoost and CatBoost: in the registry that backend means
 already treats as the backend-agnostic fallback.
 
 Lowering is incremental. A predictor with no family below returns ``None`` from
-:func:`lower_predictor`, passes through lowering unchanged, and keeps running via
-the ``sklearn-skrub`` impl registered on ``PredictorOp`` itself.
+:func:`lower_predictor`, passes through lowering unchanged, and is bound to
+:class:`PassthroughPredictor`, the ``sklearn-skrub`` impl registered on
+``PredictorOp`` itself, which runs any estimator (scikit-learn or not) as given.
 """
 from __future__ import annotations
 
 import sys
 
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import (ExtraTreesClassifier, ExtraTreesRegressor,
+                              HistGradientBoostingClassifier,
+                              HistGradientBoostingRegressor,
+                              RandomForestClassifier, RandomForestRegressor)
 from sklearn.linear_model import (ElasticNet, Lasso, LinearRegression,
                                   LogisticRegression, Ridge, RidgeClassifier,
                                   SGDClassifier, SGDRegressor)
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 from stratum.optimizer.logical._ops import PredictorOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import sklearn_skrub_impl
+
+
+# --- Pass-through ------------------------------------------------------------
+@sklearn_skrub_impl(of=PredictorOp)
+class PassthroughPredictor(PredictorOp, PhysicalOp):
+    """Impl for any predictor without a family -- scikit-learn, third-party or
+    user-defined -- that runs the estimator as-is, much like a UDF.
+
+    Renders as ``PredictorOp(<estimator>)`` so per-op stats keep pass-through
+    predictors apart; the logical op still renders as its ``Predictor`` family.
+    """
+    is_abstract = False
+
+    def to_str_helper(self):
+        _, _, is_df = super().to_str_helper()
+        estimator = " ".join(str(self.original_estimator).split())
+        if len(estimator) > 50:
+            estimator = estimator[:50] + "..."
+        return "PredictorOp", f"({estimator})", is_df
 
 
 # --- Random forest -----------------------------------------------------------
@@ -57,6 +82,55 @@ class RandomForestOp(PredictorOp, PhysicalOp):
 @sklearn_skrub_impl(of=RandomForestOp)
 class SklearnRandomForest(RandomForestOp):
     """Reference impl: runs the scikit-learn forest as-is."""
+    is_abstract = False
+
+
+class ExtraTreesOp(PredictorOp, PhysicalOp):
+    """Abstract physical extremely randomized trees
+    (``ExtraTreesClassifier``/``Regressor``)."""
+    is_abstract = True
+
+
+@sklearn_skrub_impl(of=ExtraTreesOp)
+class SklearnExtraTrees(ExtraTreesOp):
+    """Reference impl: runs the scikit-learn extra-trees ensemble as-is."""
+    is_abstract = False
+
+
+# --- Decision tree -----------------------------------------------------------
+class DecisionTreeOp(PredictorOp, PhysicalOp):
+    """Abstract physical decision tree (``DecisionTreeClassifier``/``Regressor``)."""
+    is_abstract = True
+
+
+@sklearn_skrub_impl(of=DecisionTreeOp)
+class SklearnDecisionTree(DecisionTreeOp):
+    """Reference impl: runs the scikit-learn decision tree as-is."""
+    is_abstract = False
+
+
+# --- Histogram gradient boosting ----------------------------------------------
+class HistGradientBoostingOp(PredictorOp, PhysicalOp):
+    """Abstract physical histogram gradient boosting
+    (``HistGradientBoostingClassifier``/``Regressor``)."""
+    is_abstract = True
+
+
+@sklearn_skrub_impl(of=HistGradientBoostingOp)
+class SklearnHistGradientBoosting(HistGradientBoostingOp):
+    """Reference impl: runs the scikit-learn histogram gradient boosting as-is."""
+    is_abstract = False
+
+
+# --- Nearest neighbors -------------------------------------------------------
+class KNeighborsOp(PredictorOp, PhysicalOp):
+    """Abstract physical k-nearest neighbors (``KNeighborsClassifier``/``Regressor``)."""
+    is_abstract = True
+
+
+@sklearn_skrub_impl(of=KNeighborsOp)
+class SklearnKNeighbors(KNeighborsOp):
+    """Reference impl: runs the scikit-learn nearest-neighbors model as-is."""
     is_abstract = False
 
 
@@ -163,10 +237,19 @@ class LibCatBoost(CatBoostOp):
 
 # Matched on the exact type: scikit-learn subclasses these for different models
 # (``Lasso`` is an ``ElasticNet``, ``MultiTaskLasso`` a ``Lasso``,
-# ``LogisticRegressionCV`` a ``LogisticRegression``), which must stay unlowered.
+# ``LogisticRegressionCV`` a ``LogisticRegression``, ``ExtraTreeClassifier`` a
+# ``DecisionTreeClassifier``), which must stay unlowered.
 _SKLEARN_FAMILIES: dict[type, type[PredictorOp]] = {
     RandomForestClassifier: RandomForestOp,
     RandomForestRegressor: RandomForestOp,
+    ExtraTreesClassifier: ExtraTreesOp,
+    ExtraTreesRegressor: ExtraTreesOp,
+    DecisionTreeClassifier: DecisionTreeOp,
+    DecisionTreeRegressor: DecisionTreeOp,
+    HistGradientBoostingClassifier: HistGradientBoostingOp,
+    HistGradientBoostingRegressor: HistGradientBoostingOp,
+    KNeighborsClassifier: KNeighborsOp,
+    KNeighborsRegressor: KNeighborsOp,
     LinearRegression: LinearRegressionOp,
     Ridge: RidgeOp,
     RidgeClassifier: RidgeOp,
