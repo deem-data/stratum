@@ -118,7 +118,7 @@ def test_nyc_plan_folds_assigns(tmp_path):
 
 def test_nyc_pipeline_scores_two_future_cutoffs(tmp_path):
     pipeline = build_pipeline(make_nyc_lake(tmp_path / "lake"))
-    with st.config(scheduler=True, debug_graph=True):
+    with st.config(scheduler=True):
         search = pipeline.skb.make_grid_search(
             n_jobs=1, fitted=True, refit=False, scoring="accuracy")
     scores = search.results_["scores"]
