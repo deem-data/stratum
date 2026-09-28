@@ -13,7 +13,7 @@ is query-expressible -- so neither ``process`` carries selection control flow.
 """
 from __future__ import annotations
 
-from stratum.optimizer.logical._base import _resolve_args, _resolve_kwargs
+from stratum.optimizer.logical._base import OutputType, _resolve_args, _resolve_kwargs
 from stratum.optimizer.logical._column_expr import EvalContext
 from stratum.optimizer.logical._selection_ops import (
     SelectionKind, SelectionOp, _SELECTION_PANDAS_METHOD, _SELECTION_POLARS_METHOD)
@@ -26,9 +26,13 @@ def _query_selectable(op: SelectionOp) -> bool:
 
     Only a MASK predicate that compiles to a query string qualifies; an
     ``OperandLeaf`` or ``.str`` accessor yields ``None`` from ``to_pandas_query``
-    and must go through boolean masking instead.
+    and must go through boolean masking instead. ``query`` is also frame-only, so
+    a masked series never takes this path; today that is implied (a predicate over
+    a series always references the series itself, which compiles to an
+    ``OperandLeaf``) but the check does not rely on it.
     """
     return (op.kind is SelectionKind.MASK
+            and op.output_type is OutputType.FRAME
             and op.predicate is not None
             and op.predicate.to_pandas_query({}) is not None)
 

@@ -19,7 +19,10 @@ Execution afterwards is plain ``op.process`` with **no selection control flow
 left**.
 
 Ops with no candidates (un-migrated logical families, ValueOp, ChoiceOp, ...)
-pass through and keep executing their own ``process``.
+pass through and keep executing their own ``process``. An op that *has*
+candidates but ends up with none bound is a different case: if it has no
+``process`` of its own, as the frame families do not, nothing can run it, so that
+fails here rather than at execution.
 
 """
 from __future__ import annotations
@@ -159,16 +162,21 @@ def bind_op(op: IRNode, ctx: PlanContext,
     and running its ``on_impl_selected(ctx)``.
 
     Ops with no candidate are left untouched (un-migrated families / structural
-    ops run their own ``process``). Returns ``op``.
+    ops run their own ``process``). Raises when an op that needs an
+    implementation gets none, either because every backend refused it or because
+    the selector matched none of the ones that did. Returns ``op``.
     """
     if registry is None:
         registry = get_default_physical_registry()
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
 
-    candidates = [c for c in registry.candidates_for(type(op)) if c.supports(op, ctx)]
+    registered = registry.candidates_for(type(op))
+    candidates = [c for c in registered if c.supports(op, ctx)]
     impl = selector.choose(op, candidates, ctx)
     if impl is None:
+        if registered and _needs_an_impl(op):
+            raise NotImplementedError(_no_impl_message(op, ctx, registered, candidates))
         return op
     logger.debug(f"Selected {impl.backend_name} implementation for {op}")
     if impl.impl_class is not None and impl.impl_class is not type(op):
@@ -176,6 +184,30 @@ def bind_op(op: IRNode, ctx: PlanContext,
     if isinstance(op, PhysicalOp):
         op.on_impl_selected(ctx)
     return op
+
+
+def _no_impl_message(op: IRNode, ctx: PlanContext, registered, candidates) -> str:
+    backends = sorted({c.backend_name for c in registered})
+    if not candidates:
+        reason = ("every registered backend refused it in supports(), which is how "
+                  "an operator whose shape a backend cannot express opts out")
+    else:
+        reason = (f"the selector matched none of the supported backends "
+                  f"{sorted({c.backend_name for c in candidates})} against "
+                  f"{ctx.backend!r}")
+    return (f"No implementation was bound for {op}: {reason}. Registered backends "
+            f"for {type(op).__name__} are {backends}.")
+
+
+def _needs_an_impl(op: IRNode) -> bool:
+    """Whether ``op`` would be unrunnable if no implementation were bound.
+
+    The frame families are pure config: they carry no ``process`` of their own, so
+    an unbound one raises a bare NotImplementedError at execution time, far from
+    the decision that caused it. The estimator families do define ``process`` and
+    legitimately run unbound when an optional accelerator refuses them.
+    """
+    return type(op).process is IRNode.process
 
 
 def select_implementations(root: IRNode, ctx: PlanContext,

@@ -10,7 +10,7 @@ from stratum.optimizer.logical._projection_ops import (
     ApplyUDFOp, AssignOp, ColumnProjectionOp, ColumnSelectorOp,
     DatetimeConversionOp, DropOp, GetAttrProjectionOp, MetadataOp, ProjectionOp,
     StringMethodOp, make_datetime_conversion_op, make_frame_get_attr,
-    make_string_method_op, polars_datetime_kwargs)
+    make_reset_index_op, make_string_method_op, polars_datetime_kwargs)
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._column_methods import ColumnMethodOp
 from stratum.optimizer.logical._column_expr import Col, DtExpr
@@ -159,6 +159,82 @@ class TestMetadataOp(unittest.TestCase):
             op = MetadataOp(func="rename", args=({"a": "x"},), kwargs={})
             result = run_op(op, pl.DataFrame({"a": [1], "b": [2]}))
             self.assertIn("x", result.columns)
+
+
+class TestResetIndex(unittest.TestCase):
+    """Only the dropping form of `reset_index` is representable."""
+
+    def _call(self, **kwargs) -> MethodCallOp:
+        op = MethodCallOp("reset_index", args=(), kwargs=kwargs)
+        op.inputs = [_inp(None)]
+        op.inputs[0].outputs = [op]
+        return op
+
+    def test_drop_true_becomes_a_metadata_op(self):
+        new_op = make_reset_index_op(self._call(drop=True))
+        self.assertIsInstance(new_op, MetadataOp)
+        self.assertEqual("reset_index", new_op.func)
+
+    def test_drop_false_and_the_default_are_refused(self):
+        # drop=False promotes the index to a column, changing the schema, and it
+        # is also pandas' default, so it is refused rather than guessed at.
+        self.assertIsNone(make_reset_index_op(self._call(drop=False)))
+        self.assertIsNone(make_reset_index_op(self._call()))
+
+    def test_other_arguments_are_refused(self):
+        self.assertIsNone(make_reset_index_op(self._call(drop=True, level=0)))
+        positional = MethodCallOp("reset_index", args=(0,), kwargs={"drop": True})
+        positional.inputs = [_inp(None)]
+        self.assertIsNone(make_reset_index_op(positional))
+
+    def test_it_keeps_the_container_kind(self):
+        call = self._call(drop=True)
+        call.inputs[0].output_type = OutputType.SERIES
+        self.assertIs(OutputType.SERIES, make_reset_index_op(call).output_type)
+
+    def test_pandas_renumbers_the_rows(self):
+        df = pd.DataFrame({"a": [1, 2, 3]}).iloc[[2, 0]]
+        op = MetadataOp(func="reset_index", args=(), kwargs={"drop": True})
+        self.assertEqual([0, 1], list(run_op(op, df).index))
+
+    def test_polars_has_no_index_to_drop(self):
+        # polars rows carry no labels, so the dropping form is identity there.
+        with force_polars():
+            frame = pl.DataFrame({"a": [1, 2, 3]})
+            op = MetadataOp(func="reset_index", args=(), kwargs={"drop": True})
+            self.assertTrue(run_op(op, frame).equals(frame))
+
+
+class TestIndexAttribute(unittest.TestCase):
+    """`.index` is a sequence of labels, so it types as a SERIES."""
+
+    def _get_attr(self, attr, container_kind):
+        container = _inp(None)
+        container.output_type = container_kind
+        op = GetAttrOp(attr_name=attr)
+        op.inputs = [container]
+        container.outputs = [op]
+        return make_frame_get_attr(None, op)
+
+    def test_index_is_a_series_whatever_it_is_read_off(self):
+        for kind in (OutputType.SERIES, OutputType.FRAME):
+            with self.subTest(container=kind.name):
+                self.assertIs(OutputType.SERIES,
+                              self._get_attr("index", kind).output_type)
+
+    def test_other_accessors_still_keep_the_container_kind(self):
+        self.assertIs(OutputType.FRAME,
+                      self._get_attr("dt", OutputType.FRAME).output_type)
+
+    def test_polars_refuses_index(self):
+        # polars frames have no index, and what `.index` means depends on what
+        # produced the value, so there is no per-op translation.
+        from stratum.optimizer.physical._projection_execs import (
+            PolarsGetAttrProjectionOp)
+        self.assertFalse(PolarsGetAttrProjectionOp.supports(
+            GetAttrProjectionOp(attr_name=["index"]), None))
+        self.assertTrue(PolarsGetAttrProjectionOp.supports(
+            GetAttrProjectionOp(attr_name=["dt", "year"]), None))
 
 
 class TestProjectionOp(unittest.TestCase):

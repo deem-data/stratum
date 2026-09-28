@@ -311,28 +311,29 @@ def join_schema(left, right, keys, suffixes, how="inner") -> pl.Schema | None:
     return pl.Schema(out)
 
 
-def aggregate_schema(schema, grouping_keys, aggregations, as_index) -> pl.Schema | None:
-    """Schema of a pandas ``groupby(grouping_keys).agg(aggregations)``.
+def aggregate_schema(schema, grouping_keys, output_columns, as_index) -> pl.Schema | None:
+    """Schema of a grouped aggregation, given its output column names.
 
-    Only the dict-spec form with scalar aggregations is statically known: the
-    output columns are exactly the dict keys, with dtypes left unknown (they
-    depend on the aggregation function -- ``count`` -> int, ``mean`` -> float).
-    Grouping keys are part of the pandas index by default and become output
-    columns only when ``as_index`` is ``False``. Any other spec is unknown: a bare
-    function name applies to every (numeric) non-grouping column, and a list spec
-    -- including a list value inside the dict -- produces MultiIndex columns a
-    flat schema can't represent.
+    ``output_columns`` holds one name per aggregation entry, in order, with
+    dtypes left unknown (they depend on the aggregation function -- ``count`` ->
+    int, ``mean`` -> float). Grouping keys are part of the pandas index by
+    default and become output columns only when ``as_index`` is ``False``; only
+    then do their names matter. Unknown when the output names are not static
+    (``None``: a wildcard entry, or a computed child with no name of its own), or
+    when two entries land on the same label, which a Schema cannot express.
     """
-    keys = as_column_list(grouping_keys)
-    if not is_known(schema) or keys is None or not isinstance(aggregations, dict):
+    if not is_known(schema) or output_columns is None:
         return None
     out: dict = {}
     if as_index is False:
+        keys = as_column_list(grouping_keys)
+        if keys is None:
+            return None
         for key in keys:
             if key in schema:
                 out[key] = schema[key]
-    for col, func in aggregations.items():
-        if not isinstance(col, str) or isinstance(func, (list, tuple)):
+    for col in output_columns:
+        if not isinstance(col, str) or col in out:
             return None
         out[col] = UNKNOWN_DTYPE
     return pl.Schema(out)

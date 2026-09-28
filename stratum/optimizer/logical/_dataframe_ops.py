@@ -3,6 +3,7 @@ from stratum.optimizer.logical._ops import (OperandRef, OutputType, is_frame_lik
 from pandas import DataFrame
 from polars import DataFrame as PolarsDataFrame
 from skrub import SelectCols
+import operator
 from stratum.optimizer.logical import _schema
 import pandas as pd
 import numpy as np
@@ -16,13 +17,15 @@ from stratum.optimizer.logical._selection_ops import (
     is_mask_selection, make_mask_selection_op)
 from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, GroupedDataframeOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
-    _is_aggregation, _extract_grouping, _extract_aggregations, make_aggregate_op)
+    _is_aggregation, _is_value_counts, _extract_grouping, _extract_aggregations,
+    make_aggregate_op, make_value_counts_ops)
+from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, MetadataOp, ProjectionOp, DropOp,
     ApplyUDFOp, AssignOp, DatetimeConversionOp, GetAttrProjectionOp,
     StringMethodOp, make_column_projection_op, make_column_selector_op,
-    make_datetime_conversion_op, make_frame_get_attr, make_string_method_op,
-    resolve_selector_columns)
+    make_datetime_conversion_op, make_frame_get_attr, make_reset_index_op,
+    make_string_method_op, resolve_selector_columns)
 from stratum.optimizer.logical._map_ops import MapOp, AssignMapOp, make_assign_map_op
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, is_supported_column_method, make_column_method_op)
@@ -74,6 +77,53 @@ class ConcatOp(Op):
 # The accessors whose ``[...]`` takes one indexer per axis, so a tuple key is a
 # (rows, columns) pair rather than a single (MultiIndex) label.
 _ROW_COL_ACCESSORS = ("loc", "iloc")
+
+
+# pandas' scalar comparison methods have the same result as the corresponding
+# operators. Graph-fed arguments are excluded: Series.eq(other_series) aligns
+# indexes, whereas a row-local ColumnExpr works positionally.
+_SCALAR_COMPARISONS = {
+    "eq": operator.eq, "ne": operator.ne,
+    "lt": operator.lt, "le": operator.le,
+    "gt": operator.gt, "ge": operator.ge,
+}
+
+
+def _make_scalar_comparison(op: MethodCallOp) -> BinOp | None:
+    if (op.method_name not in _SCALAR_COMPARISONS
+            or op.inputs[0].output_type is not OutputType.SERIES
+            or len(op.args or ()) != 1 or op.kwargs):
+        return None
+    value = op.args[0]
+    if (isinstance(value, OperandRef) or isinstance(value, (pd.Series, pd.DataFrame,
+                                                           np.ndarray, list, tuple, dict))
+            or (not isinstance(value, str) and hasattr(value, "__len__"))):
+        return None
+    result = BinOp(_SCALAR_COMPARISONS[op.method_name], OperandRef(0), value)
+    result.inputs, result.outputs = list(op.inputs), list(op.outputs)
+    result.output_type = OutputType.SERIES
+    op.replace_output_of_inputs(result)
+    return result
+
+
+def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
+    """Infer only the container kind of pandas methods we leave as calls.
+
+    This does not claim a backend-neutral implementation. It lets a later
+    operation be extracted while the original method still executes verbatim.
+    Each listed method has a stable return kind for both Series and DataFrame.
+    """
+    source = op.inputs[0].output_type
+    if op.method_name in {"where", "map", "sort_values", "dropna", "fillna",
+                          "set_axis"}:
+        return source
+    if op.method_name == "to_frame" and source is OutputType.SERIES:
+        return OutputType.FRAME
+    if op.method_name == "reset_index":
+        # Series.reset_index(drop=False) widens to a DataFrame. The drop=True
+        # case is handled above by make_reset_index_op.
+        return OutputType.FRAME
+    return None
 
 
 def _is_row_col_indexer(op: GetItemOp) -> bool:
@@ -163,6 +213,8 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 # enclosing `df[...]` then sees a mask and folds the chain into a
                 # StrExpr predicate, matching the StringMethodOp directly.
                 new_op = make_string_method_op(op)
+            elif op.method_name in _SCALAR_COMPARISONS:
+                new_op = _make_scalar_comparison(op)
             elif is_supported_column_method(op):
                 new_op = make_column_method_op(op)
             elif op.method_name == "groupby":
@@ -171,6 +223,12 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 op.output_type = OutputType.FRAME
             elif _is_aggregation(op):
                 new_op = make_aggregate_op(op)
+            elif _is_value_counts(op):
+                # Expands to an aggregation plus a sort, and returns the sort;
+                # the caller rewires this op's consumers onto whatever comes back.
+                new_op = make_value_counts_ops(op)
+            elif op.method_name == "reset_index":
+                new_op = make_reset_index_op(op)
             elif op.method_name in ["rename"]:
                 new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs,
                                     outputs=op.outputs)
@@ -196,6 +254,11 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 new_op = make_join_op(op)
             elif op.method_name in _SELECTION_METHODS:
                 new_op = make_selection_op(op)
+
+            if new_op is None and op.output_type is OutputType.UNKNOWN:
+                inferred = _opaque_method_output_type(op)
+                if inferred is not None:
+                    op.output_type = inferred
 
         # GetAttr Fusing and conversion to GetAttrDataframeOp
         elif isinstance(op, GetAttrOp):

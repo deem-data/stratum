@@ -13,6 +13,7 @@ from .logical._split_ops import SplitOutput
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
 from .logical._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
+from .logical._relational_rewrites import relational_rewrites
 from ._linearization import linearize_dag
 from ._fit_pass_planning import mark_fit_dead_ops
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
@@ -74,12 +75,14 @@ class OptConfig():
         algebraic_rewrites: bool = True,
         algebraic_rewrite_config: AlgebraicRewritesConfig | None = None,
         propagate_schema: bool = True,
+        semi_join_rewrite: bool = True,
     ):
         self.cse = cse
         self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
         self.numeric_ops = numeric_ops
         self.algebraic_rewrites = algebraic_rewrites
+        self.semi_join_rewrite = semi_join_rewrite
         if algebraic_rewrite_config is None:
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
@@ -190,6 +193,11 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
     if config.algebraic_rewrites:
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
         _debug_show_graph(root, "algebraic_rewrite")
+
+    # Shape rewrites after the expression ones, and after CSE, so the build side
+    # a promoted join reads is already shared with whatever else produced it.
+    root = relational_rewrites(root, semi_join=config.semi_join_rewrite)
+    _debug_show_graph(root, "relational_rewrite")
 
     # Last, so every rewrite above sees the plan shape it was written against. A plan
     # whose choices were not unrolled is not an executable candidate set, so it gets no

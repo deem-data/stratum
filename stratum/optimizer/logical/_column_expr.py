@@ -92,6 +92,15 @@ class ColumnExpr:
         """Return a copy with operand references remapped."""
         return self
 
+    def has_aggregate(self) -> bool:
+        """Whether this subtree contains a reduction (an :class:`AggExpr`).
+
+        The grammar is row-wise everywhere else, so an aggregate is only legal at
+        the root of an aggregation entry. Composite nodes recurse; the leaves keep
+        this default.
+        """
+        return False
+
 
 class Col(ColumnExpr):
     """Reference to a source-frame column."""
@@ -115,6 +124,29 @@ class Col(ColumnExpr):
     def to_pandas_query(self, params):
         # Backtick the name so spaces / keywords / dots stay valid inside the query.
         return f"`{self.name}`"
+
+
+class AllCols(ColumnExpr):
+    """Every column of the source frame (polars ``pl.all()``).
+
+    Lets ``df.groupby(k).sum()`` stay one aggregation entry instead of needing one
+    per column, which the logical layer cannot enumerate without schema
+    propagation. Inside a grouped aggregation both backends exclude the grouping
+    keys from the wildcard, so the two agree.
+    """
+    __slots__ = ()
+
+    def _key(self):
+        return ()
+
+    def __repr__(self):
+        return "AllCols()"
+
+    def to_pandas(self, ctx):
+        return ctx.frame
+
+    def to_polars(self, ctx):
+        return pl.all()
 
 
 class Const(ColumnExpr):
@@ -213,6 +245,9 @@ class BinOpExpr(ColumnExpr):
         return BinOpExpr(self.op, self.left.remap_operand_refs(mapping),
                          self.right.remap_operand_refs(mapping))
 
+    def has_aggregate(self):
+        return self.left.has_aggregate() or self.right.has_aggregate()
+
 
 class UnaryOpExpr(ColumnExpr):
     """Unary operation on an expression."""
@@ -248,6 +283,10 @@ class UnaryOpExpr(ColumnExpr):
 
     def remap_operand_refs(self, mapping):
         return UnaryOpExpr(self.op, self.operand.remap_operand_refs(mapping))
+
+    def has_aggregate(self):
+        return self.operand.has_aggregate()
+
 
 
 class StrExpr(ColumnExpr):
@@ -285,6 +324,9 @@ class StrExpr(ColumnExpr):
         return StrExpr(self.operand.remap_operand_refs(mapping),
                        self.method, self.args, self.kwargs)
 
+    def has_aggregate(self):
+        return self.operand.has_aggregate()
+
 
 class DtExpr(ColumnExpr):
     """Datetime accessor attribute (``.dt.<attr>``).
@@ -320,6 +362,9 @@ class DtExpr(ColumnExpr):
 
     def remap_operand_refs(self, mapping):
         return DtExpr(self.operand.remap_operand_refs(mapping), self.attr)
+
+    def has_aggregate(self):
+        return self.operand.has_aggregate()
 
 
 class DatetimeExpr(ColumnExpr):
@@ -362,6 +407,171 @@ class DatetimeExpr(ColumnExpr):
         return DatetimeExpr(self.operand.remap_operand_refs(mapping),
                             self.args, self.kwargs)
 
+    def has_aggregate(self):
+        return self.operand.has_aggregate()
+
+
+# --- Aggregation --------------------------------------------------------------
+
+def _expand_agg_params(spec: dict) -> dict:
+    """Flatten ``{(func, ...): params}`` into ``{func: frozenset(params)}``."""
+    out: dict[str, frozenset] = {}
+    for funcs, params in spec.items():
+        for func in funcs:
+            if func in out:
+                raise ValueError(f"duplicate parameter entry for {func!r}")
+            out[func] = frozenset(params)
+    return out
+
+
+# Parameters each reduction accepts. Ported from the signature survey in #192 and
+# re-verified against pandas 3.0.2. Only parameters that change the *result* live
+# here; *how* a reduction runs is the physical layer's concern, so execution hints
+# have no logical spelling at all.
+AGG_PARAMS = _expand_agg_params({
+    ("sum", "prod", "min", "max", "first", "last"):
+                                          ("numeric_only", "min_count", "skipna"),
+    ("mean", "median"):                   ("numeric_only", "skipna"),
+    ("std", "var", "sem"):                ("ddof", "numeric_only", "skipna"),
+    ("skew", "kurt", "idxmin", "idxmax"): ("skipna", "numeric_only"),
+    ("all", "any"):                       ("skipna",),
+    ("quantile",):                        ("q", "interpolation", "numeric_only"),
+    ("nunique",):                         ("dropna",),
+    ("count", "size"):                    (),
+})
+
+# Reduction -> polars ``Expr`` method. `sem` is deliberately absent (polars has no
+# equivalent) and `nunique` is handled separately, because polars' ``n_unique``
+# counts null as a distinct value while pandas' default drops it.
+#
+# idxmin/idxmax require original index labels, including inside each group.
+# They are refused until an implementation can preserve that information.
+_AGG_POLARS_METHODS = {
+    "sum": "sum", "prod": "product", "min": "min", "max": "max",
+    "first": "first", "last": "last", "mean": "mean", "median": "median",
+    "std": "std", "var": "var", "skew": "skew", "kurt": "kurtosis",
+    "idxmin": "arg_min", "idxmax": "arg_max", "all": "all", "any": "any",
+    "quantile": "quantile", "count": "count", "size": "len",
+}
+# Our parameter name -> the polars keyword. Anything outside this map has no
+# polars spelling on the reduction call.
+_AGG_POLARS_PARAMS = {"ddof": "ddof", "q": "quantile",
+                      "interpolation": "interpolation"}
+# Parameters that are a no-op on the polars side when left at their pandas
+# default, so they can be dropped instead of refused.
+_AGG_POLARS_NOOP_DEFAULTS = {"skipna": True, "numeric_only": False,
+                             "min_count": 0}
+# Fixed polars keywords needed to match pandas. pandas' skew/kurt are the
+# bias-corrected (sample) moments, while polars defaults to the biased
+# population form; `fisher=True` (excess kurtosis) is already polars' default and
+# matches pandas.
+_AGG_POLARS_FIXED_KWARGS = {"skew": {"bias": False}, "kurt": {"bias": False}}
+
+
+class AggExpr(ColumnExpr):
+    """Reduction of a row-wise expression, e.g. ``SUM(a * b)``.
+
+    ``func`` is the canonical reduction name, so ``.sum()`` and ``.agg("sum")``
+    normalize to the same node and compare equal -- which is what lets CSE merge
+    the two spellings. ``child`` is the row-wise expression being reduced;
+    ``params`` holds only result-affecting options, validated against
+    :data:`AGG_PARAMS`.
+
+    Evaluating a *grouped* aggregation is the operator's job, not the
+    expression's: ``to_polars`` returns the same ``pl.Expr`` in either case (it
+    goes inside ``group_by(...).agg(...)`` or a bare ``select``), while
+    ``to_pandas`` performs the whole-object reduction, and the grouped pandas
+    path reads ``func``/``params`` off the node instead.
+    """
+    __slots__ = ("func", "child", "params")
+
+    def __init__(self, func: str, child: ColumnExpr, params: dict | None = None):
+        allowed = AGG_PARAMS.get(func)
+        if allowed is None:
+            raise NotImplementedError(f"unsupported aggregation {func!r}")
+        params = dict(params or {})
+        unsupported = sorted(set(params) - allowed)
+        if unsupported:
+            raise NotImplementedError(
+                f"unsupported parameters for {func!r}: {', '.join(unsupported)}")
+        if child.has_aggregate():
+            # The grammar below an aggregate is row-wise; a nested reduction has
+            # no meaning and would break the one-kernel property.
+            raise ValueError(f"nested aggregation in {func!r}")
+        self.func = func
+        self.child = child
+        self.params = params
+
+    def _key(self):
+        return (self.func, self.child, frozenset(self.params.items()))
+
+    def __repr__(self):
+        inner = ", ".join([repr(self.child)]
+                          + [f"{k}={v!r}" for k, v in self.params.items()])
+        return f"{self.func}({inner})"
+
+    def to_pandas(self, ctx):
+        obj = self.child.to_pandas(ctx)
+        # `numeric_only` picks columns out of a frame; the child is a single
+        # column by construction, so it never applies here.
+        params = {k: v for k, v in self.params.items() if k != "numeric_only"}
+        if self.func == "size":
+            return obj.size
+        if self.func in ("first", "last"):
+            # pandas 3.0 has no Series.first/last; they only exist on a groupby.
+            return obj.iloc[0 if self.func == "first" else -1]
+        return getattr(obj, self.func)(**params)
+
+    def supports_polars(self):
+        # arg_min/arg_max return positions within a group, not index labels.
+        if self.func in {"idxmin", "idxmax", "sem"}:
+            return False
+        params = {k: v for k, v in self.params.items()
+                  if _AGG_POLARS_NOOP_DEFAULTS.get(k, object()) != v}
+        allowed = {"dropna"} if self.func == "nunique" else set(_AGG_POLARS_PARAMS)
+        return not (set(params) - allowed)
+
+    def to_polars(self, ctx):
+        if self.func in {"idxmin", "idxmax", "sem"}:
+            raise NotImplementedError(f"AggExpr({self.func!r}) has no equivalent Polars lowering")
+        obj = self.child.to_polars(ctx)
+        if self.func in {"first", "last"} and self.params.get("skipna", True):
+            obj = obj.drop_nulls()
+        params = {k: v for k, v in self.params.items()
+                  if _AGG_POLARS_NOOP_DEFAULTS.get(k, object()) != v}
+        if self.func == "nunique":
+            # polars counts null as a distinct value; pandas drops it by default.
+            if params.pop("dropna", True):
+                obj = obj.drop_nulls()
+            return obj.n_unique()
+        method = _AGG_POLARS_METHODS.get(self.func)
+        if method is None:
+            raise NotImplementedError(
+                f"AggExpr({self.func!r}) has no Polars equivalent")
+        unsupported = sorted(set(params) - set(_AGG_POLARS_PARAMS))
+        if unsupported:
+            raise NotImplementedError(
+                f"AggExpr({self.func!r}) parameters unsupported by Polars: "
+                f"{', '.join(unsupported)}")
+        if self.func == "quantile":
+            # pandas defaults q=0.5 / interpolation="linear"; polars defaults
+            # interpolation="nearest", so both are passed explicitly.
+            params.setdefault("q", 0.5)
+            params.setdefault("interpolation", "linear")
+        kwargs = {_AGG_POLARS_PARAMS[k]: v for k, v in params.items()}
+        kwargs.update(_AGG_POLARS_FIXED_KWARGS.get(self.func, {}))
+        return getattr(obj, method)(**kwargs)
+
+    def iter_operand_refs(self):
+        yield from self.child.iter_operand_refs()
+
+    def remap_operand_refs(self, mapping):
+        return AggExpr(self.func, self.child.remap_operand_refs(mapping),
+                       self.params)
+
+    def has_aggregate(self):
+        return True
+
 
 def _iter_value_refs(value):
     if isinstance(value, ColumnExpr):
@@ -372,6 +582,16 @@ def _iter_value_refs(value):
     elif isinstance(value, dict):
         for item in value.values():
             yield from _iter_value_refs(item)
+
+
+def _value_has_aggregate(value) -> bool:
+    if isinstance(value, ColumnExpr):
+        return value.has_aggregate()
+    if isinstance(value, (list, tuple)):
+        return any(_value_has_aggregate(item) for item in value)
+    if isinstance(value, dict):
+        return any(_value_has_aggregate(item) for item in value.values())
+    return False
 
 
 def _remap_expr_value(value, mapping):
@@ -466,6 +686,12 @@ class ColumnMethodExpr(ColumnExpr):
             _remap_expr_value(self.args, mapping),
             _remap_expr_value(self.kwargs, mapping),
         )
+
+    def has_aggregate(self):
+        # Expression-valued arguments are row-wise operands too, e.g. the other
+        # side of `a.where(cond, b)`.
+        return (self.operand.has_aggregate() or _value_has_aggregate(self.args)
+                or _value_has_aggregate(self.kwargs))
 
 
 # --- Conversion: op subgraph -> ColumnExpr -----------------------------------

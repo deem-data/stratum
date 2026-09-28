@@ -255,6 +255,7 @@ def build_default_physical_registry() -> PhysicalRegistry:
     from stratum.optimizer.physical import _aggregation_execs  # noqa: F401
     from stratum.optimizer.physical import _projection_execs  # noqa: F401
     from stratum.optimizer.physical import _selection_execs  # noqa: F401
+    from stratum.optimizer.physical import _sort_execs  # noqa: F401
     from stratum.optimizer.physical import _map_execs  # noqa: F401
     from stratum.optimizer.physical import _getitem_execs  # noqa: F401
 

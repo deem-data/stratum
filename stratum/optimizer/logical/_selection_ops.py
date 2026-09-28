@@ -1,5 +1,6 @@
 from enum import Enum, auto
-from stratum.optimizer.logical._ops import OperandRef, OutputType, GetItemOp, MethodCallOp, Op
+from stratum.optimizer.logical._ops import (
+    FRAME_TYPES, OperandRef, OutputType, GetItemOp, MethodCallOp, Op)
 from stratum.optimizer.logical._column_expr import ColumnExpr, fold_column_expr
 
 
@@ -102,21 +103,25 @@ def make_selection_op(op: MethodCallOp) -> SelectionOp:
 # --- Mask selection: df[bool_series] -> SelectionOp(MASK, predicate) ----------
 
 def is_mask_selection(op: GetItemOp) -> bool:
-    """Return whether ``op`` is ``df[series]`` (e.g. a boolean mask).
+    """Return whether ``op`` is ``container[series]`` (e.g. a boolean mask).
 
     Boolean-ness isn't tracked in the type lattice, so any series-keyed indexing
-    of a frame counts.
+    of frame-world data counts. The container may itself be a series:
+    ``counts[counts >= 3]`` is as much a filter as ``df[df["a"] >= 3]``, and both
+    backends index a series by a mask the same way they index a frame.
 
     TODO: this misfires on a non-boolean series key (positional/label indexing,
     ``df[int_or_label_series]``), which is not a filter -- the polars fast path
-    then calls ``.filter()`` on a non-boolean series. Gate on boolean dtype once
-    the type lattice tracks it.
+    then calls ``.filter()`` on a non-boolean series. Accepting a series
+    container widens the surface of that pre-existing hazard, since label
+    indexing by a series is more idiomatic on a series than on a frame. Gate on
+    boolean dtype once the type lattice tracks it.
     """
     if not isinstance(op.key, OperandRef):
         return False
     container = op.inputs[0]
     key_op = op.inputs[op.key.k]
-    return (container.output_type is OutputType.FRAME
+    return (container.output_type in FRAME_TYPES
             and key_op.output_type is OutputType.SERIES)
 
 
@@ -133,7 +138,8 @@ def make_mask_selection_op(op: GetItemOp) -> SelectionOp:
 
     sel = SelectionOp(kind=SelectionKind.MASK, predicate=predicate,
                       inputs=[src, *leaf_ops], outputs=list(op.outputs))
-    sel.output_type = OutputType.FRAME
+    # Filtering rows keeps the container's kind: a masked series is still a series.
+    sel.output_type = src.output_type
 
     # Detach every absorbed op from the graph (remove it from its inputs' output
     # lists, then clear its edges).

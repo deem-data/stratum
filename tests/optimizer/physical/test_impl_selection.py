@@ -22,6 +22,7 @@ from stratum.optimizer.physical._impl_selection import (
     DefaultImplementationSelector,
     FlagBasedSelector,
     GreedyImplementationSelector,
+    bind_op,
     get_implementation_selector,
     select_implementations,
 )
@@ -263,6 +264,49 @@ class TestRelationalImplementationSelection(unittest.TestCase):
                     selector=GreedyImplementationSelector(),
                 )
                 self.assertIsInstance(op, expected_impl)
+
+
+class TestUnrunnableOpsFailAtPlanTime(unittest.TestCase):
+    """An operator nothing can run must say so while planning, not while running.
+
+    The frame families are pure config with no ``process`` of their own, so an
+    unbound one used to surface as a bare NotImplementedError from the base class
+    at execution, far from the decision that caused it.
+    """
+
+    def _registry(self, *impls):
+        return PhysicalRegistry(impls)
+
+    def test_every_backend_refusing_is_a_plan_time_error(self):
+        registry = self._registry(_impl(SelectionOp, "pandas",
+                                        supports=lambda op, ctx: False))
+        with self.assertRaises(NotImplementedError) as cm:
+            bind_op(SelectionOp(kind=SelectionKind.MASK), _ctx(),
+                    registry=registry, selector=DefaultImplementationSelector())
+        self.assertIn("refused", str(cm.exception))
+
+    def test_a_backend_mismatch_is_a_plan_time_error(self):
+        # Nothing refused, but the selector is pinned to a backend none of the
+        # supported impls provide.
+        registry = self._registry(_impl(SelectionOp, "pandas"))
+        with self.assertRaises(NotImplementedError) as cm:
+            bind_op(SelectionOp(kind=SelectionKind.MASK), _ctx(backend="polars"),
+                    registry=registry, selector=FlagBasedSelector())
+        self.assertIn("polars", str(cm.exception))
+
+    def test_an_op_that_can_run_itself_is_left_alone(self):
+        # The estimator families do define `process`, so an optional accelerator
+        # refusing them is not an error.
+        registry = self._registry(_impl(DummyOp, "rust",
+                                        supports=lambda op, ctx: False))
+        op = DummyOp()
+        self.assertIs(op, bind_op(op, _ctx(), registry=registry,
+                                  selector=DefaultImplementationSelector()))
+
+    def test_an_op_with_no_registered_impl_is_left_alone(self):
+        op = SelectionOp(kind=SelectionKind.MASK)
+        self.assertIs(op, bind_op(op, _ctx(), registry=PhysicalRegistry(),
+                                  selector=DefaultImplementationSelector()))
 
 
 class TestPlanTimeBinding(unittest.TestCase):

@@ -88,6 +88,10 @@ class PandasMetadataOp(MetadataOp, PhysicalOp):
 class PolarsMetadataOp(MetadataOp, PhysicalOp):
     def process(self, mode: str, inputs: list):
         _obj = inputs[0]
+        if self.func == "reset_index":
+            # Extraction only admits the dropping form, and polars rows carry no
+            # labels to drop, so there is nothing to do.
+            return _obj
         _args = _resolve_args(self.args, inputs)
         _kwargs = _resolve_kwargs(self.kwargs, inputs)
         if "columns" in _kwargs:
@@ -285,6 +289,19 @@ class PandasGetAttrProjectionOp(GetAttrProjectionOp, PhysicalOp):
 
 @physical_impl(of=GetAttrProjectionOp, backend="polars")
 class PolarsGetAttrProjectionOp(GetAttrProjectionOp, PhysicalOp):
+
+    @classmethod
+    def supports(cls, op: GetAttrProjectionOp, ctx) -> bool:
+        """Refuse ``.index``: polars frames have no index.
+
+        There is no per-op translation either. What ``.index`` means depends on
+        what produced the value, e.g. on a grouped count it is the grouping key,
+        which polars keeps as an ordinary column instead. The shape only becomes
+        backend-neutral once the surrounding cone is rewritten into a semi-join,
+        so until then a plan containing one is pandas-only.
+        """
+        return op.attr_name != ["index"]
+
     def process(self, mode: str, inputs: list):
         result = inputs[0]
         tmp = result

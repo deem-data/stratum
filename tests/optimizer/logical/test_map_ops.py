@@ -16,7 +16,7 @@ from stratum.optimizer.logical._column_expr import (
     StrExpr, _Folder)
 from stratum.optimizer.logical._column_methods import ColumnMethodOp
 from stratum.optimizer.logical._ops import (
-    BinOp, GetItemOp, Op, OperandRef, UnaryOp)
+    BinOp, GetItemOp, MethodCallOp, Op, OperandRef, UnaryOp)
 from .test_dataframe_ops import (
     optimize, run_op, force_polars, make_map_op)
 
@@ -410,6 +410,26 @@ def test_assign_pipeline_evaluates(polars):
     assert [124, 125] == list(result["c3"])
     assert [1, 3] == list(result["c4"])
     assert [1, 3] == list(result["c5"])
+
+
+def test_scalar_comparison_methods_fold_and_evaluate(polars):
+    df = pd.DataFrame({"age": [2, 5, 8], "cat": ["A", "B", "A"]})
+    src = st.as_data_op(df)
+    out = src.assign(recent=src["age"].le(5), category=src["cat"].eq("A"))
+    maps = [op for op in optimize(out) if isinstance(op, AssignMapOp)]
+    assert len(maps) == 1
+    assert all(isinstance(expr, BinOpExpr) for expr in maps[0].entries.values())
+    result = st._api.evaluate(out)
+    assert list(result["recent"]) == [True, True, False]
+    assert list(result["category"]) == [True, False, True]
+
+
+def test_series_comparison_method_keeps_pandas_alignment():
+    df = pd.DataFrame({"a": [1, 2], "b": [1, 3]})
+    src = st.as_data_op(df)
+    ops = optimize(src.assign(same=src["a"].eq(src["b"])))
+    assert any(isinstance(op, MethodCallOp) and op.method_name == "eq"
+               for op in ops)
 
 
 def test_chained_assign_maps_evaluate(polars):

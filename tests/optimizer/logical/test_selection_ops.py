@@ -13,7 +13,8 @@ from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._dataframe_ops import (
     ColumnProjectionOp, SelectionKind, SelectionOp)
 from stratum.optimizer.logical._ops import BinOp, GetItemOp, UnaryOp, Op, OperandRef, OutputType
-from stratum.optimizer.logical._column_expr import Col, Const, BinOpExpr, UnaryOpExpr, OperandLeaf, StrExpr
+from stratum.optimizer.logical._column_expr import (
+    Col, ColumnMethodExpr, Const, BinOpExpr, UnaryOpExpr, OperandLeaf, StrExpr)
 from stratum.optimizer.physical._source_execs import rechunk_pl_frame
 from .test_dataframe_ops import (
     optimize, run_op, force_polars)
@@ -300,6 +301,83 @@ class TestMaskFolding(unittest.TestCase):
         # The shared column df["x"] has an external consumer (the assign), so it
         # survives as a standalone column op -- now a ColumnProjectionOp.
         self.assertTrue(any(isinstance(o, ColumnProjectionOp) for o in ops))  # column kept
+
+
+class TestSeriesMaskFolding(unittest.TestCase):
+    """A series is as filterable as a frame: `counts[counts >= 3]` folds too."""
+
+    def setUp(self):
+        self.df = pd.DataFrame({"v": [1, 5, 3, 2], "w": [9, 8, 7, 6]})
+
+    def _mask(self, ops):
+        masks = [o for o in ops if isinstance(o, SelectionOp)
+                 and o.kind is SelectionKind.MASK]
+        self.assertEqual(1, len(masks), "expected exactly one mask SelectionOp")
+        return masks[0]
+
+    def _filtered(self):
+        data = st.as_data_op(self.df)
+        series = data["v"]
+        return optimize(series[series >= 3], OptConfig(dataframe_ops=True))
+
+    def test_a_masked_series_folds_and_stays_a_series(self):
+        sel = self._mask(self._filtered())
+        self.assertIs(OutputType.SERIES, sel.output_type)
+
+    def test_the_series_refers_to_itself_through_operand_zero(self):
+        # The predicate's subject *is* the source, which the folder spells as the
+        # operand-zero leaf rather than a named column.
+        sel = self._mask(self._filtered())
+        self.assertEqual(BinOpExpr(operator.ge, OperandLeaf(OperandRef(0)), Const(3)),
+                         sel.predicate)
+
+    def test_it_executes_like_plain_pandas(self):
+        ops = self._filtered()
+        pool_values = {}
+        for op in ops:
+            pool_values[id(op)] = op.process(
+                "fit_transform", [pool_values[id(i)] for i in op.inputs])
+        expected = self.df["v"][self.df["v"] >= 3]
+        pd.testing.assert_series_equal(pool_values[id(ops[-1])], expected)
+
+    def test_the_query_fast_path_is_frame_only(self):
+        # `DataFrame.query` has no series spelling, so a masked series must never
+        # be routed to it even with the flag on.
+        from stratum.optimizer.physical._selection_execs import _query_selectable
+        sel = self._mask(self._filtered())
+        sel.output_type = OutputType.FRAME
+        sel.predicate = BinOpExpr(operator.ge, Col("v"), Const(3))
+        self.assertTrue(_query_selectable(sel))
+        sel.output_type = OutputType.SERIES
+        self.assertFalse(_query_selectable(sel))
+
+
+class TestIsInPredicate(unittest.TestCase):
+    """`isin` folds into a selection as the column-method node (#213) for both a
+    literal collection and a graph-fed relation; only the latter is promoted."""
+
+    def setUp(self):
+        self.pdf = pd.DataFrame({"c": ["a", "b", "c", "a"]})
+
+    def _predicate(self, build):
+        ops = optimize(build(), OptConfig(dataframe_ops=True, semi_join_rewrite=False))
+        return next(o for o in ops if isinstance(o, SelectionOp)).predicate
+
+    def test_a_literal_collection_folds_into_the_predicate(self):
+        data = st.as_data_op(self.pdf)
+        predicate = self._predicate(lambda: data[data["c"].isin(["a", "c"])])
+        self.assertEqual(ColumnMethodExpr(Col("c"), "isin", (["a", "c"],)), predicate)
+
+    def test_a_relation_stays_a_leaf(self):
+        data = st.as_data_op(self.pdf)
+        other = st.as_data_op(pd.DataFrame({"c": ["a"]}))
+        predicate = self._predicate(lambda: data[data["c"].isin(other["c"])])
+        self.assertEqual(
+            ColumnMethodExpr(Col("c"), "isin", (OperandLeaf(OperandRef(1)),)), predicate)
+
+    def test_a_membership_test_is_not_an_aggregate(self):
+        self.assertFalse(
+            ColumnMethodExpr(Col("c"), "isin", (("a", "c"),)).has_aggregate())
 
 
 class TestColumnExprOperandRefs(unittest.TestCase):

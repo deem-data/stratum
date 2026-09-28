@@ -20,6 +20,8 @@ from stratum.optimizer.logical._projection_ops import StringMethodOp
 from stratum.optimizer._optimize import optimize as optimize_full
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._column_methods import ColumnMethodOp
+from stratum.optimizer.logical._column_expr import (
+    AggExpr, AllCols, BinOpExpr, Col, DtExpr)
 from stratum.optimizer.logical._scoring import Metric
 from tests._helpers import csv_file
 
@@ -701,17 +703,27 @@ class TestSchemaPropagation(unittest.TestCase):
                 self.assertFalse(any(isinstance(v, pd.DataFrame) for v in values))
 
     # --- aggregation (groupby.agg) --------------------------------------
-    def test_aggregate_dict_spec_keys_are_columns(self):
+    @staticmethod
+    def _aggregate(aggregations, grouping=(Col("g"),), **options):
+        return AggregateOp(grouped=True, grouping=grouping,
+                           aggregations=aggregations, options=options)
+
+    def test_aggregate_named_entries_are_columns(self):
         # as_index defaults to True -> grouping key `g` goes to the index, not a column.
-        op = AggregateOp(grouping_attributes="g", aggregations={"v": "sum"})
+        op = self._aggregate(((None, AggExpr("sum", Col("v"))),))
         op.inputs = [_stub(pl.Schema({"g": pl.Int64, "v": pl.Int64}))]
         op.propagate_output_schema()
         self.assertEqual(["v"], list(op.output_schema.keys()))
         self.assertEqual(pl.Unknown, op.output_schema["v"])
 
+    def test_aggregate_explicit_name_wins(self):
+        op = self._aggregate((("total", AggExpr("sum", Col("v"))),))
+        op.inputs = [_stub(pl.Schema({"g": pl.Int64, "v": pl.Int64}))]
+        op.propagate_output_schema()
+        self.assertEqual(["total"], list(op.output_schema.keys()))
+
     def test_aggregate_as_index_false_keeps_grouping_keys(self):
-        op = AggregateOp(grouping_attributes="g", aggregations={"v": "sum"},
-                         groupby_kwargs={"as_index": False})
+        op = self._aggregate(((None, AggExpr("sum", Col("v"))),), as_index=False)
         op.inputs = [_stub(pl.Schema({"g": pl.Int64, "v": pl.Int64}))]
         op.propagate_output_schema()
         self.assertEqual(["g", "v"], list(op.output_schema.keys()))
@@ -719,23 +731,44 @@ class TestSchemaPropagation(unittest.TestCase):
     def test_aggregate_as_index_false_skips_unknown_grouping_key(self):
         # as_index=False adds grouping keys as columns, but only those actually
         # present in the input schema; an unknown key is simply not emitted.
-        op = AggregateOp(grouping_attributes="g", aggregations={"v": "sum"},
-                         groupby_kwargs={"as_index": False})
+        op = self._aggregate(((None, AggExpr("sum", Col("v"))),), as_index=False)
         op.inputs = [_stub(pl.Schema({"v": pl.Int64}))]
         op.propagate_output_schema()
         self.assertEqual(["v"], list(op.output_schema.keys()))
 
-    def test_aggregate_string_spec_is_unknown(self):
+    def test_aggregate_as_index_false_computed_key_is_unknown(self):
+        # A computed key has no static column name to emit.
+        op = self._aggregate(((None, AggExpr("sum", Col("v"))),),
+                             grouping=(DtExpr(Col("d"), "year"),), as_index=False)
+        op.inputs = [_stub(pl.Schema({"d": pl.Datetime("us"), "v": pl.Int64}))]
+        op.propagate_output_schema()
+        self.assertIsNone(op.output_schema)
+
+    def test_aggregate_wildcard_is_unknown(self):
         # a bare function name aggregates every column -> not statically known.
-        op = AggregateOp(grouping_attributes="g", aggregations="sum")
+        op = self._aggregate(((None, AggExpr("sum", AllCols())),))
         op.inputs = [_stub(pl.Schema({"g": pl.Int64, "v": pl.Int64}))]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
-    def test_aggregate_list_value_spec_is_unknown(self):
-        # a list value produces MultiIndex columns -> not representable -> unknown.
-        op = AggregateOp(grouping_attributes="g", aggregations={"v": ["sum", "mean"]})
+    def test_aggregate_unnamed_computed_child_has_a_logical_name(self):
+        # Every backend uses the name fixed by the logical aggregation.
+        child = BinOpExpr(operator.mul, Col("a"), Col("b"))
+        op = self._aggregate(((None, AggExpr("sum", child)),))
+        op.inputs = [_stub(pl.Schema({"g": pl.Int64, "a": pl.Int64, "b": pl.Int64}))]
+        op.propagate_output_schema()
+        self.assertEqual(pl.Schema({"_agg0": pl.Unknown}), op.output_schema)
+
+    def test_aggregate_duplicate_output_name_is_unknown(self):
+        op = self._aggregate((("v", AggExpr("sum", Col("v"))),
+                              (None, AggExpr("mean", Col("v")))))
         op.inputs = [_stub(pl.Schema({"g": pl.Int64, "v": pl.Int64}))]
+        op.propagate_output_schema()
+        self.assertIsNone(op.output_schema)
+
+    def test_aggregate_whole_object_reduction_is_unknown(self):
+        op = AggregateOp(grouped=False, aggregations=((None, AggExpr("sum", AllCols())),))
+        op.inputs = [_stub(pl.Schema({"v": pl.Int64}), OutputType.FRAME)]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
