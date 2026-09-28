@@ -1,17 +1,11 @@
 import pandas as pd
 from skrub import DataOp
-from skrub._data_ops._data_ops import SplitX
-from skrub._data_ops._estimator import _Splitter
-# Aliased: this module defines its own `evaluate` for the train/test path.
-from skrub._data_ops._evaluation import evaluate as skrub_evaluate
-from skrub._data_ops._evaluation import needs_eval
-from sklearn.model_selection import check_cv
 
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import SearchConfig, optimize
 from stratum.optimizer.logical._scoring import resolve_scoring
 from stratum.runtime._scheduler import SequentialScheduler
-from stratum.frontend._skrub_graph import find_x_impl, get_data
+from stratum.frontend._skrub_graph import get_data
 from time import perf_counter
 
 #TODO: Rename this file
@@ -33,7 +27,6 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
     env = get_data(dag)
     for k, v in env_extra.items():
         env[k] = v
-    cv = _resolve_cv(dag, cv, env)
     # The scorer is plan-time state: it decides what the plan's last operator computes,
     # and an unusable `scoring=` fails here rather than after a fold has been fitted.
     search = SearchConfig(metric=resolve_scoring(scoring),
@@ -43,40 +36,13 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
     linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search)
     sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0)
 
+    # Without an explicit `cv`, the folds come from the splitter the plan declares with
+    # `mark_as_X(cv=...)`, which the plan computes itself (see BuildSplitterOp).
     preds = sched.grid_search(cv)
 
     stats_printer(sched)
 
     return (sched,preds) if return_predictions else sched
-
-
-def _resolve_cv(dag: DataOp, cv, env: dict):
-    """Resolve the splitter to cross-validate with.
-
-    Mirrors skrub's ``_compute_cv_data``: an explicit ``cv`` is prioritized, otherwise the
-    splitter declared on the plan via ``mark_as_X(cv=..., split_kwargs=...)``
-    determines the folds.
-
-    The declared splitter is wrapped in skrub's ``_Splitter`` so ``split_kwargs``
-    (e.g. ``groups`` for ``GroupKFold``) reach it. ``split_kwargs`` defaults to
-    None when only ``cv`` is passed, hence the normalization to an empty dict.
-    """
-    if cv is not None:
-        return cv
-    impl = find_x_impl(dag)
-    if not isinstance(impl, SplitX) or impl.cv is None:
-        return None
-    declared_cv, split_kwargs = impl.cv, impl.split_kwargs
-    if needs_eval((declared_cv, split_kwargs)):
-        # Both may themselves be DataOps, which only the environment can resolve.
-        resolved = skrub_evaluate(
-            {"cv": declared_cv, "split_kwargs": split_kwargs},
-            mode="fit_transform",
-            environment=env,
-            clear=True,
-        )
-        declared_cv, split_kwargs = resolved["cv"], resolved["split_kwargs"]
-    return _Splitter(check_cv(declared_cv), split_kwargs or {})
 
 
 def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):

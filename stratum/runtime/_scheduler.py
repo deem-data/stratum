@@ -54,8 +54,13 @@ class Scheduler:
         return self._format_predict_result(rows)["vals"][0]
 
     def grid_search(self, cv=None):
-        """Perform grid search with cross-validation on the plan."""
-        cv = check_cv(cv)
+        """Perform grid search with cross-validation on the plan.
+
+        An explicit ``cv`` takes precedence over the splitter the plan declares with
+        ``mark_as_X(cv=...)``, as in skrub. With neither, the folds are ``KFold(5)``.
+        """
+        if cv is not None:
+            cv = check_cv(cv)
         logger.debug("\n" + "="*100 + "\n" + "Starting grid search" + "\n" + "="*100 + "\n")
         # Before the sink: a plan with no X/y has no candidate set either, and the
         # missing marks are the more useful thing to report.
@@ -67,6 +72,8 @@ class Scheduler:
                 f" {type(sink).__name__}, not ScoreCandidates. Build it with"
                 " `optimize(..., search=SearchConfig(...))`."
             )
+        if cv is None:
+            cv = self._declared_splitter(split_op)
 
         results, predictions = [], []
 
@@ -76,6 +83,18 @@ class Scheduler:
         self.results_ = results
         self._finish()
         return predictions if sink.emit_predictions else None
+
+    def _declared_splitter(self, split_op: SplitOp):
+        """The splitter the plan declares, or ``KFold(5)`` if it declares none.
+
+        The pass up to the split has computed it, from operands such as ``groups``
+        that the plan computes anyway (see `BuildSplitterOp`).
+        """
+        if split_op.splitter is None:
+            return check_cv(None)
+        splitter = self.pool.pin(split_op.splitter)
+        self.pool.unpin(split_op.splitter)
+        return splitter
 
     def cross_validate(self, split_op, cv, predictions: list, results: list,
                        return_predictions: bool, response_mode: str = "predict"):

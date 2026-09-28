@@ -304,5 +304,49 @@ class CrossValidationSplitterTest(unittest.TestCase):
         assert np.allclose(search.results_["mean_test_score"], sched.results_["scores"])
 
 
+_LOADS = {"n": 0}
+
+
+def _load(seed):
+    """Stands in for an expensive read upstream of both X and the groups."""
+    _LOADS["n"] += 1
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame(rng.normal(size=(300, 3)), columns=list("abc"))
+    return df.assign(g=rng.integers(0, 3, 300), t=(df.a > 0).astype(int))
+
+
+class PlanComputedSplitterTest(unittest.TestCase):
+    """Regression tests for issue #225: a splitter declared with DataOps is computed by
+    the plan, so what it reads is computed once, by the scheduler."""
+
+    def _plan(self, cv):
+        rows = st.var("seed", 0).skb.apply_func(_load)
+        y = rows["t"].skb.mark_as_y()
+        X = rows.drop(columns=["t"]).skb.mark_as_X(cv=cv, split_kwargs={"groups": rows["g"]})
+        pred = X.skb.apply(LogisticRegression(), y=y)
+        # Building the plan computes skrub's previews.
+        _LOADS["n"] = 0
+        return pred
+
+    def _assert_matches_skrub(self, pred, cv=None):
+        with config(scheduler=True):
+            sched = st._api.grid_search(pred, cv=cv, scoring="accuracy")
+        self.assertEqual(_LOADS["n"], 1)
+        expected = pred.skb.make_grid_search(cv=cv, fitted=True, refit=False,
+                                             scoring="accuracy")
+        np.testing.assert_allclose(sched.results_["scores"].to_list(),
+                                   expected.results_["mean_test_score"])
+
+    def test_groups_computed_once(self):
+        self._assert_matches_skrub(self._plan(GroupKFold(n_splits=3)))
+
+    def test_splitter_from_a_variable(self):
+        # `cv` may itself be a DataOp; the plan resolves it like any other operand.
+        self._assert_matches_skrub(self._plan(st.var("cv", GroupKFold(n_splits=3))))
+
+    def test_explicit_cv_overrides_declared_splitter(self):
+        self._assert_matches_skrub(self._plan(GroupKFold(n_splits=3)), cv=KFold(n_splits=2))
+
+
 if __name__ == "__main__":
     unittest.main()
