@@ -32,6 +32,8 @@ from stratum.optimizer.physical._predictor_execs import (
     LinearRegressionOp,
     LogisticRegressionOp,
     RandomForestOp,
+    RustExactRandomForestClassifier,
+    RustHistogramRandomForestClassifier,
     RidgeOp,
     SGDOp,
     XGBoostOp,
@@ -70,8 +72,18 @@ def test_default_registry_discovers_registered_operator_types():
     assert len(registry.candidates_for(StringEncoderOp, backend_name="rust")) == 1
     assert len(registry.candidates_for(StringEncoderOp, backend_name="sklearn-skrub")) == 1
 
-    # Each migrated predictor family carries exactly its sklearn-skrub reference impl.
-    for op_type in (RandomForestOp, ExtraTreesOp, DecisionTreeOp,
+    # Random forests expose exact and histogram Rust variants alongside sklearn.
+    forest_candidates = registry.candidates_for(RandomForestOp)
+    assert {candidate.implementation_name for candidate in forest_candidates} == {
+        "sklearn_rf", "rf_exact", "rf_hist"
+    }
+    assert {
+        candidate.impl_class for candidate in forest_candidates
+        if candidate.backend_name == "rust"
+    } == {RustExactRandomForestClassifier, RustHistogramRandomForestClassifier}
+
+    # Every other migrated predictor family carries its sklearn reference impl.
+    for op_type in (ExtraTreesOp, DecisionTreeOp,
                     HistGradientBoostingOp, KNeighborsOp, LinearRegressionOp,
                     RidgeOp, LassoOp, ElasticNetOp, LogisticRegressionOp, SGDOp,
                     LightGBMOp, XGBoostOp, CatBoostOp):
@@ -117,6 +129,13 @@ def test_rust_impl_is_its_own_dataclass_with_capability_hints():
     assert type(skrub) is PhysicalImpl
     assert skrub.impl_class is SkrubStringEncoder
     assert not hasattr(skrub, "releases_gil")
+
+
+def test_implementation_name_defaults_to_concrete_class_name():
+    registry = build_default_physical_registry()
+    (rust,) = registry.candidates_for(StringEncoderOp, backend_name="rust")
+
+    assert rust.implementation_name == RustStringEncoder.__name__
 
 
 def test_registry_registers_and_queries_impls_by_registered_type():

@@ -22,6 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.tree import ExtraTreeClassifier
 
 import stratum as st
+from stratum.adapters.tree_classifier import RustRandomForestClassifier
 from stratum._api import evaluate
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._base import All
@@ -61,12 +62,14 @@ from stratum.optimizer.physical._predictor_execs import (
     SklearnLinearRegression,
     SklearnLogisticRegression,
     SklearnRandomForest,
+    RustExactRandomForestClassifier,
+    RustHistogramRandomForestClassifier,
     SklearnRidge,
     SklearnSGD,
     XGBoostOp,
     lower_predictor,
 )
-from stratum.optimizer.physical._registry import (PhysicalImpl,
+from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry,
                                                   _current_process_execute,
                                                   _placeholder_cost,
                                                   _placeholder_exec_mem,
@@ -197,11 +200,17 @@ def test_every_selector_binds_the_reference_impl(module, name, family, impl, sel
     op = lower_predictor(PredictorOp(estimator=estimator), _ctx())
     select_implementations(op, _ctx(), selector=selector)
 
-    assert type(op) is impl
+    expected_impl = impl
+    if name == "RandomForestClassifier":
+        if isinstance(selector, GreedyImplementationSelector):
+            expected_impl = RustHistogramRandomForestClassifier
+
+    assert type(op) is expected_impl
     assert isinstance(op, family) and not op.is_abstract
-    # The reference impl runs the user's estimator as given.
-    assert type(op.estimator) is type(estimator)
-    assert type(op.original_estimator) is type(estimator)
+    if expected_impl is SklearnRandomForest or name != "RandomForestClassifier":
+        # Reference implementations run the user's estimator as given.
+        assert type(op.estimator) is type(estimator)
+        assert type(op.original_estimator) is type(estimator)
 
 
 def test_alternative_impl_registers_against_the_family_op():
@@ -215,13 +224,18 @@ def test_alternative_impl_registers_against_the_family_op():
         def supports(cls, op, ctx):
             return isinstance(op.original_estimator, RandomForestClassifier)
 
-    registry = build_default_physical_registry()
+    default_registry = build_default_physical_registry()
+    registry = PhysicalRegistry(
+        candidate for candidate in default_registry.candidates_for(RandomForestOp)
+        if candidate.backend_name == "sklearn-skrub"
+    )
     registry.register(PhysicalImpl(
         op_type=RandomForestOp, backend_name="stratum",
         input_format="frame", output_format="frame",
         supports=ClassifierOnlyForest.supports, cost=_placeholder_cost,
         exec_mem=_placeholder_exec_mem, execute=_current_process_execute,
         impl_class=ClassifierOnlyForest,
+        implementation_name="rf_hist",
     ))
 
     def bound(estimator, selector):
@@ -234,9 +248,70 @@ def test_alternative_impl_registers_against_the_family_op():
                  greedy) is ClassifierOnlyForest
     assert bound(_estimator("sklearn.ensemble", "RandomForestRegressor"),
                  greedy) is SklearnRandomForest
-    # The default policy keeps the sklearn reference even when an alternative fits.
+    # The generic default policy keeps sklearn when no family preference names
+    # either candidate.
     assert bound(_estimator("sklearn.ensemble", "RandomForestClassifier"),
                  DefaultImplementationSelector()) is SklearnRandomForest
+
+
+def _bound_forest(selector, estimator=None, **op_kwargs):
+    if estimator is None:
+        estimator = RandomForestClassifier(n_estimators=3, random_state=0)
+    op = lower_predictor(PredictorOp(estimator=estimator, **op_kwargs), _ctx())
+    select_implementations(op, _ctx(), selector=selector)
+    return op
+
+
+def test_random_forest_policy_keeps_default_on_sklearn_and_greedy_on_histogram():
+    default = _bound_forest(DefaultImplementationSelector())
+    hist = _bound_forest(GreedyImplementationSelector())
+
+    assert type(default) is SklearnRandomForest
+    assert type(hist) is RustHistogramRandomForestClassifier
+    assert isinstance(hist.original_estimator, RustRandomForestClassifier)
+    assert hist.original_estimator._stratum_forest_binding[0] == "histogram"
+    assert hist.original_estimator._stratum_forest_fit_args == (128,)
+    assert hist.original_estimator._stratum_worker_budget == _ctx().parallelism
+
+
+def test_greedy_op_preferences_can_make_exact_primary(monkeypatch):
+    monkeypatch.setitem(
+        GreedyImplementationSelector._OP_PREFERENCES,
+        RandomForestOp,
+        ("rf_exact", "rf_hist", "sklearn_rf"),
+    )
+    op = _bound_forest(GreedyImplementationSelector())
+
+    assert type(op) is RustExactRandomForestClassifier
+    assert op.original_estimator._stratum_forest_binding[0] == "exact"
+
+
+def test_greedy_falls_back_to_exact_when_histogram_runtime_is_unavailable(monkeypatch):
+    from stratum import _rust_backend as rb
+
+    monkeypatch.setattr(rb, "forest_fit_hist", None)
+    op = _bound_forest(GreedyImplementationSelector())
+
+    assert type(op) is RustExactRandomForestClassifier
+    assert op.original_estimator._stratum_forest_binding[0] == "exact"
+
+
+@pytest.mark.parametrize(
+    "estimator, op_kwargs",
+    [
+        (RandomForestClassifier(criterion="entropy"), {}),
+        (RandomForestClassifier(), {"kwargs": {"fit": {"sample_weight": [1.0]}}}),
+        (RandomForestClassifier(), {"param_refs": {"max_depth": OperandRef(1)}}),
+    ],
+)
+def test_unsupported_native_forest_configuration_retains_sklearn(
+    estimator, op_kwargs
+):
+    op = _bound_forest(
+        GreedyImplementationSelector(), estimator=estimator, **op_kwargs
+    )
+
+    assert type(op) is SklearnRandomForest
 
 
 def test_lowering_does_not_import_optional_libraries():

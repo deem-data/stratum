@@ -3,7 +3,7 @@ import os
 import time
 from . _config import get_config
 
-# Set the rust backend related config knobs
+# Resolve runtime configuration that the Rust extension reads from env vars.
 def __getattr__(name):
     rc = get_config()
     if name == "USE_RUST":      #feature flag for rust backend
@@ -30,6 +30,7 @@ def __getattr__(name):
         return (ap == "1") if ap is not None else bool(rc.get("allow_patch", False))
     raise AttributeError(name)
 
+# Import the compiled extension if it is available in the environment.
 try:
     from . import _rust_backend_native as native
     HAVE_RUST = True
@@ -37,7 +38,7 @@ except Exception as e:
     native = False
     HAVE_RUST = False
 
-# Utility methods for timing
+# Small timing helpers used by the Rust-backed code paths.
 #FIXME: Use INFO logging to be consistent with other files
 def start_timing():
     if __getattr__("DEBUG_TIMING"):
@@ -50,7 +51,7 @@ def print_timing(msg, start_time):
         print(f"[python] {msg}: {(end_time - start_time):8.3f}s")
 
 
-# pandas or polars series -> list (best-effort, minimal overhead)
+# Best-effort conversion from pandas/polars series to a Python list.
 def _to_list(col):
     try:
         return col.tolist()
@@ -64,7 +65,7 @@ def _to_list(col):
 
 #---------------------------------------------
 
-# Re-export compiled rust functions
+# Re-export compiled Rust entry points for the Python adapters.
 hashing_tfidf_fit = getattr(native, "hashing_tfidf_csr", None) if native else None
 hashing_tfidf_transform = getattr(native, "hashing_tfidf_csr_with_idf", None) if native else None
 tfidf_fit = getattr(native, "tfidf_fit_csr", None) if native else None
@@ -75,3 +76,11 @@ truncated_svd_fit = getattr(native, "truncated_svd_fit_from_csr", None) if nativ
 truncated_svd_transform = getattr(native, "truncated_svd_transform_from_csr", None) if native else None
 ohe_transform = getattr(native, "ohe_transform_csr", None) if native else None
 csr_to_dense = getattr(native, "csr_to_dense", None) if native else None
+tree_fit_exact = getattr(native, "tree_fit_exact", None) if native else None
+tree_model_from_arrays = getattr(native, "tree_model_from_arrays", None) if native else None
+tree_predict = getattr(native, "tree_predict", None) if native else None
+tree_model_arrays = getattr(native, "tree_model_arrays", None) if native else None
+forest_fit_exact = getattr(native, "forest_fit_exact", None) if native else None
+forest_fit_hist = getattr(native, "forest_fit_hist", None) if native else None
+forest_predict = getattr(native, "forest_predict", None) if native else None
+forest_model_info = getattr(native, "forest_model_info", None) if native else None

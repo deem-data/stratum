@@ -14,11 +14,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# Verify the exported native surface stays stable across the refactor.
 def test_native_extension_exports_expected_api():
     expected = {
         "_FdEmbedModelHandle",
         "_TfidfModelHandle",
         "_TruncatedSvdModelHandle",
+        "_TreeModelHandle",
+        "_ForestModelHandle",
         "csr_to_dense",
         "fd_fit_from_csr",
         "fd_transform_from_csr",
@@ -29,12 +32,21 @@ def test_native_extension_exports_expected_api():
         "tfidf_transform_csr",
         "truncated_svd_fit_from_csr",
         "truncated_svd_transform_from_csr",
+        "tree_fit_exact",
+        "tree_model_arrays",
+        "tree_model_from_arrays",
+        "tree_predict",
+        "forest_fit_exact",
+        "forest_fit_hist",
+        "forest_model_info",
+        "forest_predict",
     }
 
     actual = {name for name in dir(rb.native) if not name.startswith("__")}
     assert actual == expected
 
 
+# Fit TF-IDF, drop references, and confirm the model stays alive through Python ownership.
 def _fit_tfidf():
     strings = [
         "alpha beta",
@@ -45,6 +57,7 @@ def _fit_tfidf():
     return strings, rb.tfidf_fit(strings, "char", 2, 3)
 
 
+# Exercise the handle ownership path and the transform API after GC.
 def test_tfidf_fit_returns_owned_handle_and_transforms():
     strings, fit_result = _fit_tfidf()
     model, data, indices, indptr, n_rows, n_cols = fit_result
@@ -70,6 +83,7 @@ def test_tfidf_fit_returns_owned_handle_and_transforms():
         rb.tfidf_transform(0, strings)
 
 
+# Check the projection-style fits return Python-owned handles and reusable state.
 @pytest.mark.parametrize(
     ("fit", "transform", "expected_handle"),
     [
@@ -111,6 +125,7 @@ def test_projection_fit_returns_owned_handle_and_transforms(
     assert np.isfinite(transformed).all()
 
 
+# Make sure the fitted string encoder can transform concurrently from multiple threads.
 def test_fitted_string_encoder_handle_supports_concurrent_transform():
     train = pd.Series(
         [

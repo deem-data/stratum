@@ -3,9 +3,9 @@
 Lowering turns a logical :class:`~stratum.optimizer.logical._ops.PredictorOp`
 wrapping a supported model into an *abstract* physical predictor op -- one per
 model family (random forest, ridge, LightGBM, ...). Implementation selection then
-swaps the abstract op to a concrete impl. Today every family has exactly one: the
-reference impl, which runs the user's estimator unchanged through the inherited
-``BaseEstimatorOp.process``.
+swaps the abstract op to a concrete impl. Most families currently have only the
+reference implementation. Random forests additionally expose independently
+selectable exact and histogram Rust implementations.
 
 The abstract ops exist so alternative implementations have something to register
 against. A new impl subclasses the abstract op, registers under it, gates itself
@@ -37,6 +37,7 @@ Lowering is incremental. A predictor with no family below returns ``None`` from
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 from sklearn.ensemble import (ExtraTreesClassifier, ExtraTreesRegressor,
                               HistGradientBoostingClassifier,
@@ -48,10 +49,15 @@ from sklearn.linear_model import (ElasticNet, Lasso, LinearRegression,
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
+from stratum.adapters.tree_classifier import (
+    RustRandomForestClassifier,
+    supports_rust_histogram_random_forest_classifier,
+    supports_rust_random_forest_classifier,
+)
 from stratum.optimizer.logical._ops import PredictorOp
 from stratum.optimizer.physical._lowering import lowering_rule
-from stratum.optimizer.physical._physical_ops import PhysicalOp
-from stratum.optimizer.physical._registry import sklearn_skrub_impl
+from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp
+from stratum.optimizer.physical._registry import rust_impl, sklearn_skrub_impl
 
 
 # --- Pass-through ------------------------------------------------------------
@@ -79,10 +85,68 @@ class RandomForestOp(PredictorOp, PhysicalOp):
     is_abstract = True
 
 
-@sklearn_skrub_impl(of=RandomForestOp)
+@sklearn_skrub_impl(of=RandomForestOp, implementation_name="sklearn_rf")
 class SklearnRandomForest(RandomForestOp):
     """Reference impl: runs the scikit-learn forest as-is."""
     is_abstract = False
+
+
+def _has_only_static_empty_kwargs(op: RandomForestOp) -> bool:
+    """Native adapters do not yet implement graph-fed params or method kwargs."""
+    if op.param_refs:
+        return False
+    return all(
+        group is None or (isinstance(group, dict) and not group)
+        for group in op.kwargs.values()
+    )
+
+
+def _as_rust_random_forest(estimator, ctx: Any, *, histogram: bool):
+    """Clone sklearn parameters and bind one native split backend at plan time."""
+    bound = RustRandomForestClassifier(**estimator.get_params(deep=False))
+    bound._bind_native_worker_budget(ctx.parallelism)
+    if histogram:
+        return bound._bind_histogram_backend(128)
+    return bound._bind_exact_backend()
+
+
+class _RustRandomForestPhysicalOp(RandomForestOp, RustPhysicalOp):
+    """Shared physical binding for the exact and histogram algorithm variants."""
+    is_abstract = True
+    histogram_backend = False
+
+    @classmethod
+    def supports(cls, op: RandomForestOp, ctx: Any) -> bool:
+        if not _has_only_static_empty_kwargs(op):
+            return False
+        supports = (
+            supports_rust_histogram_random_forest_classifier
+            if cls.histogram_backend
+            else supports_rust_random_forest_classifier
+        )
+        supported, _ = supports(op.original_estimator)
+        return supported
+
+    def on_impl_selected(self, ctx: Any) -> None:
+        self.estimator = _as_rust_random_forest(
+            self.estimator, ctx, histogram=self.histogram_backend
+        )
+        self.original_estimator = _as_rust_random_forest(
+            self.original_estimator, ctx, histogram=self.histogram_backend
+        )
+
+
+@rust_impl(of=RandomForestOp, implementation_name="rf_exact")
+class RustExactRandomForestClassifier(_RustRandomForestPhysicalOp):
+    """Exact native random forest using the shared Rust forest runtime."""
+    is_abstract = False
+
+
+@rust_impl(of=RandomForestOp, implementation_name="rf_hist")
+class RustHistogramRandomForestClassifier(_RustRandomForestPhysicalOp):
+    """128-bin native random forest using the shared Rust forest runtime."""
+    is_abstract = False
+    histogram_backend = True
 
 
 class ExtraTreesOp(PredictorOp, PhysicalOp):

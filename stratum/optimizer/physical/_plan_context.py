@@ -70,7 +70,7 @@ class PlanContext:
             backend="polars" if FLAGS.force_polars else "pandas",
             pandas_query=bool(FLAGS.pandas_query),
             rechunk=bool(FLAGS.rechunk),
-            parallelism=os.cpu_count(),
+            parallelism=int(FLAGS.num_threads) or (os.cpu_count() or 1),
             rust_backend=bool(FLAGS.rust_backend),
             allow_patch=bool(FLAGS.allow_patch),
             implementation_selector=FLAGS.implementation_selector,

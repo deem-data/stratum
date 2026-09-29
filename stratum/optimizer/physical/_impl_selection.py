@@ -30,6 +30,7 @@ from __future__ import annotations
 from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._plan_context import PlanContext
+from stratum.optimizer.physical._predictor_execs import RandomForestOp
 from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry,
                                                   get_default_physical_registry)
 from stratum.optimizer._op_utils import topological_iterator
@@ -51,6 +52,27 @@ class ImplementationSelector:
         raise NotImplementedError
 
 
+def _find_preferred_implementation(
+    candidates: list[PhysicalImpl], preferred: tuple[str, ...]
+) -> PhysicalImpl | None:
+    """Return the first supported candidate in an explicit implementation order."""
+    for implementation_name in preferred:
+        for impl in candidates:
+            if impl.implementation_name == implementation_name:
+                return impl
+    return None
+
+
+# Internal debug flag. Exact remains registered and can become greedy's
+# primary forest implementation without changing operator or registry code.
+_GREEDY_RF_EXACT_FIRST = False # Set true to select rf_exact Rust implementation
+_GREEDY_RF_PREFERENCES = (
+    ("rf_exact", "rf_hist", "sklearn_rf")
+    if _GREEDY_RF_EXACT_FIRST
+    else ("rf_hist", "rf_exact", "sklearn_rf")
+)
+
+
 class DefaultImplementationSelector(ImplementationSelector):
     """Choose implementations using the stable default backend preference.
 
@@ -61,12 +83,19 @@ class DefaultImplementationSelector(ImplementationSelector):
     """
 
     _PREFERRED_BACKENDS = ("pandas", "sklearn-skrub", "numpy")
+    _OP_PREFERENCES = {
+        RandomForestOp: ("sklearn_rf",),
+    }
 
     # FIXME: PandasInMemoryFrame may fail if the in-memory dataframe is Polars
     def choose(self, op: IRNode, candidates: list[PhysicalImpl],
                ctx: PlanContext) -> PhysicalImpl | None:
         if not candidates:
             return None
+        preferred = self._OP_PREFERENCES.get(type(op), ())
+        implementation = _find_preferred_implementation(candidates, preferred)
+        if implementation is not None:
+            return implementation
         for backend_name in self._PREFERRED_BACKENDS:
             for impl in candidates:
                 if impl.backend_name == backend_name:
@@ -88,11 +117,18 @@ class GreedyImplementationSelector(ImplementationSelector):
     _PREFERRED_BACKENDS = (
         "rust", "stratum", "polars", "numpy", "sklearn-skrub", "pandas"
     )
+    _OP_PREFERENCES = {
+        RandomForestOp: _GREEDY_RF_PREFERENCES,
+    }
 
     def choose(self, op: IRNode, candidates: list[PhysicalImpl],
                ctx: PlanContext) -> PhysicalImpl | None:
         if not candidates:
             return None
+        preferred = self._OP_PREFERENCES.get(type(op), ())
+        implementation = _find_preferred_implementation(candidates, preferred)
+        if implementation is not None:
+            return implementation
         for backend_name in self._PREFERRED_BACKENDS:
             for impl in candidates:
                 if impl.backend_name == backend_name:
