@@ -20,8 +20,8 @@ from .test_dataframe_ops import (
     force_polars, optimize, run_op)
 
 
-def _ctx(backend="pandas"):
-    return PlanContext(backend=backend, pandas_query=False, rechunk=False,
+def _ctx():
+    return PlanContext(pandas_query=False, rechunk=False,
                        parallelism=1, rust_backend=False, allow_patch=False)
 
 
@@ -146,10 +146,8 @@ class TestFilteringJoinImplSelection(unittest.TestCase):
         for left_on, right_on in (("c", None), (["a", "b"], ["p", "q"])):
             with self.subTest(left_on=left_on):
                 op = JoinOp(how="anti", left_on=left_on, right_on=right_on)
-                # Pinned to the context backend; the production selectors rank
-                # backends without consulting it (see #204).
-                bind_op(op, _ctx(backend="polars"),
-                        selector=FlagBasedSelector())
+                bind_op(op, _ctx(),
+                        selector=FlagBasedSelector(backend="polars"))
                 self.assertIsInstance(op, PolarsFilteringJoinOp)
 
     def test_the_ordinary_join_impls_refuse_a_filtering_join(self):
