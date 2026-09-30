@@ -340,6 +340,37 @@ class PlanComputedSplitterTest(unittest.TestCase):
     def test_groups_computed_once(self):
         self._assert_matches_skrub(self._plan(GroupKFold(n_splits=3)))
 
+    def test_x_mark_is_removed_without_splitting_other_source_consumers(self):
+        from stratum.optimizer._optimize import convert_to_ops
+        from stratum.optimizer.logical._ops import SplitXOp
+        from stratum.optimizer.logical._split_ops import BuildSplitterOp, SplitOp, add_splitting_op
+        from stratum.optimizer._op_utils import topological_iterator, validate_dag
+
+        rows = st.var("seed", 0).skb.apply_func(_load)
+        tmp = rows.drop(columns=["t"])
+        y = rows["t"].skb.mark_as_y()
+        X = tmp.skb.mark_as_X(cv=GroupKFold(n_splits=3),
+                              split_kwargs={"groups": tmp["g"]})
+        pred = X.skb.apply(LogisticRegression(), y=y)
+
+        root = convert_to_ops(pred, env={"seed": 0})
+        mark = next(op for op in topological_iterator(root) if isinstance(op, SplitXOp))
+        with self.assertRaisesRegex(RuntimeError, "replaced by the splitting rewrite"):
+            mark.process("fit_transform", [])
+        root = add_splitting_op(root)
+        validate_dag(root)
+        ops = list(topological_iterator(root))
+        self.assertFalse(any(isinstance(op, SplitXOp) for op in ops))
+        split = next(op for op in ops if isinstance(op, SplitOp))
+        splitter = next(op for op in ops if isinstance(op, BuildSplitterOp))
+        source = split.inputs[0]
+        self.assertIn(split, source.outputs)
+        self.assertNotIn(splitter, source.outputs)
+        # The groups path still reads the full source, independently of the fold X.
+        self.assertTrue(any(source in op.inputs for op in ops if op in splitter.inputs))
+        _LOADS["n"] = 0
+        self._assert_matches_skrub(pred)
+
     def test_splitter_from_a_variable(self):
         # `cv` may itself be a DataOp; the plan resolves it like any other operand.
         self._assert_matches_skrub(self._plan(st.var("cv", GroupKFold(n_splits=3))))

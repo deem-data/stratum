@@ -7,7 +7,7 @@ from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import BaseChoice, Choice, DiscretizedNumericChoice, Match
-from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, Var, _wrap_estimator
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, SplitX, Var, _wrap_estimator
 from skrub._utils import PassThrough
 from pandas import DataFrame
 import polars as pl
@@ -195,6 +195,26 @@ class ImplOp(Op):
         else:
             ns = self.replace_fields_with_values(inputs)
             return self.skrub_impl.compute(ns, mode, {})
+
+
+class SplitXOp(Op):
+    """Temporary X boundary carrying skrub's declared splitter until split planning."""
+
+    def __init__(self, skrub_impl: SplitX):
+        super().__init__(name="X", is_X=True)
+        self.skrub_impl = skrub_impl
+
+    @property
+    def operand_index(self) -> dict:
+        return _operand_index_from_impl(self.skrub_impl)
+
+    @property
+    def source(self) -> Op:
+        return self.inputs[self.operand_index[id(self.skrub_impl.X)]]
+
+    def process(self, mode: str, inputs: list):
+        raise RuntimeError("SplitXOp should be replaced by the splitting rewrite before execution")
+
 
 class VariableOp(Op):
     def __init__(self, name: str, value = None):
@@ -1053,6 +1073,12 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None) -> Op:
                                  append_choice_name=False, inputs=outcome_ops)
         else:
             return_op = _apply_estimator_op(impl, impl.estimator, ids_to_ops)
+    elif isinstance(impl, SplitX):
+        for field_name in impl._fields:
+            for child in _collect_child_data_ops(getattr(impl, field_name)):
+                binder.ref(child)
+        return_op = SplitXOp(impl)
+        return_op.inputs = binder.inputs
     elif isinstance(impl, Var):
         if env is not None and impl.name in env:
             # Resolve the variable to a compile-time constant; the runtime no
