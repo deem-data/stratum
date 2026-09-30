@@ -67,7 +67,7 @@ class _Flags:
     debug_timing: bool = _env_bool("SKRUB_RUST_DEBUG_TIMING", False)
     allow_patch: bool = _env_bool("SKRUB_RUST_ALLOW_PATCH", True)
     scheduler: bool =  False
-    stats: bool = False # TODO if we want to use that flag on other runtimes we need to set envirenment variable as well
+    stats: bool = False # TODO: sync this flag if stats are supported by other runtimes
     stats_top_k: int = 20
     debug_graph: bool = False
     open_graph: bool = False
@@ -129,11 +129,13 @@ def set_config(rust_backend: bool | None = None,
         scheduler: bool, default false
             Enable/disable stratum's scheduler instead of skrub's make_grid_search.
 
-        stratum_stats: bool, default false
-            Enable/disable stratum statistics. This will print the heavy hitters of a DataOp DAG execution.
+        stats: bool, default false
+            Print end-to-end timing, optimization and execution breakdowns,
+            DataOp heavy hitters, and BufferPool statistics.
 
         stats_top_k: int >= 0, default 20
             Set the number of heavy hitters to print when stats is enabled.
+            Their percentages use all operator processing time as the denominator.
 
         open_graph: bool, default true
             Open the graph after optimization.
