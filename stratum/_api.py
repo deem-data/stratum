@@ -12,10 +12,9 @@ from time import perf_counter
 
 @dataclass(frozen=True)
 class RunTimings:
-    """Exclusive wall-clock phases, ending before the stats report is printed."""
+    """Wall-clock time from optimizer entry through scheduler completion."""
 
     total: float
-    setup: float
     optimization: float
     execution: float
 
@@ -51,15 +50,13 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
 
     # Without an explicit `cv`, the folds come from the splitter the plan declares with
     # `mark_as_X(cv=...)`, which the plan computes itself (see BuildSplitterOp).
-    execution_start = perf_counter()
     preds = sched.grid_search(cv)
     execution_end = perf_counter()
 
     stats_printer(sched, RunTimings(
-        total=execution_end - t0,
-        setup=(optimize_start - t0) + (execution_start - optimize_end),
+        total=execution_end - optimize_start,
         optimization=optimize_end - optimize_start,
-        execution=execution_end - execution_start,
+        execution=execution_end - optimize_end,
     ))
 
     return (sched,preds) if return_predictions else sched
@@ -75,14 +72,12 @@ def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
     linearized_dag, split_pos, flagged_ops = optimize(dag, env=env)
     optimize_end = perf_counter()
     sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0)
-    execution_start = perf_counter()
     out = sched.evaluate(seed, test_size)
     execution_end = perf_counter()
     stats_printer(sched, RunTimings(
-        total=execution_end - t0,
-        setup=(optimize_start - t0) + (execution_start - optimize_end),
+        total=execution_end - optimize_start,
         optimization=optimize_end - optimize_start,
-        execution=execution_end - execution_start,
+        execution=execution_end - optimize_end,
     ))
     return out
 
@@ -97,23 +92,18 @@ def stats_printer(sched: SequentialScheduler, run: RunTimings):
         table["%"] = 100 * table["Time"] / operator_time if operator_time else 0.0
         table = table[["Op", "Count", "Time", "%"]]
         shown = table.head(FLAGS.stats_top_k)
-        other_execution = run.execution - operator_time - sched.buffer_pool_overhead
         print("\n" + "=" * 80)
-        print("Run timing (seconds; stats formatting excluded):")
-        print(f"  Total:                  {run.total:.4f}")
-        print(f"  Setup:                  {run.setup:.4f}")
-        print(f"  Optimization:           {run.optimization:.4f}")
-        print(f"  Execution:              {run.execution:.4f}")
-        print(f"    Operator processing:  {operator_time:.4f}")
-        print(f"    Per-op buffer work:   {sched.buffer_pool_overhead:.4f}")
-        print(f"    Other scheduler work: {other_execution:.4f}")
-        print(f"      Unshown operators:  {operator_time - shown['Time'].sum():.4f}")
+        print("Execution Statistics (seconds):")
+        print(f"  Total:        {run.total:.4f}")
+        print(f"  Optimization: {run.optimization:.4f}")
+        print(f"  Execution:    {run.execution:.4f}")
         print("\nHeavy hitters (share of all operator processing time):\n")
         print(shown.to_string(
             index=False,
             formatters={"Time": "{:.4f}".format, "%": "{:.1f}%".format},
         ))
+        print(f"Unshown operators: {operator_time - shown['Time'].sum():.4f}")
         print("=" * 80)
-        print("BufferPool detail (serialize/deserialize times are included above):")
+        print("BufferPool detail (serialize/deserialize times are included in Execution):")
         print(sched.pool.stats)
         print("=" * 80 + "\n")

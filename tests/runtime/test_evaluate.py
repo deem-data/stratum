@@ -27,9 +27,9 @@ class EvaluateTest(RuntimeTest):
             evaluate(pred)
 
         report = stdout.getvalue()
-        self.assertIn("Run timing (seconds", report)
+        self.assertIn("Execution Statistics (seconds)", report)
         self.assertIn("Optimization:", report)
-        self.assertIn("Other scheduler work:", report)
+        self.assertIn("Execution:", report)
         self.assertIn("Unshown operators:", report)
 
     def test_evaluate_datetime_pipe(self):

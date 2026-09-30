@@ -130,7 +130,7 @@ def set_config(rust_backend: bool | None = None,
             Enable/disable stratum's scheduler instead of skrub's make_grid_search.
 
         stats: bool, default false
-            Print end-to-end timing, optimization and execution breakdowns,
+            Print optimization and scheduler execution timing,
             DataOp heavy hitters, and BufferPool statistics.
 
         stats_top_k: int >= 0, default 20

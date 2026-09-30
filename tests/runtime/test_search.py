@@ -152,17 +152,14 @@ class SearchTest(RuntimeTest):
             return float(match.group(1))
 
         self.assertAlmostEqual(
-            seconds("Total"), seconds("Setup") + seconds("Optimization") + seconds("Execution"),
+            seconds("Total"), seconds("Optimization") + seconds("Execution"),
             delta=0.0002,
-        )
-        self.assertAlmostEqual(
-            seconds("Execution"), seconds("Operator processing") + seconds("Per-op buffer work")
-            + seconds("Other scheduler work"), delta=0.0002,
         )
         self.assertGreater(seconds("Optimization"), 0)
         self.assertGreater(seconds("Unshown operators"), 0)
+        self.assertIn("Execution Statistics (seconds)", out)
         self.assertIn("share of all operator processing time", out)
-        self.assertIn("serialize/deserialize times are included above", out)
+        self.assertIn("serialize/deserialize times are included in Execution", out)
         self.assertIn("%", out.split("Heavy hitters")[1])
         row = next(line for line in out.splitlines() if "CallExec(<lambda>)" in line)
         fields = row.split()
