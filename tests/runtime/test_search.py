@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import stratum as st
 import logging
+import re
 
 logging.basicConfig(level=logging.INFO)
 
@@ -142,18 +143,28 @@ class SearchTest(RuntimeTest):
         X2 = X.skb.apply_func(lambda a: (a, time.sleep(0.01))[0])
         pred = X2.skb.apply(DummyRegressor(), y=y)
         # capture stdout
-        with redirect_stdout(StringIO()) as stdout, st.config(stats=True, stats_top_k=20):
+        with redirect_stdout(StringIO()) as stdout, st.config(stats=True, stats_top_k=1):
             st._api.grid_search(pred, scoring="neg_mean_squared_error", return_predictions=False)
         out = stdout.getvalue()
-        out = out.split("\n")
-        self.assertIn("Heavy hitters", out[2])
-        # Header exposes the runtime-distribution column.
-        self.assertIn("%", out[4])
-        # Row: Op, Count, Time, %  (the lambda sleeps 10x so it dominates).
-        self.assertIn("CallExec(<lambda>)", out[5])
-        fields = out[5].split()
+        def seconds(label):
+            match = re.search(rf"^\s*{label}:\s+([\d.]+)$", out, re.MULTILINE)
+            self.assertIsNotNone(match, label)
+            return float(match.group(1))
+
+        self.assertAlmostEqual(
+            seconds("Total"), seconds("Optimization") + seconds("Execution"),
+            delta=0.0002,
+        )
+        self.assertGreater(seconds("Optimization"), 0)
+        self.assertGreater(seconds("Unshown operators"), 0)
+        self.assertIn("Execution Statistics (seconds)", out)
+        self.assertIn("share of all operator processing time", out)
+        self.assertIn("serialize/deserialize times are included in Execution", out)
+        self.assertIn("%", out.split("Heavy hitters")[1])
+        row = next(line for line in out.splitlines() if "CallExec(<lambda>)" in line)
+        fields = row.split()
         self.assertEqual(fields[1], "10")          # invocation count
-        self.assertTrue(fields[-1].endswith("%"))  # share of total runtime
+        self.assertTrue(fields[-1].endswith("%"))
 
 
     def test_fused_attr(self):
