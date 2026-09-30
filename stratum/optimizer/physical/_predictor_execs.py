@@ -86,7 +86,7 @@ class RandomForestOp(PredictorOp, PhysicalOp):
 
 
 @sklearn_skrub_impl(of=RandomForestOp, implementation_name="sklearn_rf")
-class SklearnRandomForest(RandomForestOp):
+class SklearnRandomForestClassifier(RandomForestOp):
     """Reference impl: runs the scikit-learn forest as-is."""
     is_abstract = False
 
@@ -137,13 +137,13 @@ class _RustRandomForestPhysicalOp(RandomForestOp, RustPhysicalOp):
 
 
 @rust_impl(of=RandomForestOp, implementation_name="rf_exact")
-class RustExactRandomForestClassifier(_RustRandomForestPhysicalOp):
+class StratumExactRandomForestClassifier(_RustRandomForestPhysicalOp):
     """Exact native random forest using the shared Rust forest runtime."""
     is_abstract = False
 
 
 @rust_impl(of=RandomForestOp, implementation_name="rf_hist")
-class RustHistogramRandomForestClassifier(_RustRandomForestPhysicalOp):
+class StratumHistogramRandomForestClassifier(_RustRandomForestPhysicalOp):
     """128-bin native random forest using the shared Rust forest runtime."""
     is_abstract = False
     histogram_backend = True

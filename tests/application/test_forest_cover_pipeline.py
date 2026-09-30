@@ -8,7 +8,7 @@ from sklearn.model_selection import StratifiedKFold, cross_val_score
 
 import stratum as st
 from stratum.optimizer._optimize import OptConfig, optimize
-from stratum.optimizer.physical._predictor_execs import SklearnRandomForest
+from stratum.optimizer.physical._predictor_execs import SklearnRandomForestClassifier
 from stratum.optimizer.physical._source_execs import PolarsReadCSV
 
 
@@ -75,7 +75,7 @@ def test_cover_pipeline_scores_generated_csv(tmp_path, selector):
         ops, *_ = optimize(predictions, OptConfig(dataframe_ops=True))
         if selector == "greedy":
             assert any(isinstance(op, PolarsReadCSV) for op in ops)
-            assert any(isinstance(op, SklearnRandomForest) for op in ops)
+            assert any(isinstance(op, SklearnRandomForestClassifier) for op in ops)
         search = predictions.skb.make_grid_search(
             n_jobs=1, fitted=True, refit=False, scoring="accuracy")
 

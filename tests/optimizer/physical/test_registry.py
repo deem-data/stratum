@@ -32,8 +32,8 @@ from stratum.optimizer.physical._predictor_execs import (
     LinearRegressionOp,
     LogisticRegressionOp,
     RandomForestOp,
-    RustExactRandomForestClassifier,
-    RustHistogramRandomForestClassifier,
+    StratumExactRandomForestClassifier,
+    StratumHistogramRandomForestClassifier,
     RidgeOp,
     SGDOp,
     XGBoostOp,
@@ -79,7 +79,7 @@ def test_default_registry_discovers_registered_operator_types():
     assert {
         candidate.impl_class for candidate in forest_candidates
         if candidate.backend_name == "rust"
-    } == {RustExactRandomForestClassifier, RustHistogramRandomForestClassifier}
+    } == {StratumExactRandomForestClassifier, StratumHistogramRandomForestClassifier}
 
     # Every other migrated predictor family carries its sklearn reference impl.
     for op_type in (ExtraTreesOp, DecisionTreeOp,
