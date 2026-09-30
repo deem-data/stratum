@@ -72,7 +72,9 @@ def lower_to_physical(root: IRNode, ctx) -> IRNode:
     """Rewrite the logical DAG into a (partly) physical DAG under ``ctx``.
 
     Ops with a registered rule are replaced by physical nodes; ops without one
-    pass through unchanged. Returns the (possibly new) root.
+    pass through unchanged. A rule may also refine an op's class in place and
+    return the same node when its fields and graph identity need no changes.
+    Returns the (possibly new) root.
     """
     start = start_time()
     for op in topological_iterator(root):

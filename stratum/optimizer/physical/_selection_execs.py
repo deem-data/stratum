@@ -87,6 +87,12 @@ class PandasIndexSelectionOp(SelectionOp, PhysicalOp):
 
 @physical_impl(of=SelectionOp, backend="polars")
 class PolarsSelectionOp(SelectionOp, PhysicalOp):
+    @classmethod
+    def supports(cls, op: SelectionOp, ctx) -> bool:
+        # Keep a pandas Series's labelled values on pandas through filtering.
+        return not (op.output_type is OutputType.SERIES and op.inputs
+                    and getattr(op.inputs[0], "_selected_backend", None) == "pandas")
+
     def process(self, mode: str, inputs: list):
         _obj = inputs[0]
         if self.kind is SelectionKind.MASK:

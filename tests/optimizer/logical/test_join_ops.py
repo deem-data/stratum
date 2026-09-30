@@ -28,7 +28,7 @@ def test_join_op_merge_on_key(polars):
     left = make_frame({"k": [1, 2, 3], "a": [10, 20, 30]}, polars)
     right = make_frame({"k": [2, 3, 4], "b": [200, 300, 400]}, polars)
     op = JoinOp(how="inner", left_on="k", right_on="k")
-    with st.config(force_polars=polars):
+    with force_polars(polars):
         result = run_op(op, left, right)
 
     assert [2, 3] == to_list(result["k"])
@@ -41,7 +41,7 @@ def test_join_op_merge_left_on_right_on_distinct(polars):
     left = make_frame({"lk": [1, 2], "a": [10, 20]}, polars)
     right = make_frame({"rk": [2, 3], "b": [200, 300]}, polars)
     op = JoinOp(how="inner", left_on="lk", right_on="rk")
-    with st.config(force_polars=polars):
+    with force_polars(polars):
         result = run_op(op, left, right)
 
     assert [2] == to_list(result["lk"]) == to_list(result["rk"])
@@ -54,7 +54,7 @@ def test_join_op_merge_on_key_with_suffixes(polars):
     right = make_frame({"k": [2, 3, 4], "a": [200, 300, 400]}, polars)
     op = JoinOp(how="inner", left_on="k", right_on="k",
                 suffixes=("_L", "_R"))
-    with st.config(force_polars=polars):
+    with force_polars(polars):
         result = run_op(op, left, right)
 
     assert [2, 3] == to_list(result["k"])
@@ -68,7 +68,7 @@ def test_outer_join(polars):
     right = make_frame({"k": [2, 3, 4], "a": [200, 300, 400]}, polars)
 
     op = JoinOp(how="outer", left_on="k", right_on="k")
-    with st.config(force_polars=polars):
+    with force_polars(polars):
         result = run_op(op, left, right)
 
     if polars:                  # this is needed since row order after an outer-join is non deterministic
@@ -107,7 +107,7 @@ def test_multi_column_join_key(polars):
     }, polars)
 
     op = JoinOp(how="inner", left_on=["k1", "k2"], right_on=["k1", "k2"])
-    with st.config(force_polars=polars):
+    with force_polars(polars):
         result = run_op(op, left, right)
 
     assert ["k1", "k2", "a_x", "b", "a_y", "c"] == list(result.columns)
@@ -131,7 +131,7 @@ def test_wo_key_join(polars):
     }, polars)
 
     op = JoinOp(how="inner")
-    with st.config(force_polars=polars):
+    with force_polars(polars):
         result = run_op(op, left, right)
 
     assert ["k", "a", "b"] == list(result.columns)
@@ -144,7 +144,7 @@ def test_wo_key_join(polars):
 def test_join_op_wrong_input_count_raises(polars):
     op = JoinOp(how="inner", left_on="k", right_on="k")
     data = make_frame({"k": [1]}, polars)
-    with st.config(force_polars=polars):
+    with force_polars(polars):
         with pytest.raises(ValueError, match="expects exactly 2 inputs"):
             run_op(op, data)
 

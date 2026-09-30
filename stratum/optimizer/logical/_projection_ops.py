@@ -3,6 +3,7 @@ from skrub.selectors._base import make_selector
 from stratum.optimizer.logical._ops import (OutputType, CallOp, GetAttrOp,
                                        MethodCallOp, Op, TransformerOp, _resolve_args, _resolve_kwargs)
 from stratum.optimizer.logical import _schema
+from stratum.optimizer.logical._index_ops import IndexAccessOp
 import polars as pl
 
 
@@ -447,8 +448,12 @@ def _get_attr_output_type(attr_name: list, container: Op) -> OutputType:
     return container.output_type
 
 
-def make_frame_get_attr(new_op: GetAttrProjectionOp, op: GetAttrOp) -> GetAttrProjectionOp:
+def make_frame_get_attr(new_op: GetAttrProjectionOp, op: GetAttrOp) -> Op:
     input_ = op.inputs[0]
+    if op.attr_name == "index" or op.attr_name == ["index"]:
+        index_op = IndexAccessOp(inputs=op.inputs, outputs=op.outputs)
+        op.replace_output_of_inputs(index_op)
+        return index_op
     if isinstance(input_, GetAttrProjectionOp):
         # Fuse chained GetAttr operations
         concat_attr_name = input_.attr_name.copy()

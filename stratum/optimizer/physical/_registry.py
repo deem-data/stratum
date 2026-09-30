@@ -236,27 +236,6 @@ numpy_impl = _backend_impl("numpy")
 sklearn_skrub_impl = _backend_impl("sklearn-skrub")
 
 
-def _register_current_estimator_impls(registry: PhysicalRegistry) -> None:
-    # These are transitional registrations for estimator families that do not
-    # have abstract physical operators yet. Once those lowerings land, their
-    # implementations should be keyed by the corresponding physical type.
-    # PredictorOp's pass-through impl is ``PassthroughPredictor`` in _predictor_execs.
-    from stratum.optimizer.logical._ops import TransformerOp
-
-    registry.register(
-        PhysicalImpl(
-            op_type=TransformerOp,
-            backend_name="sklearn-skrub",
-            input_format="frame",
-            output_format="frame",
-            supports=lambda op, ctx: True,
-            cost=_placeholder_cost,
-            exec_mem=_placeholder_exec_mem,
-            execute=_current_process_execute,
-        )
-    )
-
-
 """Create the default registry with every known implementation registered."""
 def build_default_physical_registry() -> PhysicalRegistry:
     registry = PhysicalRegistry()
@@ -273,6 +252,7 @@ def build_default_physical_registry() -> PhysicalRegistry:
     from stratum.optimizer.physical import _join_execs  # noqa: F401
     from stratum.optimizer.physical import _aggregation_execs  # noqa: F401
     from stratum.optimizer.physical import _projection_execs  # noqa: F401
+    from stratum.optimizer.physical import _index_execs  # noqa: F401
     from stratum.optimizer.physical import _selection_execs  # noqa: F401
     from stratum.optimizer.physical import _sort_execs  # noqa: F401
     from stratum.optimizer.physical import _map_execs  # noqa: F401
@@ -280,7 +260,6 @@ def build_default_physical_registry() -> PhysicalRegistry:
 
     for impl in _DECORATED_IMPLS:
         registry.register(impl)
-    _register_current_estimator_impls(registry)
     return registry
 
 

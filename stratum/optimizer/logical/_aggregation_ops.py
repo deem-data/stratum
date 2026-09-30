@@ -1,7 +1,7 @@
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, Col, OperandLeaf, _Folder)
 from stratum.optimizer.logical._ops import (
-    BinOp, UnaryOp, GetItemOp, OperandRef, OutputType, MethodCallOp, Op)
+    BinOp, UnaryOp, GetItemOp, OperandRef, OutputType, MethodCallOp, Op, ValueOp)
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical import _schema
@@ -293,10 +293,16 @@ def _grouping_exprs(groupby_op: MethodCallOp, folder: _Folder) -> tuple:
         else:
             exprs[index] = Col(key)
     if roots:
-        for position, expr in zip(positions,
-                                  folder.fold_many(roots, root_consumer=groupby_op)):
-            exprs[position] = expr
+        for position, root, expr in zip(
+                positions, roots, folder.fold_many(roots, root_consumer=groupby_op)):
+            exprs[position] = _grouping_key_expr(root, expr)
     return tuple(exprs)
+
+
+def _grouping_key_expr(root: Op, expr):
+    # A string passed to groupby names a column. Scalar folding normally turns
+    # ValueOp("g") into Const("g"), which Polars would group as one literal value.
+    return Col(root.value) if isinstance(root, ValueOp) and isinstance(root.value, str) else expr
 
 
 def _aggregation_params(op: MethodCallOp) -> dict | None:
@@ -425,8 +431,10 @@ def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
                               if isinstance(k, OperandRef)]
         folded = iter(folder.fold_many(roots, root_consumer=groupby_op))
         child = next(folded)
-        grouping = tuple(next(folded) if isinstance(k, OperandRef) else Col(k)
-                         for k in keys)
+        grouping = tuple(
+            _grouping_key_expr(groupby_op.inputs[k.k], next(folded))
+            if isinstance(k, OperandRef) else Col(k)
+            for k in keys)
         entries = tuple((name, AggExpr(agg.func, child, agg.params))
                         for name, agg in entries)
         source_kind = OutputType.SERIES

@@ -248,7 +248,7 @@ class IRNode:
     def to_str_helper(self):
         class_name = (self.__class__.__name__ if self._is_physical
                       else self.logical_family or self.__class__.__name__)
-        is_df = " [df]" if self.output_type is OutputType.FRAME else ""
+        is_df = " [df]" if not self._is_physical and self.output_type is OutputType.FRAME else ""
         name = f"({self.name})" if self.name and len(self.name) > 0 else ""
         # truncate name if it is too long
         if len(name) > 50:

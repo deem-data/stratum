@@ -1,34 +1,22 @@
 import operator
 import unittest
-from contextlib import contextmanager
 
 import pytest
 import pandas as pd
 import polars as pl
 
 import stratum as st
-from stratum._config import FLAGS
 from stratum.optimizer.logical._ops import remap_operand_refs
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._dataframe_ops import (
     ColumnProjectionOp, SelectionKind, SelectionOp)
-from stratum.optimizer.logical._ops import BinOp, GetItemOp, UnaryOp, Op, OperandRef, OutputType
+from stratum.optimizer.logical._ops import (
+    BinOp, GetItemOp, UnaryOp, Op, OperandRef, OutputType, ValueOp)
 from stratum.optimizer.logical._column_expr import (
     Col, ColumnMethodExpr, Const, BinOpExpr, UnaryOpExpr, OperandLeaf, StrExpr)
 from stratum.optimizer.physical._source_execs import rechunk_pl_frame
 from .test_dataframe_ops import (
-    optimize, run_op, force_polars)
-
-
-@contextmanager
-def pandas_query(enabled=True):
-    """Temporarily set `FLAGS.pandas_query`."""
-    orig = FLAGS.pandas_query
-    FLAGS.pandas_query = enabled
-    try:
-        yield
-    finally:
-        FLAGS.pandas_query = orig
+    optimize, run_op, force_polars, pandas_query, plan_context)
 
 
 class TestSelectionExtraction(unittest.TestCase):
@@ -230,17 +218,55 @@ class TestMaskFolding(unittest.TestCase):
             BinOpExpr(operator.gt, StrExpr(OperandLeaf(OperandRef(1)), "count", ("1",)), Const(0)),
             self._mask(ops).predicate)
 
-    def test_external_operand_folds_to_leaf(self):
-        # df[df["x"] > thr] where `thr` is another data-op: the column folds to Col,
-        # the external operand cannot, so it becomes an OperandLeaf input.
+    def test_graph_fed_scalar_operand_folds_to_const(self):
+        # df[df["x"] > thr] where `thr` is another data-op: it reaches the fold as a
+        # ValueOp input rather than an inline literal, but a scalar ValueOp is
+        # absorbed as a Const, so the selection keeps the source as its only input.
         data = st.as_data_op(self.df)
         thr = st.as_data_op(1)
+        ops = optimize(data[data["x"] > thr], OptConfig(dataframe_ops=True))
+        sel = self._mask(ops)
+        self.assertEqual(BinOpExpr(operator.gt, Col("x"), Const(1)), sel.predicate)
+        self.assertEqual(1, len(sel.inputs))  # [src]; the ValueOp is gone
+        self.assertEqual([], [o for o in ops if isinstance(o, ValueOp)])
+
+    def test_env_resolved_variable_folds_to_const(self):
+        # A Var bound in `env` is resolved to a ValueOp at conversion time, so the
+        # predicate folds exactly as an inline literal would.
+        data = st.as_data_op(self.df)
+        thr = st.var("thr")
+        ops = optimize(data[data["x"] > thr], OptConfig(dataframe_ops=True),
+                       env={"thr": 1})
+        sel = self._mask(ops)
+        self.assertEqual(BinOpExpr(operator.gt, Col("x"), Const(1)), sel.predicate)
+        self.assertEqual(1, len(sel.inputs))
+
+    def test_graph_fed_container_operand_stays_leaf(self):
+        # Only scalars are inlined: Const compiles to pl.lit(), which would turn a
+        # list into one list-valued cell. A container ValueOp stays an input so the
+        # impls' own conversions still see it.
+        data = st.as_data_op(self.df)
+        thr = st.as_data_op([1, 1, 1])
         ops = optimize(data[data["x"] > thr], OptConfig(dataframe_ops=True))
         sel = self._mask(ops)
         self.assertEqual(
             BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(1))),
             sel.predicate)
         self.assertEqual(2, len(sel.inputs))  # [src, thr]
+
+    def test_shared_graph_fed_constant_stays_leaf(self):
+        # The ValueOp also feeds an assign, so it has a consumer outside the mask and
+        # is not absorbed -- the general external-consumer rule still applies.
+        data = st.as_data_op(self.df)
+        thr = st.as_data_op(1)
+        ops = optimize(data[data["x"] > thr].assign(base=thr),
+                       OptConfig(dataframe_ops=True))
+        sel = self._mask(ops)
+        self.assertEqual(
+            BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(1))),
+            sel.predicate)
+        self.assertEqual(2, len(sel.inputs))  # [src, thr]
+        self.assertEqual(1, len([o for o in ops if isinstance(o, ValueOp)]))
 
     def test_duplicate_masks_dedup_after_cse(self):
         # Two independently-built identical masks fold to two SelectionOps, which
@@ -441,7 +467,7 @@ class TestUnaryPredicateProcess(unittest.TestCase):
 
 
 class TestPandasQuery(unittest.TestCase):
-    """With FLAGS.pandas_query, an expressible MASK runs through DataFrame.query()."""
+    """With `pandas_query` on, an expressible MASK runs through DataFrame.query()."""
 
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
@@ -486,9 +512,8 @@ class TestPandasQueryImplSelection(unittest.TestCase):
 
     def _bind(self, op):
         from stratum.optimizer.physical._impl_selection import bind_op
-        from stratum.optimizer.physical._plan_context import PlanContext
         op.inputs = [Op()]
-        return bind_op(op, PlanContext.from_flags())
+        return bind_op(op, plan_context())
 
     def test_expressible_mask_binds_query_impl_under_flag(self):
         from stratum.optimizer.physical._selection_execs import PandasQuerySelectionOp
@@ -551,11 +576,16 @@ class TestColumnExprQueryStrings(unittest.TestCase):
 class TestColumnExprMisc(unittest.TestCase):
     """Assorted ColumnExpr node behaviour."""
 
+    def test_const_key_distinguishes_scalar_types(self):
+        self.assertNotEqual(Const(1), Const(1.0))
+        self.assertNotEqual(Const(1), Const(True))
+        self.assertNotEqual(Const(1.0), Const(True))
+
     def test_const_unhashable_value_key(self):
         # An unhashable literal falls back to an identity-based key.
         value = [1, 2]
         c = Const(value)
-        self.assertEqual(("__id__", id(value)), c._key())
+        self.assertEqual((list, "__id__", id(value)), c._key())
         self.assertEqual(c, Const(value))  # same object -> equal
         hash(c)  # does not raise
 

@@ -11,7 +11,7 @@ from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, Ge
 from skrub._utils import PassThrough
 from pandas import DataFrame
 import polars as pl
-from polars import DataFrame as PlDataFrame, Series as PlSeries
+from polars import DataFrame as PlDataFrame
 from stratum.frontend._skrub_graph import _collect_child_data_ops
 from stratum.optimizer.logical import _schema
 # Shared IR foundation. Re-exported below so existing ``from ..._ops import X``
@@ -391,6 +391,9 @@ class TransformerOp(BaseEstimatorOp):
     fit_kwargs_key = "fit_transform"
     call_kwargs_key = "transform"
 
+    def process(self, mode: str, inputs: list):
+        raise NotImplementedError("TransformerOp must be lowered before execution")
+
     def get_process_task(self):
         return process_transformer_task
 
@@ -528,11 +531,6 @@ class ValueOp(Op):
     def clone(self):
         raise ValueError(f"We should not clone ValueOp objects.")
 
-    def process(self, mode: str, inputs: list):
-        out = self.value
-        self.value = None
-        return out
-
 class MethodCallOp(Op):
     fields = ["method_name", "args", "kwargs"]
     
@@ -543,15 +541,6 @@ class MethodCallOp(Op):
         self.method_name = method_name
         self.args = args
         self.kwargs = kwargs
-
-    def process(self, mode: str, inputs: list):
-        # The object the method is called on is the implicit primary operand (index 0).
-        _obj = inputs[0]
-        _args = _resolve_args(self.args, inputs)
-        _kwargs = _resolve_kwargs(self.kwargs, inputs)
-        if self.method_name == "apply" and isinstance(_obj, PlSeries):
-            return _obj.map_elements(*_args, **_kwargs)
-        return _obj.__getattribute__(self.method_name)(*_args, **_kwargs)
 
 class CallOp(Op):
     fields = ["func", "args", "kwargs"]
@@ -565,11 +554,6 @@ class CallOp(Op):
         self.func = func
         self.args = args
         self.kwargs = kwargs
-
-    def process(self, mode: str, inputs: list):
-        _args = _resolve_args(self.args, inputs)
-        _kwargs = _resolve_kwargs(self.kwargs, inputs)
-        return self.func(*_args, **_kwargs)
 
 class GetAttrOp(Op):
     fields = ["attr_name"]

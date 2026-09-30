@@ -25,6 +25,19 @@ from stratum.optimizer._optimize import convert_to_ops, optimize as optimize_
 from stratum.optimizer.logical._projection_ops import ApplyUDFOp
 from stratum.optimizer.physical._impl_selection import bind_op
 from stratum.optimizer.physical._plan_context import PlanContext
+from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._lowering import lower_to_physical
+
+
+def test_frame_suffix_only_on_logical_ops():
+    logical = Op(name="frame")
+    physical = PhysicalOp(name="frame")
+    logical.output_type = physical.output_type = OutputType.FRAME
+
+    assert str(logical) == "Op(frame) [df]"
+    assert str(physical) == "PhysicalOp(frame)"
+    assert " [df]" in repr(logical)
+    assert " [df]" not in repr(physical)
 
 
 class TestOpCloning(unittest.TestCase):
@@ -67,9 +80,12 @@ class TestOpCloning(unittest.TestCase):
         cloned = ops[3].clone()
         self.assertIsNot(ops[3].estimator, cloned.estimator)
 
-        cloned = ops[4].clone()
-        self.assertEqual(ops[4].func, cloned.func)
-        self.assertEqual(ops[4].args, cloned.args)
+        logical_call = CallOp(func=lambda x: x, args=(OperandRef(0),), kwargs={})
+        cloned = logical_call.clone()
+        self.assertEqual(logical_call.func, cloned.func)
+        self.assertEqual(logical_call.args, cloned.args)
+        with self.assertRaises(TypeError):
+            ops[4].clone()
 
         cloned = ops[5].clone()
         self.assertEqual(ops[5].attr_name, cloned.attr_name)
@@ -203,24 +219,24 @@ class TestUtilFunctions(unittest.TestCase):
 
 class TestOpProcess(unittest.TestCase):
     def test_method_call(self):
-        op = MethodCallOp("upper", args=(), kwargs={})
+        op = lower_to_physical(MethodCallOp("upper", args=(), kwargs={}), PlanContext.from_flags())
         result = op.process("fit_transform", ["hello"])
         self.assertEqual(result, "HELLO")
 
     def test_method_call_with_placeholders(self):
         # input 0 is the implicit object; the format arg/kwarg reference inputs 1 and 2.
-        op = MethodCallOp("format", args=(OperandRef(1),), kwargs={"end": OperandRef(2)})
+        op = lower_to_physical(MethodCallOp("format", args=(OperandRef(1),), kwargs={"end": OperandRef(2)}), PlanContext.from_flags())
         result = op.process("fit_transform", ["{0} {end}", "hello", "world"])
         self.assertEqual(result, "hello world")
 
     def test_method_call_with_placeholders2(self):
         # input 0 is the implicit object; the format arg/kwarg reference inputs 1 and 2.
-        op = MethodCallOp("format", args=[(OperandRef(1),"X")], kwargs={"end": OperandRef(2)})
+        op = lower_to_physical(MethodCallOp("format", args=[(OperandRef(1),"X")], kwargs={"end": OperandRef(2)}), PlanContext.from_flags())
         result = op.process("fit_transform", ["{0} {end}", "hello", "world"])
         self.assertEqual(result, "('hello', 'X') world")
 
     def test_call_op(self):
-        op = CallOp(func=lambda a, b: a + b, args=(OperandRef(0), OperandRef(1)), kwargs={})
+        op = lower_to_physical(CallOp(func=lambda a, b: a + b, args=(OperandRef(0), OperandRef(1)), kwargs={}), PlanContext.from_flags())
         result = op.process("fit_transform", [3, 7])
         self.assertEqual(result, 10)
 

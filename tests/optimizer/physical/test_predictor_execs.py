@@ -77,7 +77,7 @@ from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry
 
 
 def _ctx():
-    return PlanContext(backend="pandas", pandas_query=False, rechunk=True,
+    return PlanContext(pandas_query=False, rechunk=True,
                        parallelism=1, rust_backend=False, allow_patch=True)
 
 

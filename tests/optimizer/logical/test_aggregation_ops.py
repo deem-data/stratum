@@ -4,7 +4,7 @@ import unittest
 import pandas as pd
 import polars as pl
 import stratum as st
-from stratum.optimizer._optimize import OptConfig
+from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, _aggregation_entries, _aggregation_params,
     _extract_aggregations, _extract_grouping, _is_aggregation, _is_groupby_op,
@@ -13,6 +13,7 @@ from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, BinOpExpr, Col, DtExpr, OperandLeaf)
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, GetAttrProjectionOp, MetadataOp)
+from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._source_ops import DataSourceOp
@@ -416,13 +417,22 @@ class TestAggregateRewrites(unittest.TestCase):
         self.assertEqual(1, len(agg_ops))
         self.assertEqual((Col("g"),), agg_ops[0].grouping)
 
-    def test_variable_grouping_key_uses_a_placeholder_leaf(self):
+    def test_variable_grouping_key_selects_column(self):
         data = st.as_data_op(self.df).groupby(st.var("key")).agg("sum")
         ops, agg_ops = self._agg_ops(data, env={"key": "g"})
         self.assertEqual(1, len(agg_ops))
-        self.assertEqual((OperandLeaf(OperandRef(1)),), agg_ops[0].grouping)
+        self.assertEqual((Col("g"),), agg_ops[0].grouping)
         pd.testing.assert_frame_equal(self._run_plan(ops),
                                       self.df.groupby("g").agg("sum"))
+
+    def test_variable_grouping_key_selects_column_on_polars(self):
+        with force_polars():
+            data = st.as_data_op(self.df).groupby(st.var("key")).agg({"v": "sum"})
+            ops, agg_ops = self._agg_ops(data, env={"key": "g"})
+            self.assertEqual((Col("g"),), agg_ops[0].grouping)
+            result = self._run_plan(ops)
+            self.assertEqual([{"g": "a", "v": 3}, {"g": "b", "v": 3}],
+                             result.to_dicts())
 
     def test_variable_aggregation_spec_does_not_fuse(self):
         # A graph-fed spec has no canonical reduction name at plan time, so there
@@ -709,12 +719,73 @@ class TestValueCountsPipeline(unittest.TestCase):
         ops, expected = self._plan()
         pd.testing.assert_frame_equal(self._run_plan(ops), expected)
 
+    def test_value_counts_index_stays_an_index_when_order_is_observed(self):
+        counts = st.as_data_op(self.df)["t"].value_counts()
+        result = counts[counts >= 3].index
+        ops = optimize(result, OptConfig(dataframe_ops=True))
+        self.assertTrue(any(isinstance(op, IndexAccessOp) for op in ops))
+        self.assertFalse(any(isinstance(op, GroupKeysOp) for op in ops))
+        expected_counts = self.df["t"].value_counts()
+        pd.testing.assert_index_equal(
+            self._run_plan(ops), expected_counts[expected_counts >= 3].index)
+
+    def test_null_including_counts_keep_the_pandas_index_path(self):
+        df = pd.DataFrame({"t": ["a", None, "a", None], "x": range(4)})
+        source = st.as_data_op(df)
+        values = source["t"]
+        counts = values.value_counts(dropna=False)
+        result = source[values.isin(counts[counts >= 2].index)]
+        ops = optimize(result, OptConfig(dataframe_ops=True))
+        self.assertTrue(any(isinstance(op, IndexAccessOp) for op in ops))
+        self.assertFalse(any(isinstance(op, GroupKeysOp) for op in ops))
+        expected_counts = df["t"].value_counts(dropna=False)
+        expected = df[df["t"].isin(expected_counts[expected_counts >= 2].index)]
+        pd.testing.assert_frame_equal(self._run_plan(ops), expected)
+
+    def test_group_key_named_count_does_not_collide_with_count_result(self):
+        df = self.df.rename(columns={"t": "count"})
+        source = st.as_data_op(df)
+        values = source["count"]
+        counts = values.value_counts()
+        result = source[values.isin(counts[counts >= 3].index)].reset_index(drop=True)
+        expected_counts = df["count"].value_counts()
+        expected = df[df["count"].isin(
+            expected_counts[expected_counts >= 3].index)].reset_index(drop=True)
+        for selector in ("default", "greedy"):
+            with self.subTest(selector=selector), st.config(implementation_selector=selector):
+                ops, *_ = optimize_(result, OptConfig(dataframe_ops=True))
+                actual = self._run_plan(ops)
+                if isinstance(actual, pl.DataFrame):
+                    actual = actual.to_pandas()
+                pd.testing.assert_frame_equal(actual, expected)
+
+    def test_the_driving_pipeline_runs_with_polars(self):
+        source = st.as_data_op(self.df)
+        target = source["t"]
+        counts = target.value_counts()
+        eligible = counts[counts >= 3].index
+        filtered = source[target.isin(eligible)].reset_index(drop=True)
+        expected = self.df[self.df["t"].isin(
+            self.df["t"].value_counts().loc[lambda values: values >= 3].index
+        )].reset_index(drop=True)
+        with st.config(implementation_selector="greedy"):
+            ops, *_ = optimize_(filtered, OptConfig(dataframe_ops=True))
+            actual = self._run_plan(ops)
+        from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
+        from stratum.optimizer.physical._index_execs import PolarsGroupKeysOp
+        self.assertTrue(any(isinstance(op, PolarsAggregateOp) for op in ops))
+        self.assertTrue(any(isinstance(op, PolarsGroupKeysOp) for op in ops))
+        self.assertFalse(any(isinstance(op, SortOp) for op in ops))
+        self.assertIsInstance(actual, pl.DataFrame)
+        pd.testing.assert_frame_equal(actual.to_pandas(), expected)
+
     def test_every_gap_in_the_pipeline_is_extracted(self):
         ops, _ = self._plan()
         kinds = [type(o) for o in ops]
         self.assertEqual(1, sum(issubclass(k, AggregateOp) for k in kinds))
-        self.assertEqual(1, sum(issubclass(k, SortOp) for k in kinds))
-        self.assertEqual(1, sum(issubclass(k, GetAttrProjectionOp) for k in kinds))
+        self.assertEqual(0, sum(issubclass(k, SortOp) for k in kinds))
+        self.assertEqual(1, sum(issubclass(k, GroupKeysOp) for k in kinds))
+        self.assertEqual(0, sum(issubclass(k, IndexAccessOp) for k in kinds))
         self.assertEqual(1, sum(issubclass(k, MetadataOp) for k in kinds))
         # Two mask selections before the semi-join promotion runs: one over the
         # counts, a mask on a *series*, which used to be refused, and one over
@@ -727,6 +798,7 @@ class TestValueCountsPipeline(unittest.TestCase):
                          {m.output_type for m in masks})
         # The frame one is what the promotion consumes, leaving the series one.
         self.assertEqual(1, sum(isinstance(o, SelectionOp) for o in ops))
+        self.assertEqual(1, sum(isinstance(o, IndexAccessOp) for o in unpromoted))
 
     def test_no_raw_method_calls_survive(self):
         ops, _ = self._plan()

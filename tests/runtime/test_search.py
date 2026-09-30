@@ -130,7 +130,7 @@ class SearchTest(RuntimeTest):
             st._api.grid_search(pred, scoring="neg_mean_squared_error")
             self.fail("Expected RunTimeError")
         except RuntimeError as e:
-            self.assertTrue(e.args[0].startswith("[predict] Error processing 'CallOp(<lambda>)': invalid literal for int() with base 10: 'grr'"))
+            self.assertTrue(e.args[0].startswith("[predict] Error processing 'CallExec(<lambda>)': invalid literal for int() with base 10: 'grr'"))
 
 
 
@@ -150,7 +150,7 @@ class SearchTest(RuntimeTest):
         # Header exposes the runtime-distribution column.
         self.assertIn("%", out[4])
         # Row: Op, Count, Time, %  (the lambda sleeps 10x so it dominates).
-        self.assertIn("CallOp(<lambda>)", out[5])
+        self.assertIn("CallExec(<lambda>)", out[5])
         fields = out[5].split()
         self.assertEqual(fields[1], "10")          # invocation count
         self.assertTrue(fields[-1].endswith("%"))  # share of total runtime

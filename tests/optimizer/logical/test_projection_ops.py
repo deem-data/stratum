@@ -217,10 +217,12 @@ class TestIndexAttribute(unittest.TestCase):
         return make_frame_get_attr(None, op)
 
     def test_index_is_a_series_whatever_it_is_read_off(self):
+        from stratum.optimizer.logical._index_ops import IndexAccessOp
         for kind in (OutputType.SERIES, OutputType.FRAME):
             with self.subTest(container=kind.name):
-                self.assertIs(OutputType.SERIES,
-                              self._get_attr("index", kind).output_type)
+                op = self._get_attr("index", kind)
+                self.assertIsInstance(op, IndexAccessOp)
+                self.assertIs(OutputType.SERIES, op.output_type)
 
     def test_other_accessors_still_keep_the_container_kind(self):
         self.assertIs(OutputType.FRAME,
@@ -235,6 +237,19 @@ class TestIndexAttribute(unittest.TestCase):
             GetAttrProjectionOp(attr_name=["index"]), None))
         self.assertTrue(PolarsGetAttrProjectionOp.supports(
             GetAttrProjectionOp(attr_name=["dt", "year"]), None))
+
+    def test_arbitrary_pandas_index_is_preserved(self):
+        from stratum.optimizer.logical._index_ops import IndexAccessOp
+        from stratum.optimizer.physical._index_execs import PandasIndexAccessOp
+        frame = pd.DataFrame({"a": [1, 2]}, index=pd.Index(["x", "y"], name="row"))
+        ops = optimize(st.as_data_op(frame).index, OptConfig(dataframe_ops=True))
+        self.assertTrue(any(isinstance(op, IndexAccessOp) for op in ops))
+        self.assertTrue(any(isinstance(op, PandasIndexAccessOp) for op in ops))
+        from stratum.runtime._buffer_pool import BufferPool
+        pool = BufferPool()
+        for op in ops:
+            pool.put(op, op.process("fit_transform", [pool.pin(inp) for inp in op.inputs]))
+        pd.testing.assert_index_equal(pool.pin(ops[-1]), frame.index)
 
 
 class TestProjectionOp(unittest.TestCase):

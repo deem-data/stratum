@@ -301,6 +301,16 @@ class TestMapStructureKey(unittest.TestCase):
         ops = optimize(root, OptConfig(dataframe_ops=True))
         self.assertEqual(1, len([o for o in ops if isinstance(o, AssignMapOp)]))
 
+    def test_different_scalar_types_do_not_dedup_after_cse(self):
+        df = pd.DataFrame({"x": [1, 2]})
+        data = st.as_data_op(df)
+        root = data.assign(y=data["x"] * st.as_data_op(1)).skb.concat(
+            [data.assign(y=data["x"] * st.as_data_op(1.0))], axis=0)
+        ops = optimize(root, OptConfig(dataframe_ops=True))
+        self.assertEqual(2, len([o for o in ops if isinstance(o, AssignMapOp)]))
+        result = st._api.evaluate(root)
+        self.assertEqual([1.0, 2.0, 1.0, 2.0], list(result["y"]))
+
 
 class TestMapExprRefContract(unittest.TestCase):
     """New expr nodes honour the ref-traversal contract used by CSE/validation."""
@@ -563,17 +573,34 @@ def test_nan_propagation_evaluates(polars):
     assert values[1] is None or np.isnan(values[1])
 
 
-def test_external_data_op_operand_evaluates(polars):
-    # A value fed from another data-op stays a graph input (OperandLeaf) but the
-    # arithmetic around it still folds and runs on both backends.
+def test_external_scalar_data_op_operand_folds_to_const(polars):
+    # A scalar fed from another data-op arrives as a ValueOp input, and is inlined
+    # into the expression as a Const -- the map takes only the source frame.
     df = pd.DataFrame({"x": [1, 2, 3]})
     src = st.as_data_op(df)
     factor = st.as_data_op(3)
     out = src.assign(scaled=src["x"] * factor)
     map_op = _one(unittest.TestCase(), optimize(out, OptConfig(dataframe_ops=True)),
                   AssignMapOp)
-    assert 2 == len(map_op.inputs)  # [src, factor]
+    assert 1 == len(map_op.inputs)  # [src]
+    assert BinOpExpr(operator.mul, Col("x"), Const(3)) == map_op.entries["scaled"]
     result = st._api.evaluate(out)
+    assert [3, 6, 9] == list(result["scaled"])
+
+
+def test_external_container_data_op_operand_stays_leaf(polars):
+    # A container value is not inlined (Const compiles to pl.lit(), which would make
+    # a list one list-valued cell): it stays a graph input. The Polars leaf
+    # converts it to a Series before evaluating the surrounding expression.
+    df = pd.DataFrame({"x": [1, 2, 3]})
+    src = st.as_data_op(df)
+    factor = st.as_data_op([3, 3, 3])
+    out = src.assign(scaled=src["x"] * factor)
+    map_op = _one(unittest.TestCase(), optimize(out, OptConfig(dataframe_ops=True)),
+                  AssignMapOp)
+    assert 2 == len(map_op.inputs)  # [src, factor]
+    with st.config(implementation_selector="greedy" if polars else "default"):
+        result = st._api.evaluate(out)
     assert [3, 6, 9] == list(result["scaled"])
 
 

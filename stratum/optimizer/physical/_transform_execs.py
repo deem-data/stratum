@@ -7,11 +7,8 @@ Implementation selection then swaps the abstract op to a concrete backend impl:
 the sklearn/skrub reference (``@physical_impl``) or the native Rust kernel
 (``@rust_impl``).
 
-Lowering is incremental. Only estimators with a branch in
-:func:`lower_transformer` move to a dedicated physical op; every other
-``TransformerOp`` returns ``None`` from the rule, passes through lowering
-unchanged, and keeps running via the ``sklearn-skrub`` impl registered on
-``TransformerOp`` itself.
+Estimators without a dedicated physical operator use the generic Skrub
+transformer implementation.
 """
 from __future__ import annotations
 
@@ -39,7 +36,19 @@ from stratum.optimizer.physical._registry import (physical_impl, rust_impl,
                                                   sklearn_skrub_impl)
 
 
-class TableVectorizerOp(TransformerOp, PhysicalOp):
+class _TransformerExecution:
+    """Shared physical execution for Skrub-compatible transformer estimators."""
+    def process(self, mode: str, inputs: list):
+        task_data = self.extract_args_from_inputs(mode, inputs)
+        result, self.estimator = self.get_process_task()(task_data)
+        return result
+
+
+class PassthroughTransformer(_TransformerExecution, TransformerOp, PhysicalOp):
+    """Execute an estimator through the standard Skrub transformer task."""
+
+
+class TableVectorizerOp(_TransformerExecution, TransformerOp, PhysicalOp):
     """Abstract physical TableVectorizer transformer.
 
     The reference implementation deliberately keeps Skrub's complete pipeline
@@ -138,11 +147,11 @@ def _as_stratum_fused_table_vectorizer(
     return _StratumFusedTableVectorizer(**estimator.get_params(deep=False))
 
 
-class StringEncoderOp(TransformerOp, PhysicalOp):
+class StringEncoderOp(_TransformerExecution, TransformerOp, PhysicalOp):
     """Abstract physical StringEncoder transformer.
 
     Subclasses the logical ``TransformerOp`` it lowers from, so it carries the
-    same estimator state and its concrete impls inherit ``BaseEstimatorOp.process``
+    same estimator state and its concrete impls inherit physical execution
     unchanged -- they differ only in *which* estimator object ``process`` runs
     (the plain skrub encoder, or the Rust adapter swapped in at plan time).
     """
@@ -183,12 +192,11 @@ def _as_rusty_string_encoder(estimator) -> RustyStringEncoder:
 
 
 # --- OneHotEncoder -----------------------------------------------------------
-# Not yet lowered to its own physical op, so its Rust kernel is keyed on the
-# logical TransformerOp (same shape as the migrated StringEncoder impls, just
-# without an abstract parent op). Selection swaps a supported TransformerOp to
+# Not yet lowered to its own dedicated physical op, so its Rust kernel is keyed
+# on the generic pass-through transformer. Selection swaps a supported op to
 # this class and its on_impl_selected swaps in the Rust adapter.
-@rust_impl(of=TransformerOp, output_format="matrix")
-class RustOneHotEncoder(TransformerOp, RustPhysicalOp):
+@rust_impl(of=PassthroughTransformer, output_format="matrix")
+class RustOneHotEncoder(_TransformerExecution, TransformerOp, RustPhysicalOp):
     """Native Rust one-hot encoder: swaps in ``RustyOneHotEncoder`` at plan time."""
 
     @classmethod
@@ -225,8 +233,7 @@ def _as_rusty_one_hot_encoder(estimator) -> RustyOneHotEncoder:
 def lower_transformer(op: TransformerOp, ctx) -> PhysicalOp | None:
     """Lower a ``TransformerOp`` to the matching abstract physical transformer.
 
-    Only estimators with a dedicated physical op are lowered; anything else
-    returns ``None`` and stays a logical ``TransformerOp``.
+    Dedicated estimators get their own physical op; others run through Skrub.
     """
     if isinstance(op.original_estimator, _SkrubTableVectorizer):
         return TableVectorizerOp(
@@ -240,4 +247,5 @@ def lower_transformer(op: TransformerOp, ctx) -> PhysicalOp | None:
             allow_reject=op.allow_reject, unsupervised=op.unsupervised,
             kwargs=op.kwargs, param_refs=op.param_refs,
         )
-    return None
+    op.__class__ = PassthroughTransformer
+    return op

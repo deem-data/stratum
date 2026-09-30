@@ -7,12 +7,15 @@ but that the cost model and join reordering can reason about.
 import operator
 
 from stratum.optimizer._op_utils import rewrite_pass
+from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import (
-    Col, ColumnMethodExpr, OperandLeaf, UnaryOpExpr)
+    AggExpr, BinOpExpr, Col, ColumnMethodExpr, Const, OperandLeaf, UnaryOpExpr)
+from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._join_ops import JoinOp
-from stratum.optimizer.logical._ops import GetItemOp, Op, OutputType
+from stratum.optimizer.logical._ops import GetItemOp, Op, OperandRef, OutputType
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
+from stratum.optimizer.logical._sort_ops import SortOp
 
 
 def _is_isin(expr) -> bool:
@@ -115,8 +118,98 @@ promote_isin_to_filtering_join = rewrite_pass(_match_isin_against_a_relation,
                                               _promote_to_filtering_join)
 
 
+def _match_counted_group_keys(op: Op):
+    """Recognize proven value-count keys used only for membership.
+
+    An arbitrary index is not a grouping key. The full producer shape and its
+    sole consumer establish when the labels really are the counted values.
+    """
+    if not isinstance(op, IndexAccessOp) or len(op.inputs) != 1:
+        return None
+    if (len(op.outputs) != 1 or not isinstance(op.outputs[0], JoinOp)
+            or op.outputs[0].how not in ("semi", "anti")
+            or op.outputs[0].inputs[1] is not op):
+        return None
+    selection = op.inputs[0]
+    if (not isinstance(selection, SelectionOp)
+            or selection.kind is not SelectionKind.MASK
+            or selection.output_type is not OutputType.SERIES
+            or selection.outputs != [op] or len(selection.inputs) != 1):
+        return None
+    predicate = selection.predicate
+    if (not isinstance(predicate, BinOpExpr) or predicate.op is not operator.ge
+            or not isinstance(predicate.left, OperandLeaf)
+            or predicate.left.ref.k != 0
+            or not isinstance(predicate.right, Const)
+            or type(predicate.right.value) not in (int, float)
+            or predicate.right.value <= 0):
+        return None
+    upstream = selection.inputs[0]
+    sort = upstream if isinstance(upstream, SortOp) else None
+    if sort is not None:
+        if (sort.outputs != [selection] or sort.by
+                or len(sort.inputs) != 1):
+            return None
+        upstream = sort.inputs[0]
+    agg = upstream
+    if (not isinstance(agg, AggregateOp) or not agg.grouped
+            or agg.output_type is not OutputType.SERIES
+            or agg.outputs != [sort or selection]
+            or len(agg.inputs) != 1
+            or agg.options != {"sort": False, "dropna": True,
+                               "observed": False, "sort_categories": True}):
+        return None
+    values = OperandLeaf(OperandRef(0))
+    if (agg.grouping != (values,)
+            or agg.aggregations != (("count", AggExpr("size", values)),)):
+        return None
+    projection = agg.inputs[0]
+    if (not isinstance(projection, ColumnProjectionOp)
+            or not isinstance(projection.key, str)
+            or projection.outputs != [agg]
+            or len(projection.inputs) != 1
+            or projection.inputs[0].output_type is not OutputType.FRAME):
+        return None
+    return op, selection, sort, agg, projection
+
+
+def _replace_counted_group_keys(op: IndexAccessOp, selection: SelectionOp,
+                                sort: SortOp | None, agg: AggregateOp,
+                                projection: ColumnProjectionOp, root: Op) -> Op:
+    source = projection.inputs[0]
+    key = projection.key
+    count_name = "count" if key != "count" else "__count"
+    count = AggregateOp(
+        grouped=True, grouping=(Col(key),),
+        aggregations=((count_name, AggExpr("size", Col(key))),),
+        options={"sort": False, "dropna": agg.options["dropna"]},
+        output_type=OutputType.FRAME, inputs=[source])
+    filtered = SelectionOp(
+        kind=SelectionKind.MASK,
+        predicate=BinOpExpr(operator.ge, Col(count_name),
+                            Const(selection.predicate.right.value)),
+        inputs=[count])
+    keys = GroupKeysOp(key=key, inputs=[filtered], outputs=list(op.outputs))
+    source.outputs = [out for out in source.outputs if out is not projection]
+    source.add_output(count)
+    count.outputs = [filtered]
+    filtered.outputs = [keys]
+    op.replace_input_of_outputs(keys)
+    # Detach the replaced cone so later graph passes see only live consumers.
+    for old in (op, selection, sort, agg, projection):
+        if old is not None:
+            old.inputs = []
+            old.outputs = []
+    return keys if root is op else root
+
+
+promote_counted_group_keys = rewrite_pass(_match_counted_group_keys,
+                                          _replace_counted_group_keys)
+
+
 def relational_rewrites(root: Op, semi_join: bool = True) -> Op:
     """Run the enabled relational rewrites, one pass each."""
     if semi_join:
         root = promote_isin_to_filtering_join(root)
+        root = promote_counted_group_keys(root)
     return root

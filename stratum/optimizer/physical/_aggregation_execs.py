@@ -32,6 +32,11 @@ class AggregateExec(AggregateOp, PhysicalOp):
 @physical_impl(of=AggregateOp, backend="pandas")
 class PandasAggregateOp(AggregateExec):
     def process(self, mode: str, inputs: list):
+        # A Series aggregate has no Polars implementation yet. The greedy
+        # selector may therefore bind this pandas fallback after a Polars
+        # projection; normalise that one input at the backend boundary.
+        if isinstance(inputs[0], pl.Series):
+            inputs = [inputs[0].to_pandas(), *inputs[1:]]
         ctx = self._ctx(inputs, mode)
         if not self.grouped:
             return self._reduce_whole(ctx)
