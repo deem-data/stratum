@@ -59,6 +59,21 @@ def _read_explain_levels(value) -> tuple[str, ...]:
     return levels
 
 
+# Memory fraction of host memory to use for the buffer pool.
+_DEFAULT_BUFFER_POOL_MEMORY_FRACTION = 0.7 # default 70%
+
+def _read_memory_fraction(value) -> float:
+    try:
+        fraction = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"buffer_pool_memory_fraction must be a float in (0, 1], got {value!r}.")
+    if not 0 < fraction <= 1:
+        raise ValueError(
+            f"buffer_pool_memory_fraction must be in (0, 1], got {value!r}.")
+    return fraction
+
+
 # FIXME: Not all flags need environment variables, only the ones that are shared across backends
 @dataclass
 class _Flags:
@@ -82,7 +97,7 @@ class _Flags:
     make_map_op: bool = True
     make_column_projection: bool = True
     rechunk: bool = True
-    buffer_pool_memory_budget: int = 0
+    buffer_pool_memory_fraction: float = _DEFAULT_BUFFER_POOL_MEMORY_FRACTION
 
 FLAGS = _Flags()
 
@@ -104,7 +119,7 @@ def set_config(rust_backend: bool | None = None,
     make_map_op: bool = True,
     make_column_projection: bool = True,
     rechunk: bool = True,
-    buffer_pool_memory_budget: int = 0,
+    buffer_pool_memory_fraction: float | None = None,
     implementation_selector: str = "default",
                ) -> None:
     """Runtime toggles (synced env for Rust to read).
@@ -163,9 +178,15 @@ def set_config(rust_backend: bool | None = None,
             efficient backends (rust/polars) first. This is the only user-facing
             way to put a pipeline on polars -- the backend is a property of the
             selector, not a flag beside it.
+
+        buffer_pool_memory_fraction: float in (0, 1], default 0.7
+            Share of the detected system memory used as the buffer pool's memory
+            budget. The byte budget is resolved when a BufferPool is constructed
+            (fixed 2 GiB fallback when host memory cannot be detected).
     """
     implementation_selector = _read_implementation_selector(implementation_selector)
-
+    if buffer_pool_memory_fraction is not None:
+        buffer_pool_memory_fraction = _read_memory_fraction(buffer_pool_memory_fraction)
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
         os.environ["SKRUB_RUST"] = "1" if FLAGS.rust_backend else "0"
@@ -197,7 +218,8 @@ def set_config(rust_backend: bool | None = None,
     FLAGS.debug_graph = bool(debug_graph)
     FLAGS.open_graph = bool(open_graph)
     FLAGS.graph_format = str(graph_format)
-    FLAGS.buffer_pool_memory_budget = int(buffer_pool_memory_budget)
+    if buffer_pool_memory_fraction is not None:
+        FLAGS.buffer_pool_memory_fraction = buffer_pool_memory_fraction
     FLAGS.explain = _read_explain_levels(explain)
     FLAGS.make_selection_op = bool(make_selection_op)
     FLAGS.make_map_op = bool(make_map_op)

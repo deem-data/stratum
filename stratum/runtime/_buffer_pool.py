@@ -1,5 +1,7 @@
 from __future__ import annotations
 import logging
+import os
+import sys
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -19,6 +21,63 @@ from stratum.runtime._object_size import get_size, prettify_bytes
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SPILL_ROOT = Path(".stratum/bufferpool")
+
+# Fallback budget used when the host's memory cannot be read.
+_FALLBACK_MEMORY_BUDGET = 2 * 1024**3  # 2 GiB
+
+
+def _host_memory_bytes() -> int | None:
+    """Total physical RAM of the host, or None when it cannot be read."""
+    # POSIX (Linux/macOS): total pages times page size.
+    if hasattr(os, "sysconf"):
+        try:
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if pages > 0 and page_size > 0:
+                return int(pages) * int(page_size)
+        except (ValueError, OSError, AttributeError):
+            pass
+    # Windows has no os.sysconf; GlobalMemoryStatusEx reports total physical memory.
+    if sys.platform == "win32":
+        try:
+            # Imported lazily: only the Windows path needs ctypes.
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+        except (OSError, AttributeError, ValueError):
+            pass
+    return None
+
+
+def _resolve_memory_budget(fraction: float) -> int:
+    """Memory budget for the BufferPool: ``fraction`` of the detected memory.
+    A failed detection logs a warning and falls back to _FALLBACK_MEMORY_BUDGET
+    """
+    host_memory = _host_memory_bytes()
+    if host_memory is None:
+        logger.warning(
+            "Could not detect system memory; falling back to a "
+            f"{prettify_bytes(_FALLBACK_MEMORY_BUDGET)} buffer pool budget."
+        )
+        return _FALLBACK_MEMORY_BUDGET
+    # Clamp to at least one byte: budget 0 would silently disable eviction.
+    return max(1, int(fraction * host_memory))
 
 
 @dataclass
@@ -69,16 +128,17 @@ class BufferPoolStats:
 
 
 class BufferPool:
-    """Cache for intermediate buffers with LRU spill-to-disk eviction.
+    """Cache for intermediates with LRU spill-to-disk eviction.
 
-    When `memory_usage` exceeds `memory_budget` (and budget > 0), the
-    least-recently-pinned unpinned entries are spilled to disk under
-    `spill_root`. A spilled entry stays in `live_variable_map` so subsequent
-    `pin` calls can transparently re-load it; only the in-memory bytes are
-    released.
+    When `memory_usage` exceeds `memory_budget`, the least-recently-pinned
+    unpinned entries are spilled to disk under `spill_root`. A spilled entry
+    stays in `live_variable_map` so subsequent `pin` calls can transparently
+    re-load it; only the in-memory bytes are released.
 
-    `memory_budget` is sourced from `FLAGS.buffer_pool_memory_budget` at
-    construction time; a value of 0 disables eviction.
+    `memory_budget` defaults to `FLAGS.buffer_pool_memory_fraction` (0.7) of the
+    host's total RAM, with a fixed 2 GiB fallback when memory cannot be detected.
+    No config disables eviction; only direct assignment of a non-positive budget
+    does.
     """
 
     def __init__(self, spill_root: Path | str = _DEFAULT_SPILL_ROOT):
@@ -94,7 +154,7 @@ class BufferPool:
         # TODO: stale spill files from a crashed run are never reclaimed; add
         # startup/teardown cleanup of the spill root.
         self._spill_root = Path(spill_root)
-        self.memory_budget = FLAGS.buffer_pool_memory_budget
+        self.memory_budget = _resolve_memory_budget(FLAGS.buffer_pool_memory_fraction)
         self.stats = BufferPoolStats()
 
     def put(self, key: Hashable, data: Any):

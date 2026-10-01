@@ -1,14 +1,17 @@
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import polars as pl
 
 from stratum._api import grid_search
-from stratum._config import config
+from stratum._config import config, get_config, set_config
+from stratum.runtime import _buffer_pool as _bp
 from stratum.runtime._buffer_pool import BufferPool
 from stratum.runtime._object_size import UNKNOWN_SIZE, get_size
 from tests.runtime.runtime_test_utils import RuntimeTest, _arr, _make_op, simple_pipeline
@@ -95,6 +98,71 @@ class TestBufferPool(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Memory budget resolution
+# ---------------------------------------------------------------------------
+
+class TestMemoryBudgetResolution(unittest.TestCase):
+    """BufferPool budget from detected host memory and config."""
+
+    def setUp(self):
+        self.spill_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.spill_root, ignore_errors=True)
+
+    @unittest.skipUnless(hasattr(os, "sysconf"), "os.sysconf is POSIX-only")
+    def test_host_memory_from_sysconf(self):
+        def fake_sysconf(name):
+            return {"SC_PHYS_PAGES": 1000, "SC_PAGE_SIZE": 4096}[name]
+
+        with patch.object(_bp.os, "sysconf", side_effect=fake_sysconf):
+            self.assertEqual(_bp._host_memory_bytes(), 1000 * 4096)
+
+    @unittest.skipUnless(hasattr(os, "sysconf"), "os.sysconf is POSIX-only")
+    def test_unreadable_host_memory_returns_none(self):
+        with patch.object(_bp.os, "sysconf", side_effect=ValueError("nope")):
+            self.assertIsNone(_bp._host_memory_bytes())
+
+    def test_budget_is_fraction_of_host_memory(self):
+        with patch.object(_bp, "_host_memory_bytes", return_value=100_000):
+            self.assertEqual(_bp._resolve_memory_budget(0.7), 70_000)
+
+    def test_unknown_memory_falls_back_to_fixed_budget(self):
+        with patch.object(_bp, "_host_memory_bytes", return_value=None):
+            with self.assertLogs("stratum.runtime._buffer_pool", level="WARNING") as logs:
+                budget = _bp._resolve_memory_budget(0.7)
+        self.assertEqual(budget, 2 * 1024**3)
+        self.assertTrue(any("falling back" in line for line in logs.output))
+
+    def test_buffer_pool_uses_fraction_and_host_memory(self):
+        with patch.object(_bp, "_host_memory_bytes", return_value=400_000):
+            with config(buffer_pool_memory_fraction=0.25):
+                pool = BufferPool(spill_root=self.spill_root)
+        self.assertEqual(pool.memory_budget, 100_000)
+
+
+class TestMemoryBudgetConfig(unittest.TestCase):
+    """Validation and wiring of the buffer_pool_memory_fraction config."""
+
+    def test_invalid_fractions_rejected(self):
+        original = get_config()["buffer_pool_memory_fraction"]
+        for bad in (0, 0.0, -0.5, 1.5, 2, "half"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    set_config(buffer_pool_memory_fraction=bad)
+        self.assertEqual(get_config()["buffer_pool_memory_fraction"], original)
+
+    def test_fraction_is_tunable_and_survives_other_config_calls(self):
+        with config(buffer_pool_memory_fraction=0.3):
+            set_config(scheduler=True)
+            self.assertEqual(get_config()["buffer_pool_memory_fraction"], 0.3)
+
+    def test_config_context_applies_and_restores(self):
+        original = get_config()["buffer_pool_memory_fraction"]
+        with config(buffer_pool_memory_fraction=0.25):
+            self.assertEqual(get_config()["buffer_pool_memory_fraction"], 0.25)
+        self.assertEqual(get_config()["buffer_pool_memory_fraction"], original)
+
+
+# ---------------------------------------------------------------------------
 # Integration tests
 # ---------------------------------------------------------------------------
 
@@ -124,8 +192,11 @@ class TestBufferPoolIntegration(RuntimeTest):
         pred = arr_out.skb.apply(DummyRegressor(), y=y)
 
         with self.assertLogs("stratum", level="DEBUG") as logs:
-            with config(scheduler=True, buffer_pool_memory_budget=24000, DEBUG=True):
-                search = pred.skb.make_grid_search(cv=2, scoring="neg_mean_squared_error")
+            # Pin the host memory so the default 0.7 fraction yields the same
+            # ~24 KB budget the old explicit byte flag used to set.
+            with patch.object(_bp, "_host_memory_bytes", return_value=34286):
+                with config(scheduler=True, DEBUG=True):
+                    search = pred.skb.make_grid_search(cv=2, scoring="neg_mean_squared_error")
         self.assertIsNotNone(search)
         evictions = [line for line in logs.output if "Evicted" in line]
         self.assertEqual(len(evictions), 12, msg="\n".join(logs.output))
