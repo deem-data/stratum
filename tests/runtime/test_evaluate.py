@@ -11,10 +11,27 @@ from stratum._api import evaluate
 from tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1
 import stratum
 import logging
+from contextlib import redirect_stdout
+from io import StringIO
 logging.basicConfig(level=logging.INFO)
 
 
 class EvaluateTest(RuntimeTest):
+    def test_evaluate_with_stats(self):
+        data = skrub.as_data_op(self.df)
+        x = data[["x", "datetime"]].skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        pred = x.skb.apply(DummyRegressor(), y=y)
+
+        with redirect_stdout(StringIO()) as stdout, stratum.config(stats=True, stats_top_k=0):
+            evaluate(pred)
+
+        report = stdout.getvalue()
+        self.assertIn("Execution Statistics (seconds)", report)
+        self.assertIn("Optimization:", report)
+        self.assertIn("Execution:", report)
+        self.assertIn("Unshown operators:", report)
+
     def test_evaluate_datetime_pipe(self):
         data = skrub.as_data_op(self.df)
         x = data[["x", "datetime"]].skb.mark_as_X()
