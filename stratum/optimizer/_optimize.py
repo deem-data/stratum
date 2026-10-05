@@ -1,5 +1,6 @@
 from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
+from skrub._data_ops._data_ops import Apply
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque, defaultdict
 from dataclasses import dataclass
@@ -7,8 +8,8 @@ from typing import Any
 from .logical._op_cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .logical._numeric_ops import extract_numeric_op
-from .logical._candidate_ops import CollectCandidatesOp, ScoreCandidatesOp
-from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared
+from .logical._candidate_ops import CollectCandidatesOp, DeclaredScoringOp, ScoreCandidatesOp
+from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared, remap_operand_refs
 from .logical._split_ops import SplitOutput
 from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
@@ -63,6 +64,9 @@ class SearchConfig:
 
     metric: Any
     return_predictions: bool = False
+    #: The metric is the one the plan declares with `.skb.with_scoring()`, so the
+    #: scorer also reads the kwargs declared with it, computed on each test fold.
+    declared_kwargs: bool = False
 
 
 class OptConfig():
@@ -311,6 +315,7 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
     check_choices_not_shared(nodes.values())
     order = topological_traverse(nodes, parents, children)
     root_id = order[-1]
+    feeds_estimator = _apply_fed_nodes(nodes, parents, order)
 
     # id(DataOp) -> Op. Keyed by DataOp identity (not the graph's node keys) so
     # as_op's operand binder can resolve inputs found in the impl fields directly.
@@ -325,12 +330,31 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
             input_key = children.get(node_key, [])[0]
             ids_to_ops[id(skrub_op)] = ids_to_ops[id(nodes[input_key])]
             continue
-        ids_to_ops[id(skrub_op)] = as_op(skrub_op, ids_to_ops, env)
+        ids_to_ops[id(skrub_op)] = as_op(skrub_op, ids_to_ops, env,
+                                         feeds_estimator=node_key in feeds_estimator)
 
     root = ids_to_ops[id(nodes[root_id])]
     log_time("conversion took", start)
     _debug_show_graph(root, "conversion")
     return root
+
+
+def _apply_fed_nodes(nodes: dict, parents: dict, order: list) -> set:
+    """Keys of the nodes whose value some `.skb.apply()` consumes, directly or not.
+
+    skrub decides at evaluation time whether an Apply is the last estimator: if
+    another Apply is still waiting on its output, it transforms (or predicts) in
+    every response pass instead of answering the scorer. The plan settles the same
+    question once, from the graph: any downstream Apply, through any of its fields,
+    counts. skrub's answer can depend on the order its traversal first reaches a
+    node shared by an Apply and a non-Apply path; this static rule ignores that.
+    """
+    fed = set()
+    for key in reversed(order):
+        if any(isinstance(nodes[p]._skrub_impl, Apply) or p in fed
+               for p in parents.get(key, ())):
+            fed.add(key)
+    return fed
 
 
 def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
@@ -350,6 +374,10 @@ def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
     replacing = isinstance(root, ChoiceOp)
     names = root.make_outcome_names() if replacing else ["default"]
     candidates = list(root.inputs) if replacing else [root]
+    # A `.skb.with_scoring()` tail is metadata for the scorer, not part of what a
+    # candidate produces: the candidate is the value it passes through.
+    declared = [c if isinstance(c, DeclaredScoringOp) else None for c in candidates]
+    candidates = [d.inputs[0] if d is not None else c for c, d in zip(candidates, declared)]
 
     if search is None or search.metric is None:
         node = CollectCandidatesOp(names)
@@ -364,21 +392,57 @@ def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
         node = ScoreCandidatesOp(names, search.metric, response_mode=mode,
                                  emit_predictions=search.return_predictions)
     node.inputs = list(candidates)
-    for candidate in candidates:
+    for candidate, d in zip(candidates, declared):
         if replacing:
             # The choice is the root, so it is the only consumer being redirected. A
             # rebuild rather than `replace_output` because one operator may fill two
             # candidate slots and therefore be redirected twice.
-            candidate.outputs = [node if out is root else out for out in candidate.outputs]
+            candidate.outputs = [node if out is root or out is d else out
+                                 for out in candidate.outputs]
         else:
+            candidate.outputs = [out for out in candidate.outputs if out is not d]
             candidate.add_output(node)
 
     if isinstance(node, ScoreCandidatesOp):
         _, y_op = fold
         node.y_ref = OperandRef(node.add_input(y_op))
         y_op.add_output(node)
+        if search.declared_kwargs:
+            if any(d is None for d in declared):
+                raise ValueError(
+                    "not every candidate ends in `.skb.with_scoring()`, so the declared"
+                    " scorer cannot score them all. Pass `scoring=` instead.")
+            node.kwargs_refs = [_rebind(d.scorers[0]["kwargs"], d.inputs, node)
+                                for d in declared]
+    for d in declared:
+        if d is not None:
+            # The kwargs the scorer now reads have it as their consumer; the rest of
+            # the declaration (and a search scoring with another metric) is dead.
+            d.detach_and_prune()
     log_time("installing the candidate set took", start)
     return node
+
+
+def _rebind(value, operands: list[Op], consumer: Op):
+    """``value`` with its OperandRefs into ``operands`` re-pointed at inputs of ``consumer``."""
+    mapping = {}
+    for k in _referenced(value):
+        if k not in mapping:
+            mapping[k] = consumer.add_input(operands[k])
+            operands[k].add_output(consumer)
+    return remap_operand_refs(value, mapping)
+
+
+def _referenced(value):
+    """The operand indices ``value`` refers to, through nested tuples, lists and dicts."""
+    if isinstance(value, OperandRef):
+        yield value.k
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _referenced(v)
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _referenced(v)
 
 
 def _response_mode(metric, names: list[str], candidates: list[Op]) -> str:

@@ -10,9 +10,10 @@ import unittest
 
 import numpy as np
 import pandas as pd
+from sklearn.cluster import KMeans
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import accuracy_score, fbeta_score, make_scorer
 from sklearn.model_selection import KFold, StratifiedKFold
 
@@ -202,6 +203,111 @@ class ScoringTest(unittest.TestCase):
         after_tail = st._api.grid_search(flipped, scoring="accuracy")
         self.assertAlmostEqual(after_tail.results_["scores"][0],
                                1 - at_model.results_["scores"][0], places=9)
+
+
+    def _stacked_pipeline(self, inner):
+        """`inner` feeds a second estimator, so it is not the last step of the plan."""
+        data = st.as_data_op(self.clf_df)
+        y = data["t"].skb.mark_as_y()
+        X = data[["a", "b"]].skb.mark_as_X(cv=StratifiedKFold(n_splits=3), split_kwargs={})
+        features = X.skb.apply(inner, y=y).skb.apply_func(
+            lambda p: pd.DataFrame(np.asarray(p).reshape(len(p), -1)).add_prefix("f"))
+        return features.skb.apply(LogisticRegression(), y=y)
+
+    def test_inner_predictor_predicts_in_a_probability_pass(self):
+        """Only the last estimator answers the scorer: one feeding another predicts in
+        every pass, so its test-fold features are labels as they were while fitting."""
+        self.assert_matches_skrub(
+            lambda: self._stacked_pipeline(LogisticRegression()), "roc_auc")
+
+    def test_inner_estimator_with_transform_transforms(self):
+        """An inner estimator that can transform does so, in skrub: a KMeans hands on
+        its distances, not its labels."""
+        self.assert_matches_skrub(
+            lambda: self._stacked_pipeline(KMeans(n_clusters=3, n_init=1, random_state=0)),
+            "roc_auc")
+
+
+    # --- metrics declared with `.skb.with_scoring()` ---------------------------------
+
+    def _declared_pipeline(self, scoring, sample_weight=None):
+        """A two-candidate search whose metric the DataOp declares itself.
+
+        ``sample_weight(X, y)`` builds the scorer's kwargs from the plan's own data, so
+        they are computed per test fold.
+        """
+        data = st.as_data_op(self.clf_df)
+        y = data["t"].skb.mark_as_y()
+        X = data[["a", "b"]].skb.mark_as_X(cv=StratifiedKFold(n_splits=3), split_kwargs={})
+        pred = X.skb.apply(LogisticRegression(C=st.choose_from([0.01, 1.0], name="C")), y=y)
+        kwargs = None if sample_weight is None else {"sample_weight": sample_weight(X, y)}
+        return pred.skb.with_scoring(scoring, kwargs=kwargs)
+
+    def assert_declared_matches_skrub(self, make_pipeline):
+        ours = st._api.grid_search(make_pipeline())
+        theirs = make_pipeline().skb.make_grid_search(fitted=True)
+        np.testing.assert_allclose(theirs.results_["mean_test_score"],
+                                   ours.results_["scores"], rtol=1e-9)
+
+    def test_declared_metric_is_used(self):
+        self.assert_declared_matches_skrub(lambda: self._declared_pipeline("accuracy"))
+
+    def test_declared_kwargs_are_computed_on_each_test_fold(self):
+        weights = lambda X, y: X["a"].abs()
+        for scoring in ("accuracy", "roc_auc", "neg_log_loss"):
+            with self.subTest(scoring=scoring):
+                self.assert_declared_matches_skrub(
+                    lambda: self._declared_pipeline(scoring, weights))
+
+    def test_declared_kwargs_follow_a_choice_per_candidate(self):
+        """A choice in the kwargs is a candidate dimension of its own: each candidate is
+        scored with the weights of its own branch."""
+        def make():
+            data = st.as_data_op(self.clf_df)
+            y = data["t"].skb.mark_as_y()
+            X = data[["a", "b"]].skb.mark_as_X(cv=StratifiedKFold(n_splits=3),
+                                               split_kwargs={})
+            column = st.as_data_op(st.choose_from(["a", "b"], name="weights"))
+            return X.skb.apply(LogisticRegression(), y=y).skb.with_scoring(
+                "accuracy", kwargs={"sample_weight": X[column].abs()})
+        self.assert_declared_matches_skrub(make)
+
+    def test_explicit_scoring_overrides_the_declared_one(self):
+        """As in skrub: the declared metric and its kwargs are ignored."""
+        make = lambda: self._declared_pipeline("accuracy", lambda X, y: X["a"].abs())
+        ours = st._api.grid_search(make(), scoring="roc_auc")
+        theirs = make().skb.make_grid_search(fitted=True, scoring="roc_auc")
+        np.testing.assert_allclose(theirs.results_["mean_test_score"],
+                                   ours.results_["scores"], rtol=1e-9)
+
+    def test_declarations_stratum_cannot_score_with_are_refused(self):
+        cases = {
+            "2 scorers": self._declared_pipeline("accuracy").skb.with_scoring("roc_auc"),
+            # The estimator's own `score`, which a search never uses (ADR 0004).
+            "would score each candidate with its own": self._declared_pipeline(None),
+        }
+        for message, dag in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(ValueError, message):
+                st._api.grid_search(dag)
+
+    def test_make_grid_search_uses_the_declared_metric(self):
+        with st.config(scheduler=True):
+            search = self._declared_pipeline(
+                "accuracy", lambda X, y: X["a"].abs()).skb.make_grid_search(fitted=True)
+        # Stratum's results table, not skrub's.
+        self.assertIn("scores", list(search.results_.columns))
+
+    def test_make_grid_search_hands_an_unusable_declaration_to_skrub(self):
+        with st.config(scheduler=True):
+            search = self._declared_pipeline(None).skb.make_grid_search(fitted=True)
+        self.assertIn("mean_test_score", list(search.results_.columns))
+
+    def test_a_declared_metric_does_not_change_evaluate(self):
+        """Without a search the declaration is dropped, kwargs subgraph included."""
+        plain = st._api.evaluate(self._declared_pipeline("accuracy"))
+        declared = st._api.evaluate(
+            self._declared_pipeline("accuracy", lambda X, y: X["a"].abs()))
+        np.testing.assert_array_equal(np.asarray(plain), np.asarray(declared))
 
 
 if __name__ == "__main__":

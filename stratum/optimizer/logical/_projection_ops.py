@@ -506,6 +506,5 @@ def make_string_method_op(op: MethodCallOp) -> StringMethodOp:
     column.add_output(new_op)
     accessor.outputs = [o for o in accessor.outputs if o is not op]
     if not accessor.outputs:
-        column.outputs = [o for o in column.outputs if o is not accessor]
-        accessor.inputs = []
+        accessor.detach_and_prune()
     return new_op

@@ -619,6 +619,15 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].value, 1)
 
+    def test_folded_operand_with_a_shared_producer_leaves_no_dangling_edge(self):
+        """The folded operand's own subgraph is pruned too: its producer feeds the plan
+        elsewhere, so a stale edge to it used to fail the topological walk."""
+        from tests.optimizer.physical.test_source_execs import run_plan
+        X = st.as_data_op(pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]}))
+        for dag in ((X["a"] + 1) * 0 + X["b"], (X["a"] - 1) ** 0 + X["b"]):
+            out, *_ = optimize(dag)
+            pd.testing.assert_series_equal(run_plan(out), dag.skb.eval(), check_names=False)
+
     def test_pow_zero_disabled(self):
         """Disabling pow_zero must leave x ** 0 untouched."""
         df = st.as_data_op(5)

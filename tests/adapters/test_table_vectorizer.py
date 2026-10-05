@@ -347,6 +347,19 @@ def test_uninformative_columns_match_and_keep_reference_metadata():
     }
 
 
+def test_duration_columns_become_seconds_like_skrub():
+    hours = [pd.Timedelta(hours=1), pd.Timedelta(hours=2), pd.NaT, pd.Timedelta(hours=4)]
+    X = pd.DataFrame({"duration": hours, "number": [1.0, 2.0, 3.0, 4.0]})
+    reference, reference_output, fused, fused_output = _fit_pair(X)
+    _assert_pair(reference, reference_output, fused, fused_output)
+    assert fused_output["duration"].tolist()[:2] == [3600.0, 7200.0]
+
+    X_pl = pl.from_pandas(X)
+    reference = TableVectorizer().fit(X_pl)
+    fused = ExactFusedTableVectorizer().fit(X_pl)
+    assert_polars_frame_equal(reference.transform(X_pl), fused.transform(X_pl))
+
+
 def test_empty_and_configured_null_strings_match():
     X = pd.DataFrame(
         {

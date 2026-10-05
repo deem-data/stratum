@@ -366,6 +366,32 @@ class IRNode:
         for in_ in self.inputs:
             in_.replace_output(self, new_output)
 
+    def detach(self) -> None:
+        """Take this node out of the graph: drop it from its producers' outputs and
+        clear its own edges. Its consumers are the caller's to rewire, before or after.
+
+        Producers left without a consumer stay as they are, which is what a rewrite
+        wants while it is about to hand them a new consumer; see ``detach_and_prune``.
+        """
+        for in_ in self.inputs:
+            in_.outputs = [out for out in in_.outputs if out is not self]
+        self.inputs = []
+        self.outputs = []
+
+    def detach_and_prune(self) -> None:
+        """``detach`` this node, then every producer that leaves without a consumer.
+
+        A producer nobody consumes is unreachable from the root, but it is still in
+        its own producers' outputs, and the topological walk rejects that edge. So the
+        dead cone goes with the node. Call it only once every surviving producer has
+        its new consumer: one whose last edge is momentarily gone would be pruned too.
+        """
+        producers = list(dict.fromkeys(self.inputs))
+        self.detach()
+        for in_ in producers:
+            if not in_.outputs:
+                in_.detach_and_prune()
+
     def clone(self):
         if getattr(self.__class__, "fields", None) is None:
             raise NotImplementedError(f"Cloning of {self.__class__.__name__} objects is not implemented yet. Please implement it.")

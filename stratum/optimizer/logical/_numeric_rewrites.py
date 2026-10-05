@@ -108,20 +108,20 @@ def eliminate_single_op_chain(op):
 def eliminate_two_op_chain(op1, op2):
     """Remove a redundant pair of inverse ops: y = f(op2(op1(x))) -> y = f(x).
 
-    Rewires the DAG in-place so that op1's input connects directly to op2's output.
+    Rewires the DAG in-place so that op1's input connects directly to op2's output,
+    and returns that input.
     """
     x = op1.inputs[0]
-    x.outputs = [out for out in x.outputs if out is not op1]
     replace_op_in_outputs(op2, x)
+    op2.detach_and_prune()
+    return x
 
 
 def eliminate_two_op_chain_root_safe(op1: Op, op2: Op, root: Op) -> Op:
     """Wrapper around eliminate_two_op_chain that handles the case where
     op2 is the root (last node) of the DAG -- returns the updated root."""
-    eliminate_two_op_chain(op1, op2)
-    if op2 is root:
-        root = op1.inputs[0]
-    return root
+    x = eliminate_two_op_chain(op1, op2)
+    return x if op2 is root else root
 
 
 def replace_two_op_chain(op1: Op, op2: Op, replacement: Op):
@@ -154,9 +154,8 @@ def fold_to_zero(op: Op, root: Op) -> Op:
     ``x`` subgraph is never computed.
     """
     zero_op = ValueOp(0.0)
-    for operand in op.inputs:
-        operand.outputs = [out for out in operand.outputs if out is not op]
     replace_op_in_outputs(op, zero_op)
+    op.detach_and_prune()
     return zero_op if op is root else root
 
 
@@ -167,9 +166,8 @@ def fold_to_one(op: Op, root: Op) -> Op:
     and rewires downstream consumers to a :class:`ValueOp` holding ``1``.
     """
     one_op = ValueOp(1)
-    for operand in op.inputs:
-        operand.outputs = [out for out in operand.outputs if out is not op]
     replace_op_in_outputs(op, one_op)
+    op.detach_and_prune()
     return one_op if op is root else root
 
 

@@ -80,10 +80,7 @@ def _merge_op(op: Op, canonical: Op) -> None:
     for out in list(op.outputs):
         _rebind_consumer(out, op, canonical)
         canonical.add_output(out)
-    for inp in op.inputs:
-        inp.outputs = [o for o in inp.outputs if o is not op]
-    op.inputs = []
-    op.outputs = []
+    op.detach()
 
 
 def _rebind_consumer(out: Op, old_op: Op, new_op: Op) -> None:

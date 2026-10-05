@@ -111,14 +111,14 @@ class FitPassPlanningTest(unittest.TestCase):
     def test_a_step_that_must_be_fitted_is_never_marked(self):
         """A transformer after the predictor is fitted on the predictor's output, so it
         has to run in the fitting pass even though nothing there reads its result."""
-        plan = self._plan(lambda p: p.skb.apply(RecordingTail(), how="no_wrap"))
+        plan = self._plan(lambda p: p.skb.apply(RecordingTail(), no_wrap=True))
         tails = [op for op in plan if isinstance(op, BaseEstimatorOp)]
         self.assertTrue(tails, "expected the estimator ops in the plan")
         for op in tails:
             self.assertFalse(op.dead_in_fit, f"{op} would go unfitted")
 
         st._api.grid_search(self._pipeline(
-            lambda p: p.skb.apply(RecordingTail(), how="no_wrap")), scoring=SCORING)
+            lambda p: p.skb.apply(RecordingTail(), no_wrap=True)), scoring=SCORING)
         self.assertEqual(len(RecordingTail.FITS), N_SPLITS)
 
     def test_work_feeding_the_estimator_is_never_marked(self):
@@ -136,7 +136,7 @@ class FitPassPlanningTest(unittest.TestCase):
         """Equivalence: skipping work the fitting pass does not need must not move a
         number. `ShiftTail` carries fitted state into the score, so a step wrongly
         skipped would either raise or shift the result rather than pass quietly."""
-        tail = lambda p: p.skb.apply(ShiftTail(), how="no_wrap")
+        tail = lambda p: p.skb.apply(ShiftTail(), no_wrap=True)
         np.testing.assert_allclose(self._scores(tail, marked=True),
                                    self._scores(tail, marked=False), rtol=1e-12)
 

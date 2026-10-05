@@ -100,17 +100,10 @@ def _promote_to_filtering_join(op: SelectionOp, how: str, key: str, build: Op,
     # Every producer loses the selection, including the column operand, which the
     # join reads by name instead and which stays in the graph for its other
     # consumers.
-    seen: set[int] = set()
-    for producer in op.inputs:
-        if id(producer) in seen:
-            continue
-        seen.add(id(producer))
-        producer.outputs = [out for out in producer.outputs if out is not op]
     for producer in (left, build):
         producer.add_output(join)
     op.replace_input_of_outputs(join)
-    op.inputs = []
-    op.outputs = []
+    op.detach()
     return join if root is op else root
 
 
@@ -198,8 +191,7 @@ def _replace_counted_group_keys(op: IndexAccessOp, selection: SelectionOp,
     # Detach the replaced cone so later graph passes see only live consumers.
     for old in (op, selection, sort, agg, projection):
         if old is not None:
-            old.inputs = []
-            old.outputs = []
+            old.detach()
     return keys if root is op else root
 
 

@@ -58,7 +58,7 @@ def _op(vectorizer):
     return TableVectorizerOp(
         estimator=vectorizer,
         cols=selectors.all(),
-        how="no_wrap",
+        no_wrap=True,
     )
 
 

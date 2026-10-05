@@ -401,6 +401,42 @@ class TestTwoAxisIndexerConversion(unittest.TestCase):
         self.assertEqual(OperandRef(1), found[0].key)
 
 
+def _chain(*ops):
+    """Wire ``ops`` producer-first into a chain and return them."""
+    for producer, consumer in zip(ops, ops[1:]):
+        consumer.add_input(producer)
+        producer.add_output(consumer)
+    return ops
+
+
+class TestDetach(unittest.TestCase):
+    def test_detach_unlinks_from_producers_only(self):
+        source, mid, sink = _chain(Op(), Op(), Op())
+        mid.detach()
+        self.assertEqual((mid.inputs, mid.outputs), ([], []))
+        self.assertEqual(source.outputs, [])
+        # The consumer is the caller's to rewire.
+        self.assertEqual(sink.inputs, [mid])
+
+    def test_detach_and_prune_removes_the_dead_cone(self):
+        shared, dead, other = Op(), Op(), Op()
+        _chain(shared, dead)
+        dead_tail = Op()
+        _chain(dead, dead_tail)
+        _chain(shared, other)
+        dead_tail.detach_and_prune()
+        self.assertEqual(dead.inputs, [])
+        # A producer with another consumer stays, minus the pruned edge.
+        self.assertEqual(shared.outputs, [other])
+
+    def test_detach_and_prune_handles_a_producer_feeding_two_slots(self):
+        producer, consumer = Op(), Op()
+        consumer.inputs = [producer, producer]
+        producer.add_output(consumer)
+        consumer.detach_and_prune()
+        self.assertEqual(producer.outputs, [])
+
+
 class TestEdgeDedup(unittest.TestCase):
     def test_add_input_dedup_returns_index(self):
         op, a, b = Op(), ValueOp(1), ValueOp(2)

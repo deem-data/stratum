@@ -88,6 +88,15 @@ class TestResolveConstants(unittest.TestCase):
         out, *_ = optimize(data[["x"]], self._NO_REWRITES, env={"other": 1})
         self.assertTrue(any(isinstance(o, VariableOp) for o in out))
 
+    def test_unbound_default_variable_takes_its_value(self):
+        # skrub.var(..., becomes_default=True): an env that does not bind it falls
+        # back to the variable's own value instead of failing.
+        data = st.var("data", self.df, becomes_default=True)
+        out, *_ = optimize(data[["x"]], self._NO_REWRITES, env={"other": 1})
+        self.assertFalse(any(isinstance(o, VariableOp) for o in out))
+        [value_op] = [o for o in out if isinstance(o, ValueOp)]
+        pd.testing.assert_frame_equal(value_op.value, self.df)
+
     def test_resolved_plan_runs_without_environment(self):
         # The whole point: once resolved, the plan executes with an empty env.
         data = st.var("data", self.df)

@@ -237,15 +237,15 @@ def lower_transformer(op: TransformerOp, ctx) -> PhysicalOp | None:
     """
     if isinstance(op.original_estimator, _SkrubTableVectorizer):
         return TableVectorizerOp(
-            estimator=op.estimator, y=op.y, cols=op.cols, how=op.how,
-            allow_reject=op.allow_reject, unsupervised=op.unsupervised,
-            kwargs=op.kwargs, param_refs=op.param_refs,
+            estimator=op.estimator, y=op.y, cols=op.cols, exclude_cols=op.exclude_cols,
+            no_wrap=op.no_wrap, allow_reject=op.allow_reject, unsupervised=op.unsupervised,
+            kwargs=op.kwargs, param_refs=op.param_refs, feeds_estimator=op.feeds_estimator,
         )
     if isinstance(op.original_estimator, _SkrubStringEncoder):
         return StringEncoderOp(
-            estimator=op.estimator, y=op.y, cols=op.cols, how=op.how,
-            allow_reject=op.allow_reject, unsupervised=op.unsupervised,
-            kwargs=op.kwargs, param_refs=op.param_refs,
+            estimator=op.estimator, y=op.y, cols=op.cols, exclude_cols=op.exclude_cols,
+            no_wrap=op.no_wrap, allow_reject=op.allow_reject, unsupervised=op.unsupervised,
+            kwargs=op.kwargs, param_refs=op.param_refs, feeds_estimator=op.feeds_estimator,
         )
     op.__class__ = PassthroughTransformer
     return op

@@ -7,7 +7,8 @@ from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import BaseChoice, Choice, DiscretizedNumericChoice, Match
-from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, SplitX, Var, _wrap_estimator
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, Scoring, SplitX, Var, _wrap_estimator
+from skrub._data_ops._utils import NULL
 from skrub._utils import PassThrough
 from pandas import DataFrame
 import polars as pl
@@ -248,7 +249,8 @@ RESPONSE_MODES = frozenset({"predict", "predict_proba", "predict_log_proba",
 
 
 class BaseEstimatorOp(Op):
-    fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs", "param_refs"]
+    fields = ["estimator", "y", "cols", "exclude_cols", "no_wrap", "allow_reject", "unsupervised", "kwargs", "param_refs",
+              "feeds_estimator"]
     # skrub keys `Apply.kwargs` by the estimator method the kwargs belong to, and
     # evaluates only the group for the method it is about to call. Subclasses name
     # the two groups stratum can reach: the one for the fitting call and the one
@@ -270,19 +272,21 @@ class BaseEstimatorOp(Op):
         return frozenset({cls.fit_kwargs_key, cls.call_kwargs_key}) | {
             m for m in cls.response_modes if hasattr(estimator, m)}
 
-    def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None, param_refs=None):
+    def __init__(self, estimator: BaseEstimator, y=None, cols=None, exclude_cols=None, no_wrap=False, allow_reject=False, unsupervised=False, kwargs=None, param_refs=None,
+                 feeds_estimator=False):
         super().__init__()
         if kwargs is None:
             kwargs = {}
         self.check_kwargs(kwargs)
         self.estimator = estimator
         self.original_estimator = clone(self.estimator)
-        # X is the implicit primary operand (OperandRef(0)); y/cols are OperandRef
-        # when fed by the graph, otherwise plain values. param_refs maps the names of
-        # estimator hyper-parameters that are graph-fed to their OperandRef.
+        # X is the implicit primary operand (OperandRef(0)); y/cols/exclude_cols/no_wrap
+        # are OperandRefs when fed by the graph, otherwise plain values. param_refs maps
+        # the names of estimator hyper-parameters that are graph-fed to their OperandRef.
         self.y = y
         self.cols = cols
-        self.how = how
+        self.exclude_cols = exclude_cols
+        self.no_wrap = no_wrap
         self.allow_reject = allow_reject
         self.unsupervised = unsupervised
         # {method name: kwargs for that method}, as built by `.skb.apply()`. The
@@ -291,6 +295,9 @@ class BaseEstimatorOp(Op):
         # `method_kwargs` rather than stored as ready-to-splat dicts.
         self.kwargs = kwargs
         self.param_refs = param_refs if param_refs is not None else {}
+        # Whether another `.skb.apply()` consumes this op's output. Such an op is not
+        # the last estimator, so like skrub it never answers a response pass itself.
+        self.feeds_estimator = feeds_estimator
         # Which responses this op can serve, settled here rather than by a `hasattr` in
         # the execution path. A parameter fed by the graph is still unresolved at this
         # point, so the estimator is taken at its word, as it is in skrub.
@@ -302,9 +309,10 @@ class BaseEstimatorOp(Op):
         """The method ``mode`` actually calls on this op's estimator.
 
         An op that cannot serve the requested response falls back the way skrub's
-        ``Apply`` does: a transformer transforms, a predictor predicts.
+        ``Apply`` does: a transformer transforms, a predictor predicts. So does one
+        that feeds another estimator, whatever responses it could serve.
         """
-        if mode == FITTING_MODE or mode in self.supported_modes:
+        if mode == FITTING_MODE or (mode in self.supported_modes and not self.feeds_estimator):
             return mode
         return self.fallback_mode
 
@@ -330,11 +338,13 @@ class BaseEstimatorOp(Op):
             estimator=estimator_new,
             y=self.y,
             cols=self.cols,
-            how=self.how,
+            exclude_cols=self.exclude_cols,
+            no_wrap=self.no_wrap,
             allow_reject=self.allow_reject,
             unsupervised=self.unsupervised,
             kwargs=clone_value(self.kwargs),
             param_refs=self.param_refs,
+            feeds_estimator=self.feeds_estimator,
         )
         new_op.was_cloned = True
         return new_op
@@ -361,6 +371,8 @@ class BaseEstimatorOp(Op):
         if fitting and place_holders:
             estm.set_params(**place_holders)
         cols = inputs[self.cols.k] if isinstance(self.cols, OperandRef) else self.cols
+        exclude_cols = _resolve_operand(self.exclude_cols, inputs)
+        no_wrap = _resolve_operand(self.no_wrap, inputs)
         # A response pass never fits, so (like skrub) the fit group is left unevaluated.
         # Note the difference from skrub: skrub also never *computes* what that group
         # references, while our plan is eager, so a sub-DAG feeding only fit kwargs
@@ -375,7 +387,8 @@ class BaseEstimatorOp(Op):
             x,
             y,
             cols,
-            self.how,
+            exclude_cols,
+            no_wrap,
             self.allow_reject,
             self.unsupervised,
             (fit_kwargs, call_kwargs),
@@ -454,11 +467,12 @@ def check_estm_inputs(estimator, mode, x, y):
 
 def process_estimator_task(task_data):
     """ Process a predictor (EstimatorOp) task in a worker process. """
-    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    (estimator, x, y, cols, exclude_cols, no_wrap, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
     fit_kwargs, call_kwargs = kwargs
     _, x, y = check_estm_inputs(estimator, mode, x, y)
     if mode == FITTING_MODE:
-        estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
+        estimator = _wrap_estimator(estimator, cols, exclude_cols=exclude_cols, no_wrap=no_wrap,
+                                    allow_reject=allow_reject, X=x)
         y_arg = () if unsupervised else (y,)
         estimator.fit(x, *y_arg, **fit_kwargs)
         result = estimator.predict(x, **call_kwargs)
@@ -473,12 +487,13 @@ def process_estimator_task(task_data):
 
 def process_transformer_task(task_data):
     """ Process a transformer (TransformerOp) task in a worker process. """
-    (estimator, x, y, cols, how, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
+    (estimator, x, y, cols, exclude_cols, no_wrap, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
     fit_transform_kwargs, transform_kwargs = kwargs
     converted, x, y = check_estm_inputs(estimator, mode, x, y)
     with estimator_parallel_config(parallelism):
         if mode == FITTING_MODE:
-            estimator = _wrap_estimator(estimator, cols, how=how, allow_reject=allow_reject, X=x)
+            estimator = _wrap_estimator(estimator, cols, exclude_cols=exclude_cols, no_wrap=no_wrap,
+                                    allow_reject=allow_reject, X=x)
             y_arg = () if unsupervised else (y,)
             result = estimator.fit_transform(x, *y_arg, **fit_transform_kwargs)
         elif mode == "transform":
@@ -786,34 +801,46 @@ def _iter_nested(value):
             yield from _iter_nested(v)
 
 
-def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict) -> Op:
+def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimator: bool = False) -> Op:
     """Build the TransformerOp/EstimatorOp for one concrete estimator of an Apply impl.
 
     ``estimator`` is ``impl.estimator`` itself, or one outcome of it when the
     Apply's estimator is a ``Choice``. Each call uses its own binder so every op
     gets X as OperandRef(0) and its own de-duplicated inputs list.
+
+    ``feeds_estimator`` says another Apply consumes this one's output. skrub then
+    fit_transforms and transforms any estimator that can, a predictor included (a
+    KMeans feeds on its distances, not its labels), so such an estimator becomes a
+    TransformerOp here.
     """
     if estimator is None or (isinstance(estimator, str) and estimator == "passthrough"):
         # Same normalization skrub's _wrap_estimator applies at fit time; needed
         # here already because BaseEstimatorOp clones its estimator on construction.
         estimator = PassThrough()
-    estimator_class = PredictorOp if hasattr(estimator, "predict") else TransformerOp
+    if hasattr(estimator, "predict") and not (feeds_estimator and hasattr(estimator, "transform")):
+        estimator_class = PredictorOp
+    else:
+        estimator_class = TransformerOp
     binder = OperandBinder(ids_to_ops)
     binder.ref(impl.X)  # OperandRef(0)
     param_refs = {k: binder.ref(v) for k, v in estimator.get_params().items()
                   if isinstance(v, DataOp) and id(v) in ids_to_ops}
     y = _bind_or_value(binder, impl.y)
     cols = _bind_or_value(binder, impl.cols)
+    exclude_cols = _bind_or_value(binder, impl.exclude_cols)
+    no_wrap = _bind_or_value(binder, impl.no_wrap)
     kwargs = _bind_apply_kwargs(binder, estimator_class, estimator, impl.kwargs)
     op = estimator_class(
         estimator=estimator,
         y=y,
         cols=cols,
-        how=impl.how,
+        exclude_cols=exclude_cols,
+        no_wrap=no_wrap,
         allow_reject=impl.allow_reject,
         unsupervised=impl.unsupervised,
         kwargs=kwargs,
         param_refs=param_refs,
+        feeds_estimator=feeds_estimator,
     )
     op.inputs = binder.inputs
     return op
@@ -991,7 +1018,7 @@ def check_choices_not_shared(data_ops) -> None:
 
 
 # TODO: Move this to frontend package
-def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None) -> Op:
+def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_estimator: bool = False) -> Op:
     """Convert a single skrub DataOp into an Op, building its de-duplicated
     ``inputs`` list and operand references in one canonical field walk.
 
@@ -1003,6 +1030,9 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None) -> Op:
     compile time. A ``Var`` whose name is bound in ``env`` is then resolved to a
     constant ``ValueOp`` instead of a ``VariableOp``, so the scheduler needs no
     environment to feed it at runtime.
+
+    ``feeds_estimator`` says another Apply consumes ``data_op``'s value (see
+    ``_apply_estimator_op``).
     """
     impl = data_op._skrub_impl
     is_X = is_y = False
@@ -1064,7 +1094,8 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None) -> Op:
             # correctly if choice_unrolling later combines this choice with a
             # downstream one.
             leaves = _expand_estimator_choices(impl.estimator)
-            outcome_ops = [_apply_estimator_op(impl, est, ids_to_ops) for _, est in leaves]
+            outcome_ops = [_apply_estimator_op(impl, est, ids_to_ops, feeds_estimator)
+                           for _, est in leaves]
             for est_op in outcome_ops:
                 # The trailing edge-wiring below only covers the returned op.
                 for in_op in est_op.inputs:
@@ -1072,7 +1103,7 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None) -> Op:
             return_op = ChoiceOp(outcome_names=[path for path, _ in leaves],
                                  append_choice_name=False, inputs=outcome_ops)
         else:
-            return_op = _apply_estimator_op(impl, impl.estimator, ids_to_ops)
+            return_op = _apply_estimator_op(impl, impl.estimator, ids_to_ops, feeds_estimator)
     elif isinstance(impl, SplitX):
         for field_name in impl._fields:
             for child in _collect_child_data_ops(getattr(impl, field_name)):
@@ -1084,8 +1115,17 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None) -> Op:
             # Resolve the variable to a compile-time constant; the runtime no
             # longer needs the environment to feed it.
             return_op = ValueOp(env[impl.name])
+        elif env is not None and impl.becomes_default and impl.value is not NULL:
+            # `skrub.var(name, value, becomes_default=True)`: an environment that
+            # does not bind the variable falls back to its value, as in skrub.
+            return_op = ValueOp(impl.value)
         else:
             return_op = VariableOp(name=impl.name, value=impl.value)
+    elif isinstance(impl, Scoring):
+        from stratum.optimizer.logical._candidate_ops import DeclaredScoringOp
+        binder.ref(impl.pred)  # OperandRef(0): the value passed through
+        return_op = DeclaredScoringOp(scorers=binder.bind(impl.scorers))
+        return_op.inputs = binder.inputs
     elif isinstance(impl, Concat):
         from stratum.optimizer.logical._dataframe_ops import ConcatOp
         first = _bind_or_value(binder, impl.first)

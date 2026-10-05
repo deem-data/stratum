@@ -22,6 +22,7 @@ two against each other.
 """
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
@@ -56,8 +57,10 @@ class Metric:
     #: Where the implementation comes from: "stratum", "sklearn" or "callable".
     source: str = "sklearn"
 
-    def __call__(self, y_true, values) -> float:
-        return self.sign * self.fn(y_true, values, **self.kwargs)
+    def __call__(self, y_true, values, **kwargs) -> float:
+        # Per-fold kwargs (from `.skb.with_scoring(kwargs=...)`) extend the scorer's
+        # own, as skrub merges them into a scorer's `_kwargs`.
+        return self.sign * self.fn(y_true, values, **{**self.kwargs, **kwargs})
 
     def __repr__(self) -> str:
         return f"Metric({self.name!r}, via={self.source})"
@@ -160,6 +163,42 @@ def resolve_scoring(scoring) -> Metric:
             " `f(y_true, y_pred)`, or a scorer built with `make_scorer`."
         )
     logger.info(f"Using metric: {metric}")
+    return metric
+
+
+def resolve_declared_scoring(dag) -> Metric:
+    """The :class:`Metric` declared on ``dag`` with ``.skb.with_scoring()``.
+
+    Only the metric is resolved here; the scorer's ``kwargs`` may be computed by the
+    plan (``sample_weight=X["w"]``), so they are bound as plan operands and evaluated
+    on each test fold (see ``DeclaredScoringOp``). A declaration Stratum cannot score
+    with raises ``ValueError``: several scorers (a search reports one score), a
+    ``scoring`` that is itself computed by the plan, or ``None``, which means the
+    estimator's own ``score`` (see ``resolve_scoring``).
+    """
+    from skrub._data_ops._evaluation import find_scoring_node, needs_eval
+
+    node = find_scoring_node(dag)
+    if node is None:
+        raise ValueError("this DataOp declares no scorer with `.skb.with_scoring()`.")
+    scorers = node._skrub_impl.scorers
+    if len(scorers) != 1:
+        raise ValueError(
+            f"this DataOp declares {len(scorers)} scorers with `.skb.with_scoring()`, but"
+            " a search reports a single score per candidate. Pass `scoring=` to pick one.")
+    [info] = scorers
+    scoring, kwargs = info["scoring"], info["kwargs"]
+    if needs_eval(scoring):
+        raise ValueError(
+            "the scoring declared with `.skb.with_scoring()` is computed by the plan;"
+            " Stratum resolves the metric when it builds the plan. Pass a value instead.")
+    if isinstance(scoring, str) and scoring in _NATIVE and kwargs not in (None, {}):
+        # Stratum's own metrics take no keyword arguments, scikit-learn's do.
+        metric = _from_sklearn_name(scoring)
+    else:
+        metric = resolve_scoring(scoring)
+    if info["name"] is not None:
+        metric = dataclasses.replace(metric, name=info["name"])
     return metric
 
 

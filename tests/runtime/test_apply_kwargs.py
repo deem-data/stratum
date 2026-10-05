@@ -122,7 +122,7 @@ class TestKwargsAreRoutedPerMethod(ApplyKwargsRuntimeTest):
         data = st.as_data_op(self.df)
         y = data["y"].skb.mark_as_y()
         X = data.drop(columns=["y", "w"]).skb.mark_as_X()
-        transformed = X.skb.apply(RecordingTransformer(), how="no_wrap", **apply_kwargs)
+        transformed = X.skb.apply(RecordingTransformer(), no_wrap=True, **apply_kwargs)
         grid_search(transformed.skb.apply(LinearRegression(), y=y), cv=2,
                     scoring=self.SCORING)
         return dict(RecordingTransformer.CALLS)
@@ -146,7 +146,7 @@ class TestEvalSetPipeline(ApplyKwargsRuntimeTest):
         y = data["y"].skb.mark_as_y()
         X = data.drop(columns=["y", "w"]).skb.mark_as_X()
 
-        parts = X.skb.apply(SplitOffEvalSet(), y=y, how="no_wrap")
+        parts = X.skb.apply(SplitOffEvalSet(), y=y, no_wrap=True)
         model = LGBMRegressor(n_estimators=200, learning_rate=0.1,
                               random_state=0, verbose=-1)
         return parts["X"].skb.apply(

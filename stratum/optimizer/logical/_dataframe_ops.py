@@ -3,6 +3,7 @@ from stratum.optimizer.logical._ops import (OperandRef, OutputType, is_frame_lik
 from pandas import DataFrame
 from polars import DataFrame as PolarsDataFrame
 from skrub import SelectCols
+from skrub.selectors._base import All
 import operator
 from stratum.optimizer.logical import _schema
 import pandas as pd
@@ -38,7 +39,12 @@ from stratum.optimizer.logical._split_ops import SplitOp, SplitOutput, add_split
 class ConcatOp(Op):
     """Logical frame concatenation. Pure config -- execution is provided by the
     physical impls in ``physical/_concat_execs.py`` (Pandas/PolarsConcatOp),
-    selected at plan time."""
+    selected at plan time.
+
+    Like skrub's ``.skb.concat`` it also stacks numpy arrays, which the physical
+    impls detect at run time. A graph-fed operand's kind is unknown when planning,
+    so the op is taken to produce a frame unless its first operand is a literal
+    array."""
     logical_family = "Concat"
     fields = ["first", "others", "axis"] # Add more if needed
 
@@ -50,7 +56,8 @@ class ConcatOp(Op):
         self.first = first
         self.others = list(others)
         self.axis = axis
-        self.output_type = OutputType.FRAME
+        self.output_type = (OutputType.UNKNOWN if isinstance(first, np.ndarray)
+                            else OutputType.FRAME)
 
     def propagate_output_schema(self):
         """See :func:`_schema.concat_schemas` for the per-axis rules.
@@ -290,8 +297,11 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
             op.output_type = OutputType.FRAME
             # skrub implements `skb.select(cols)` as an Apply of its SelectCols
             # transformer; surface the selector as a dedicated ColumnSelectorOp.
+            # Only while the Apply hands it every column: restricted by `cols` or
+            # `exclude_cols`, skrub passes the other columns through untouched.
             if (isinstance(op, TransformerOp) and isinstance(op.estimator, SelectCols)
-                    and not op.param_refs and not isinstance(op.y, OperandRef)):
+                    and not op.param_refs and not isinstance(op.y, OperandRef)
+                    and isinstance(op.cols, All) and op.exclude_cols is None):
                 new_op = make_column_selector_op(op)
 
         elif isinstance(op, ChoiceOp):

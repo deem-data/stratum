@@ -64,10 +64,7 @@ def _detach_absorbed_and_rewire(op: Op, new_op: MapOp, folder: _Folder) -> None:
     Downstream consumers of ``op`` are rewired by the caller.
     """
     for node in folder.absorbed:
-        for inp in node.inputs:
-            inp.outputs = [o for o in inp.outputs if o is not node]
-        node.inputs = []
-        node.outputs = []
+        node.detach()
     for producer in new_op.inputs:
         producer.outputs = [o for o in producer.outputs if o is not op]
         producer.add_output(new_op)

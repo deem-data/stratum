@@ -11,6 +11,7 @@ import copy
 import unittest
 from contextlib import contextmanager
 
+import numpy as np
 import polars as pl
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
@@ -153,6 +154,33 @@ class TestConcatOpPolars(PolarsTestCase):
         op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=0)
         result = run_op(op, pl.DataFrame({"a": [1, 2]}), pl.DataFrame({"a": [3, 4]}))
         self.assertEqual(4, len(result))
+
+    def test_polars_concat_of_arrays(self):
+        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=1)
+        result = run_op(op, np.ones((2, 1)), np.zeros((2, 2)))
+        np.testing.assert_array_equal(result, [[1, 0, 0], [1, 0, 0]])
+
+
+class TestConcatOpArrays(unittest.TestCase):
+    """skrub's `.skb.concat` stacks numpy arrays too (since 0.10)."""
+
+    def test_pandas_concat_of_arrays(self):
+        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=0)
+        result = run_op(op, np.ones((1, 2)), np.zeros((2, 2)))
+        np.testing.assert_array_equal(result, [[1, 1], [0, 0], [0, 0]])
+
+    def test_literal_array_is_not_a_frame(self):
+        self.assertIs(ConcatOp(first=np.ones(2), others=[np.ones(2)], axis=0).output_type,
+                      OutputType.UNKNOWN)
+
+    def test_array_pipeline_matches_skrub(self):
+        import pandas as pd
+        import stratum as st
+        from tests.optimizer.physical.test_source_execs import run_plan
+        arr = st.as_data_op(pd.DataFrame({"a": [1., 2.], "b": [3., 4.]})).skb.apply_func(np.asarray)
+        dag = arr.skb.concat([arr], axis=1)[:, 1:]
+        ops, *_ = optimize_(dag)
+        np.testing.assert_array_equal(run_plan(ops), dag.skb.eval())
 
 
 if __name__ == "__main__":
