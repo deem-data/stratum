@@ -10,6 +10,8 @@ were fixed at plan time.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -63,15 +65,68 @@ _POLARS_CSV_RENAMES = {
     "comment": "comment_prefix",
     "quotechar": "quote_char",
     "low_memory": "low_memory",
-    "storage_options": "storage_options",
 }
 
 #: pandas parquet option -> polars parquet option. polars takes no positional
 #: options at all, hence the ``read_args`` guard in ``_translate_read_options``.
 _POLARS_PARQUET_RENAMES = {
     "columns": "columns",
-    "storage_options": "storage_options",
 }
+
+
+#: fsspec (s3fs) credential key -> polars object-store key, same value.
+_OBJECT_STORE_KEYS = {
+    "key": "aws_access_key_id",
+    "secret": "aws_secret_access_key",
+    "endpoint_url": "aws_endpoint_url",
+}
+
+
+def _translate_storage_options(value):
+    """pandas ``storage_options`` (fsspec) -> polars ``storage_options`` (object store).
+
+    pandas hands these to fsspec (s3fs, gcsfs); polars reads cloud paths with
+    its own object store, whose keys differ. An untranslated fsspec key is not an
+    error there: it is ignored, the request goes out unauthenticated, and the
+    read fails later with a 401. The common credential spellings are mapped;
+    every other key is passed on unchanged, so options already written in
+    object-store spelling keep working.
+    """
+    if value is None:
+        return "storage_options", None
+    translated = {}
+    for name, option in value.items():
+        if name == "token":  # gcsfs
+            if isinstance(option, dict):
+                translated["service_account_key"] = json.dumps(option)
+            elif option == "anon":
+                translated["skip_signature"] = "true"
+            elif option not in (None, "google_default", "cloud"):
+                translated["service_account"] = str(option)
+            # else: application default credentials, the object store's default
+        elif name == "anon":  # s3fs
+            if option:
+                translated["skip_signature"] = "true"
+        else:
+            translated[_OBJECT_STORE_KEYS.get(name, name)] = option
+    return "storage_options", translated
+
+
+def _polars_cloud_path(file_path):
+    """Spell a cloud dataset directory the way polars lists it.
+
+    pyarrow treats ``gs://bucket/table`` as a dataset directory when no object
+    has that exact name; polars only lists a prefix that ends in ``/`` and
+    otherwise asks for the single object, which does not exist. A cloud path
+    without a file extension or glob is taken to be such a directory.
+    """
+    if (not isinstance(file_path, str) or "://" not in file_path
+            or file_path.startswith("file://") or file_path.endswith("/")
+            or any(ch in file_path for ch in "*?[")):
+        return file_path
+    if "." in file_path.rsplit("/", 1)[-1]:
+        return file_path
+    return file_path + "/"
 
 
 def _translate_header(value):
@@ -106,11 +161,58 @@ def _translate_encoding(value):
         f"'utf8-lossy' only).")
 
 
+#: pyarrow ``filters`` operator -> polars predicate on (column expr, value).
+_PYARROW_FILTER_OPS = {
+    "=": lambda col, v: col == v,
+    "==": lambda col, v: col == v,
+    "!=": lambda col, v: col != v,
+    "<": lambda col, v: col < v,
+    ">": lambda col, v: col > v,
+    "<=": lambda col, v: col <= v,
+    ">=": lambda col, v: col >= v,
+    "in": lambda col, v: col.is_in(list(v)),
+    "not in": lambda col, v: ~col.is_in(list(v)),
+}
+
+
+def _translate_filters(value):
+    """pandas ``filters`` (pyarrow DNF) -> one polars predicate expression.
+
+    pyarrow accepts a list of ``(column, op, value)`` tuples, ANDed, or a list of
+    such lists, ORed -- told apart the way pyarrow does, by whether the first
+    element's first item is a column name. The predicate filters rows just like
+    pyarrow does; :class:`PolarsReadParquet` applies it to a ``scan_parquet``,
+    so hive partitions and row groups it excludes are never read. A
+    ``pyarrow.compute.Expression`` filter has no polars spelling and is rejected.
+    """
+    if value is None:
+        return "filters", None
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(
+            f"filters={value!r} has no polars equivalent: only pyarrow's "
+            f"list-of-tuples (DNF) form translates.")
+    disjuncts = [value] if isinstance(value[0][0], str) else value
+    predicate = None
+    for conjunct in disjuncts:
+        term = None
+        for clause in conjunct:
+            if len(clause) != 3 or clause[1] not in _PYARROW_FILTER_OPS:
+                raise ValueError(
+                    f"filter {clause!r} has no polars equivalent: expected "
+                    f"(column, op, value) with op in {sorted(_PYARROW_FILTER_OPS)}.")
+            column, op, operand = clause
+            expr = _PYARROW_FILTER_OPS[op](pl.col(column), operand)
+            term = expr if term is None else term & expr
+        predicate = term if predicate is None else predicate | term
+    return "filters", predicate
+
+
 #: pandas option -> callable(value) -> (polars option, polars value), for the
 #: options that need the value rewritten and not just the name.
 _POLARS_CSV_VALUE_TRANSLATORS = {
     "header": _translate_header,
     "encoding": _translate_encoding,
+    "storage_options": _translate_storage_options,
 }
 
 
@@ -235,7 +337,8 @@ class PolarsReadParquet(ReadParquet):
     is_abstract = False
 
     _RENAMES = _POLARS_PARQUET_RENAMES
-    _VALUE_TRANSLATORS = {}
+    _VALUE_TRANSLATORS = {"filters": _translate_filters,
+                          "storage_options": _translate_storage_options}
 
     def on_impl_selected(self, ctx) -> None:
         _check_read_options(self.read_args, self.read_kwargs, self._RENAMES,
@@ -246,7 +349,17 @@ class PolarsReadParquet(ReadParquet):
         read_kwargs = _translate_read_options(
             read_args, read_kwargs, self._RENAMES, self._VALUE_TRANSLATORS,
             type(self).__name__)
-        return pl.read_parquet(file_path, **read_kwargs)
+        file_path = _polars_cloud_path(file_path)
+        predicate = read_kwargs.pop("filters", None)
+        if predicate is None:
+            return pl.read_parquet(file_path, **read_kwargs)
+        # Filter before projecting: like pyarrow, a filter may name a column
+        # (e.g. the hive partition key) that `columns` leaves out.
+        columns = read_kwargs.pop("columns", None)
+        frame = pl.scan_parquet(file_path, **read_kwargs).filter(predicate)
+        if columns is not None:
+            frame = frame.select(columns)
+        return frame.collect()
 
 
 class NumpyLoad(FileReadOp):

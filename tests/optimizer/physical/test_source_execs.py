@@ -8,6 +8,8 @@ logical DAG with two different selectors and execute both -- each keeps its own
 backend, and re-executing either is stable, which is only true if no ``process``
 consults anything outside the op.
 """
+import shutil
+import tempfile
 import unittest
 
 import numpy as np
@@ -23,7 +25,8 @@ from stratum.optimizer.logical._source_ops import DataSourceOp
 from stratum.optimizer.physical._source_execs import (
     InMemoryFrame, NumpyLoad, PandasInMemoryFrame, PandasReadCSV,
     PandasReadParquet, PolarsInMemoryFrame, PolarsReadCSV, PolarsReadParquet,
-    ReadCSV, ReadParquet, lower_data_source)
+    ReadCSV, ReadParquet, _polars_cloud_path, _translate_storage_options,
+    lower_data_source)
 from stratum.runtime._buffer_pool import BufferPool
 from tests._helpers import csv_file, npy_file, parquet_file
 
@@ -308,12 +311,95 @@ class TestPolarsReadOptionTranslation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 op.process("fit_transform", [])
 
+    def test_parquet_filters_select_the_plan_backend(self):
+        # pyarrow `filters` used to fail the whole polars plan at selection time.
+        with parquet_file(self.df) as path:
+            data = st.as_data_op(path).skb.apply_func(
+                pd.read_parquet, filters=[("x", ">", 1)])
+            ops, *_ = optimize(data, polars_conf(dataframe_ops=True))
+        self.assertIsInstance(ops[-1], PolarsReadParquet)
+
+    def test_untranslatable_parquet_filter_is_rejected(self):
+        op = PolarsReadParquet(file_path="x.parquet",
+                               read_kwargs={"filters": [("x", "like", "a%")]})
+        with self.assertRaises(ValueError):
+            op.process("fit_transform", [])
+
+    def test_fsspec_storage_options_become_object_store_keys(self):
+        # Passed verbatim, polars ignored gcsfs' `token` and read the bucket
+        # unauthenticated (401).
+        cases = [
+            ({"token": "/keys/sa.json"}, {"service_account": "/keys/sa.json"}),
+            ({"token": {"type": "service_account"}},
+             {"service_account_key": '{"type": "service_account"}'}),
+            ({"token": "anon"}, {"skip_signature": "true"}),
+            ({"token": "google_default"}, {}),
+            ({"key": "k", "secret": "s", "anon": False},
+             {"aws_access_key_id": "k", "aws_secret_access_key": "s"}),
+            ({"aws_region": "eu-west-1"}, {"aws_region": "eu-west-1"}),
+        ]
+        for pandas_options, polars_options in cases:
+            with self.subTest(pandas_options):
+                self.assertEqual(("storage_options", polars_options),
+                                 _translate_storage_options(pandas_options))
+
+    def test_cloud_dataset_directory_gets_trailing_slash(self):
+        for path, expected in [
+                ("gs://bucket/lake/table", "gs://bucket/lake/table/"),
+                ("s3://bucket/table/", "s3://bucket/table/"),
+                ("gs://bucket/table/part-0.parquet", "gs://bucket/table/part-0.parquet"),
+                ("gs://bucket/table/**/*.parquet", "gs://bucket/table/**/*.parquet"),
+                ("/local/table", "/local/table")]:
+            with self.subTest(path):
+                self.assertEqual(expected, _polars_cloud_path(path))
+
     def test_positional_read_options_are_rejected(self):
         # polars takes only the path positionally, so a pandas positional
         # option (pd.read_parquet's `engine`) would bind to something else.
         op = PolarsReadParquet(file_path="x.parquet", read_args=("pyarrow",))
         with self.assertRaises(ValueError):
             op.process("fit_transform", [])
+
+
+class TestPolarsParquetFilters(unittest.TestCase):
+    """``PolarsReadParquet`` honours pyarrow ``filters`` exactly like
+    ``pd.read_parquet``, on a hive-partitioned dataset."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        pd.DataFrame({"year": [2019, 2020, 2021, 2022] * 5, "x": range(20),
+                      "kind": list("abcde") * 4}).to_parquet(
+            self.root, partition_cols=["year"])
+
+    def assert_matches_pandas(self, **options):
+        expected = pd.read_parquet(self.root, **options)
+        result = PolarsReadParquet(file_path=self.root, read_kwargs=options).process(
+            "fit_transform", [])
+        columns = options.get("columns") or ["x", "kind"]
+        self.assertEqual(columns, [c for c in result.columns if c in columns])
+        key = ["x"] if "x" in columns else columns
+        self.assertEqual(
+            expected[columns].sort_values(key).values.tolist(),
+            [list(row) for row in result.select(columns).sort(key).rows()])
+
+    def test_conjunction(self):
+        self.assert_matches_pandas(filters=[("year", ">=", 2020), ("x", "<", 15)])
+
+    def test_disjunction_of_conjunctions(self):
+        self.assert_matches_pandas(filters=[[("year", "==", 2019)],
+                                            [("year", "=", 2022), ("kind", "!=", "c")]])
+
+    def test_membership(self):
+        self.assert_matches_pandas(filters=[("kind", "in", ["a", "b"]),
+                                            ("year", "not in", {2021})])
+
+    def test_filter_on_column_left_out_of_projection(self):
+        self.assert_matches_pandas(columns=["kind", "x"],
+                                   filters=[("year", "<=", 2020)])
+
+    def test_none_filters_read_everything(self):
+        self.assert_matches_pandas(filters=None)
 
 
 if __name__ == "__main__":
