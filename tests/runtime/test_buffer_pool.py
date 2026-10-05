@@ -254,6 +254,26 @@ class TestLRUEviction(unittest.TestCase):
         # b is next LRU among unpinned, so b should have been spilled instead.
         self.assertTrue(self.pool.live_variable_map[b].is_spilled)
 
+    def test_unspillable_entries_stay_resident(self):
+        # The pool admits objects the serializer has no format for (a CV
+        # splitter, say); evicting one used to crash the plan. It stays in
+        # memory and the next LRU entry is spilled instead.
+        class Opaque:
+            pass
+
+        opaque, holder, a, b, c = (_make_op(n) for n in ("opaque", "holder", "a", "b", "c"))
+        self.pool.put(opaque, Opaque())
+        self.pool.put(holder, [_arr(400), Opaque()])  # 3_200 B, spill fails mid-way
+        self.pool.put(a, _arr(500))
+        self.pool.put(b, _arr(500))  # 11_201 B, over budget
+        self.assertFalse(self.pool.live_variable_map[opaque].is_spilled)
+        self.assertFalse(self.pool.live_variable_map[holder].is_spilled)
+        self.assertTrue(self.pool.live_variable_map[a].is_spilled)
+        # Only a's spill is on disk: the holder's half-written leaf is cleaned up.
+        self.assertEqual(1, len(list(self.spill_root.iterdir())))
+        self.pool.put(c, _arr(500))
+        self.assertTrue(self.pool.live_variable_map[b].is_spilled)
+
     def test_pin_refcount(self):
         a = _make_op("a")
         self.pool.put(a, "data")

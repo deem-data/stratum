@@ -12,6 +12,7 @@ from typing import Any, Hashable
 from stratum._config import FLAGS
 from stratum.runtime._object_serialization import (
     SpilledObject,
+    UnsupportedSpillType,
     delete_object,
     deserialize_object,
     serialize_object,
@@ -87,6 +88,7 @@ class _Entry:
     data: Any = None
     handle: SpilledObject | None = None
     pin_count: int = 0
+    spillable: bool = True  # False once serialization refused the data
 
     @property
     def is_spilled(self) -> bool:
@@ -259,14 +261,22 @@ class BufferPool:
             if self.memory_usage <= self.memory_budget:
                 break
             entry = self.live_variable_map[key]
-            if entry.pin_count > 0 or entry.is_spilled:
+            if entry.pin_count > 0 or entry.is_spilled or not entry.spillable:
                 continue
-            self._evict(key, entry)
+            try:
+                self._evict(key, entry)
+            except UnsupportedSpillType as exc:
+                # Admitted but not spillable (e.g. a CV splitter object): keep it
+                # resident and try the next LRU entry instead of failing the plan.
+                entry.spillable = False
+                logger.debug(f"Keeping {key} in memory, it cannot be spilled: {exc}")
+                continue
             evicted = True
         if self.memory_usage > self.memory_budget:
             logger.warning(
                 f"Budget {prettify_bytes(self.memory_budget)} still exceeded after eviction "
-                f"(usage {prettify_bytes(self.memory_usage)}); all remaining entries are pinned."
+                f"(usage {prettify_bytes(self.memory_usage)}); all remaining entries are "
+                f"pinned or cannot be spilled."
             )
         return evicted
 

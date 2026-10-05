@@ -152,6 +152,9 @@ class TestSkeleton(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             serialize_object([pd.DataFrame({"a": [1]}), Foo()], self._stem())
+        # The frame's leaf was written before Foo was reached; nothing may be
+        # left behind for a spill that never happened.
+        self.assertEqual(list(self.root.iterdir()), [])
 
     def test_delete_removes_skeleton_and_leaves(self):
         h = serialize_object((np.arange(3), np.arange(4)), self._stem())
