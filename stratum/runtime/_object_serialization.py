@@ -41,6 +41,14 @@ _STRUCTURED_FORMAT: list[tuple[type, str]] = [
 _PICKLABLE_PRIMITIVE = (str, int, float, bool, bytes)
 
 
+class UnsupportedSpillType(ValueError):
+    """The object (or something inside it) has no spill format.
+
+    The buffer pool admits such objects (it sizes them as UNKNOWN_SIZE), so it
+    catches this and keeps the entry in memory rather than failing the plan.
+    """
+
+
 def _native_format(obj: Any) -> str | None:
     """Return the portable file format for a structured leaf, else None."""
     for typ, fmt in _STRUCTURED_FORMAT:
@@ -113,9 +121,16 @@ def serialize_object(obj: Any, stem: Path) -> SpilledObject:
             return {k: build(v) for k, v in node.items()}
         if isinstance(node, _PICKLABLE_PRIMITIVE) or node is None:
             return node  # primitive: inline in the skeleton
-        raise ValueError(f"Unsupported type for serialization: {type(node)}")
+        raise UnsupportedSpillType(f"Unsupported type for serialization: {type(node)}")
 
-    skeleton = build(obj)
+    try:
+        skeleton = build(obj)
+    except UnsupportedSpillType:
+        # Leaves written before the unsupported node was reached would be
+        # orphaned: no handle will ever point at them.
+        for ref in leaves:
+            Path(ref.path).unlink(missing_ok=True)
+        raise
     # The skeleton is pickled, so it is Python-only. That is a deliberate
     # trade-off: the heavy data (frames/arrays) lives in portable native files
     # above, which is what another language would actually consume. If a
