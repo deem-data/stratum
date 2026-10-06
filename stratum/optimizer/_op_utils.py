@@ -21,19 +21,6 @@ def replace_op_in_outputs(op: Op, replacement: Op):
         replacement.add_output(out_)
 
 
-def find_choice_naive(op: Op) -> tuple[ChoiceOp, bool]:
-    """
-    Find the choice operation in the sub-dag using a naive approach. Might return incorrect results if there are multiple choices in the sub-dag.
-    """
-    # TODO check and improve find_choice(op: Op)
-    last_op = op
-    contains_choice = False
-    while len(last_op.outputs) > 0 and not contains_choice:
-        last_op = last_op.outputs[0]
-        contains_choice = last_op.is_choice()
-    return last_op, contains_choice
-
-
 def get_all_outputs(op: Op, stop_at_op: Op = None):
     """Returns a list of all output ops. If stop_at_op is given, the outputs of the stop_at_op are not included."""
     queue = [op]
@@ -158,8 +145,8 @@ def topological_iterator_dfs(queue, indegree) -> Iterator[Op]:
                 stack.append(out_op)
 
 def _iter_operand_refs(value):
-    """Yield every OperandRef nested in value (recurses lists/tuples/dicts, and
-    column-expression trees that expose ``iter_operand_refs``)."""
+    """Yield every OperandRef nested in value (recurses lists/tuples/dicts/slices,
+    and column-expression trees that expose ``iter_operand_refs``)."""
     if isinstance(value, OperandRef):
         yield value
     elif isinstance(value, (list, tuple)):
@@ -168,6 +155,9 @@ def _iter_operand_refs(value):
     elif isinstance(value, dict):
         for v in value.values():
             yield from _iter_operand_refs(v)
+    elif isinstance(value, slice):
+        for bound in (value.start, value.stop, value.step):
+            yield from _iter_operand_refs(bound)
     elif hasattr(value, "iter_operand_refs"):
         yield from value.iter_operand_refs()
 

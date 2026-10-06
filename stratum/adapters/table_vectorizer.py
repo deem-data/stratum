@@ -26,6 +26,7 @@ from skrub._check_input import CheckInputDataFrame
 from skrub._clean_categories import CleanCategories
 from skrub._clean_null_strings import CleanNullStrings
 from skrub._drop_uninformative import DropUninformative
+from skrub._duration_to_float import DurationToFloat
 from skrub._join_utils import pick_column_names
 from skrub._select_cols import Drop
 from skrub._table_vectorizer import (
@@ -181,6 +182,7 @@ class _FusedTableVectorizer(_SkrubTableVectorizer):
                 drop_if_unique=self.drop_if_unique,
             ),
             ToDatetime(format=self.datetime_format),
+            DurationToFloat(),
             ToFloat(),
             CleanCategories(),
             ToStr(),

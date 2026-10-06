@@ -8,6 +8,7 @@ ConcatOp)`` therefore still identifies a concat anywhere in the plan.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import polars as pl
 
@@ -26,11 +27,20 @@ class ConcatExec(ConcatOp, PhysicalOp):
         axis = inputs[self.axis.k] if isinstance(self.axis, OperandRef) else self.axis
         return first, others, axis
 
+    def process(self, mode: str, inputs: list):
+        first, others, axis = self._resolve(inputs)
+        if isinstance(first, np.ndarray):
+            # skrub concatenates arrays too (since 0.10), whatever the frame backend.
+            return np.concatenate([first, *others], axis=axis)
+        return self._concat_frames(first, others, axis)
+
+    def _concat_frames(self, first, others: list, axis):
+        raise NotImplementedError
+
 
 @physical_impl(of=ConcatOp, backend="pandas")
 class PandasConcatOp(ConcatExec):
-    def process(self, mode: str, inputs: list):
-        first, others, axis = self._resolve(inputs)
+    def _concat_frames(self, first, others: list, axis):
         return pd.concat([first, *others], axis=axis)
 
 
@@ -39,6 +49,5 @@ class PolarsConcatOp(ConcatExec):
     # pandas concat axis (0=rows, 1=cols) -> polars `how`.
     axis_map = {0: "diagonal_relaxed", 1: "horizontal"}
 
-    def process(self, mode: str, inputs: list):
-        first, others, axis = self._resolve(inputs)
+    def _concat_frames(self, first, others: list, axis):
         return pl.concat([first, *others], how=self.axis_map[axis])

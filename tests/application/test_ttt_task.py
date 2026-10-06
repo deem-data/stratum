@@ -1377,12 +1377,16 @@ def define_pipeline(input_dir):
         X = X.skb.apply(
             NeighbourTrackerAdoption("source_domain_id", "target_domain_id", "out"),
             y=y,
+            # skrub 0.11's ApplyToCols.transform() drops transform kwargs.
+            no_wrap=True,
             fit_transform_kwargs={"edges": out_edges},
             transform_kwargs={"edges": out_edges},
         )
         X = X.skb.apply(
             NeighbourTrackerAdoption("target_domain_id", "source_domain_id", "in"),
             y=y,
+            # skrub 0.11's ApplyToCols.transform() drops transform kwargs.
+            no_wrap=True,
             fit_transform_kwargs={"edges": in_edges},
             transform_kwargs={"edges": in_edges},
         )

@@ -475,10 +475,7 @@ def _detach_and_rewire(new_op: AggregateOp, df: Op, folder: _Folder,
     replaced. Downstream consumers are rewired by the caller.
     """
     for node in folder.absorbed:
-        for inp in node.inputs:
-            inp.outputs = [o for o in inp.outputs if o is not node]
-        node.inputs = []
-        node.outputs = []
+        node.detach()
     replaced_ids = {id(node) for node in replaced if node is not None}
     for producer in (df, *folder.leaf_ops):
         producer.outputs = [o for o in producer.outputs

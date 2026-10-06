@@ -234,6 +234,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cloudpickle"
+version = "3.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/fb/576f067976d320f5f0114a8d9fa1215425441bb35627b1993e5afd8111e5/cloudpickle-3.1.2.tar.gz", hash = "sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414", size = 22330, upload-time = "2025-11-03T09:25:26.604Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", size = 22228, upload-time = "2025-11-03T09:25:25.534Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -2059,10 +2068,12 @@ wheels = [
 
 [[package]]
 name = "skrub"
-version = "0.8.0"
+version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "cloudpickle" },
     { name = "jinja2" },
+    { name = "joblib" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
@@ -2071,9 +2082,9 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c5/7f/e0c6bf2bc15a38ec1cd6c6621373353d82883d4f8b1f9ce2f32a4f4d1533/skrub-0.8.0.tar.gz", hash = "sha256:379e7eaf2dc946d3f5d025c615df46e69fdf16b405c2badb5d916953b13b8dcb", size = 3631962, upload-time = "2026-03-25T10:29:06.101Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/f6/4bcaf620df6ce360e04ae177cd1586e15e5e30a19a2edff5edca343fc70a/skrub-0.11.0.tar.gz", hash = "sha256:97e986f56a82d9e071aff566c10099827fbaee4959451b61f9bdaf71c3ad6c6d", size = 4234421, upload-time = "2026-10-01T10:03:07.232Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/5a/1d872525938d9da54c41fa69a3bc7fa7369047101ae702ce5013dd25ff92/skrub-0.8.0-py3-none-any.whl", hash = "sha256:6e349cee08d80e2df4dd80d8d3fdd176d54905b09ba786b81a0125127f607ebc", size = 519161, upload-time = "2026-03-25T10:29:04.399Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/a4/cc5181b3f29e3a9db8fd5c4bde79358d7833ae9aeb53b61f9631ef8d5a54/skrub-0.11.0-py3-none-any.whl", hash = "sha256:9cf5bda8c5d35ec3b9669a451b1ae03a5789b5f8cd328f2df224b115fa9fe931", size = 802731, upload-time = "2026-10-01T10:03:02.596Z" },
 ]
 
 [[package]]
@@ -2157,7 +2168,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3" },
     { name = "pytest-cov", marker = "extra == 'test'" },
     { name = "scikit-learn", specifier = "==1.8" },
-    { name = "skrub", specifier = "==0.8.0" },
+    { name = "skrub", specifier = "==0.11.0" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'cpu'", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "stratum-ai", extra = "cpu" } },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'cu126'", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu126", conflict = { package = "stratum-ai", extra = "cu126" } },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'cpu'", specifier = ">=2.13.0" },

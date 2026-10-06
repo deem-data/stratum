@@ -23,8 +23,8 @@ def _collect_child_data_ops(value):
     """Yield all DataOp objects reachable from *value*.
 
     Handles DataOps stored directly in a field, or nested inside the built-in
-    container types that skrub uses (tuple, list, dict, set, frozenset),
-    as well as skrub Choice/Match wrappers.
+    container types that skrub uses (tuple, list, dict, set, frozenset, and the
+    bounds of a slice), as well as skrub Choice/Match wrappers.
     """
     if isinstance(value, DataOp):
         yield value
@@ -42,6 +42,9 @@ def _collect_child_data_ops(value):
     elif isinstance(value, _BUILTIN_SEQ):
         for item in value:
             yield from _collect_child_data_ops(item)
+    elif isinstance(value, slice):
+        for bound in (value.start, value.stop, value.step):
+            yield from _collect_child_data_ops(bound)
 
 
 def _unique(seq):

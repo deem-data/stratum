@@ -32,7 +32,7 @@ def test_generic_ops_lower_in_place_and_execute():
 
 
 def test_generic_transformer_lowers_in_place():
-    op = TransformerOp(estimator=StandardScaler(), cols=selectors.all(), how="no_wrap")
+    op = TransformerOp(estimator=StandardScaler(), cols=selectors.all(), no_wrap=True)
     with pytest.raises(NotImplementedError, match="must be lowered"):
         op.process("fit_transform", [pd.DataFrame({"x": [1.0, 2.0]})])
     original_id = id(op)

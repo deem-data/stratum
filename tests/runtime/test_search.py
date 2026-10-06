@@ -238,6 +238,48 @@ class ChoiceSearchTest(unittest.TestCase):
                                                       name="scaler"))
         self._assert_matches_skrub(pred, 4)
 
+    def _assert_ids_match_skrub(self, pred, labels):
+        """Each candidate's score is the one skrub reports for the same grid point.
+
+        ``labels`` maps each choice name to stratum's label of every skrub outcome.
+        """
+        results = self._assert_matches_skrub(pred, 4)
+        expected = pred.skb.make_grid_search(fitted=True, refit=False,
+                                             scoring="accuracy").results_
+        expected_by_id = {
+            ", ".join(f"{name}:{labels[name].get(row[name], row[name])}" for name in labels):
+                row["mean_test_score"]
+            for _, row in expected.iterrows()}
+        ours_by_id = dict(zip(results["id"].to_list(), results["scores"].to_list()))
+        self.assertEqual(ours_by_id.keys(), expected_by_id.keys())
+        for candidate, score in expected_by_id.items():
+            self.assertAlmostEqual(ours_by_id[candidate], score, msg=candidate)
+
+    def test_independent_choices_join_after_the_predictor(self):
+        # Unrolling stopped after the `C` choice, so the `wcol` choice on the other
+        # branch reached the runtime as the GetItem key.
+        data = st.var("data", self.df)
+        y = data["t"].skb.mark_as_y()
+        X = data.drop(columns="t").skb.mark_as_X(cv=KFold(3), split_kwargs={})
+        pred = X.skb.apply(LogisticRegression(C=st.choose_from([0.01, 1.0], name="C")), y=y)
+        key = st.as_data_op(st.choose_from(["a", "b"], name="wcol"))
+        joined = pred.skb.apply_func(lambda p, w: p, X[key].abs())
+        self._assert_ids_match_skrub(
+            joined, {"C": {}, "wcol": {"a": "Opt0", "b": "Opt1"}})
+
+    def test_independent_choices_join_before_the_predictor(self):
+        # Every grid point scores differently, so a candidate named after another shows.
+        data = st.var("data", self.df)
+        y = data["t"].skb.mark_as_y()
+        X = data.drop(columns="t").skb.mark_as_X(cv=KFold(3), split_kwargs={})
+        first = st.as_data_op(st.choose_from(["a", "b"], name="first"))
+        second = st.as_data_op(st.choose_from(["c", "a"], name="second"))
+        feature = X[first].skb.apply_func(lambda u, v: (u + 0.5 * v).to_frame("f"),
+                                          X[second])
+        self._assert_ids_match_skrub(
+            feature.skb.apply(LogisticRegression(), y=y),
+            {"first": {"a": "Opt0", "b": "Opt1"}, "second": {"c": "Opt0", "a": "Opt1"}})
+
     def test_estimator_choice_refusing_set_params_once_fitted(self):
         # #224: the second grid point must not reconfigure an already fitted model.
         model = st.choose_from({"weak": RefusesRefitParams(C=0.01),
@@ -255,6 +297,97 @@ class ChoiceSearchTest(unittest.TestCase):
         model = st.choose_from({"d2": CB(depth=2, iterations=20, verbose=0),
                                 "d4": CB(depth=4, iterations=20, verbose=0)}, name="model")
         self._assert_matches_skrub(self._plan(model), 2)
+
+
+class NestedChoiceSearchTest(unittest.TestCase):
+    """A bare choice in an op's arguments is searched as skrub searches it.
+
+    These choices used to reach the runtime unresolved unless wrapped in
+    ``st.as_data_op``.
+    """
+
+    setUp = ChoiceSearchTest.setUp
+    _assert_matches_skrub = ChoiceSearchTest._assert_matches_skrub
+    _assert_ids_match_skrub = ChoiceSearchTest._assert_ids_match_skrub
+
+    def _X_y(self):
+        data = st.var("data", self.df)
+        y = data["t"].skb.mark_as_y()
+        return data.drop(columns="t").skb.mark_as_X(cv=KFold(3), split_kwargs={}), y
+
+    def test_getitem_key(self):
+        X, y = self._X_y()
+        pred = X[[st.choose_from(["a", "b"], name="col")]].skb.apply(LogisticRegression(), y=y)
+        results = self._assert_matches_skrub(pred, 2)
+        self.assertEqual(set(results["id"].to_list()), {"col:Opt0", "col:Opt1"})
+
+    def test_method_kwarg(self):
+        X, y = self._X_y()
+        pred = X.drop(columns=st.choose_from(["a", "b"], name="col"))
+        self._assert_matches_skrub(pred.skb.apply(LogisticRegression(), y=y), 2)
+
+    def test_binop_operand(self):
+        X, y = self._X_y()
+        pred = (X * st.choose_from([1.0, -1.0, 0.0], name="m")).skb.apply(LogisticRegression(), y=y)
+        self._assert_matches_skrub(pred, 3)
+
+    def test_call_arg(self):
+        X, y = self._X_y()
+        pred = X.skb.apply_func(lambda df, col: df[[col]], st.choose_from(["a", "c"], name="col"))
+        self._assert_matches_skrub(pred.skb.apply(LogisticRegression(), y=y), 2)
+
+    def test_apply_cols(self):
+        X, y = self._X_y()
+        scaled = X.skb.apply(StandardScaler(), cols=st.choose_from([["a"], ["b"]], name="cols"))
+        self._assert_matches_skrub(scaled.skb.apply(LogisticRegression(), y=y), 2)
+
+    def test_apply_cols_choice_nested_in_a_list(self):
+        for fixed_cols in ([], ["c"]):
+            with self.subTest(fixed_cols=fixed_cols):
+                X, y = self._X_y()
+                cols = [*fixed_cols, st.choose_from(["a", "b"], name="col")]
+                scaled = X.skb.apply(StandardScaler(), cols=cols)
+                results = self._assert_matches_skrub(
+                    scaled.skb.apply(LogisticRegression(), y=y), 2)
+                self.assertEqual(set(results["id"].to_list()), {"col:Opt0", "col:Opt1"})
+
+    def test_discretized_numeric_choice_in_a_slice(self):
+        X, y = self._X_y()
+        pred = X.iloc[:, :st.choose_int(1, 3, n_steps=3, name="n")]
+        results = self._assert_matches_skrub(pred.skb.apply(LogisticRegression(), y=y), 3)
+        self.assertEqual(set(results["id"].to_list()), {"n:1", "n:2", "n:3"})
+
+    def test_choice_nested_in_an_outcome(self):
+        # skrub's grid is conditional: the inner choice only varies under its outcome.
+        X, y = self._X_y()
+        inner = st.choose_from(["b", "c"], name="inner")
+        for key in ([st.choose_from([inner, "d"], name="outer")],
+                    st.choose_from([["a", inner], ["d"]], name="outer")):
+            with self.subTest(key=key):
+                pred = X[key].skb.apply(LogisticRegression(), y=y)
+                self._assert_matches_skrub(pred, 3)
+
+    def test_dataop_outcome(self):
+        X, y = self._X_y()
+        cols = st.as_data_op(["a", "b"])
+        pred = X[st.choose_from([cols, ["c"]], name="cols")].skb.apply(LogisticRegression(), y=y)
+        self._assert_matches_skrub(pred, 2)
+
+    def test_choice_used_twice_is_one_dimension(self):
+        # skrub keys a choice by identity: every use takes the same outcome.
+        X, y = self._X_y()
+        col = st.choose_from(["a", "b"], name="col")
+        for other in (X[[col]], X[[st.as_data_op(col)]]):
+            with self.subTest(other=other):
+                feature = X[[col]].skb.concat(
+                    [other.rename(columns=lambda c: c + "_2")], axis=1)
+                self._assert_matches_skrub(feature.skb.apply(LogisticRegression(), y=y), 2)
+
+    def test_with_estimator_choice(self):
+        X, y = self._X_y()
+        pred = X[[st.choose_from(["a", "b"], name="col")]].skb.apply(
+            LogisticRegression(C=st.choose_from([0.001, 1.0], name="C")), y=y)
+        self._assert_ids_match_skrub(pred, {"col": {"a": "Opt0", "b": "Opt1"}, "C": {}})
 
 
 class CrossValidationSplitterTest(unittest.TestCase):

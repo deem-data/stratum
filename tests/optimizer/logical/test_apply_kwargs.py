@@ -107,7 +107,7 @@ class TestKwargsBinding(ApplyKwargsTest):
 
     def test_transformer_groups_are_keyed_by_method(self):
         X, _ = self._source()
-        root = convert_to_ops(X.skb.apply(StandardScaler(), how="no_wrap",
+        root = convert_to_ops(X.skb.apply(StandardScaler(), no_wrap=True,
                                           transform_kwargs={"copy": True}))
         self.assertIsInstance(root, TransformerOp)
         self.assertEqual(root.call_kwargs_key, "transform")
@@ -119,7 +119,7 @@ class TestKwargsBinding(ApplyKwargsTest):
         # never called. We mirror that (warn, do not raise) but still bind the
         # DataOps inside it, or they would be left without a consumer.
         X, _ = self._source()
-        dag = X.skb.apply(StandardScaler(), how="no_wrap", fit_kwargs={"extra": X[["a"]]})
+        dag = X.skb.apply(StandardScaler(), no_wrap=True, fit_kwargs={"extra": X[["a"]]})
         with self.assertLogs("stratum", level="WARNING") as logs:
             root = convert_to_ops(dag)
 

@@ -96,6 +96,8 @@ def _resolve_operand(value, inputs):
         return [_resolve_operand(v, inputs) for v in value]
     if isinstance(value, dict):
         return {k: _resolve_operand(v, inputs) for k, v in value.items()}
+    if isinstance(value, slice):
+        return slice(*(_resolve_operand(b, inputs) for b in (value.start, value.stop, value.step)))
     return value
 
 
@@ -113,7 +115,7 @@ def remap_operand_refs(value, mapping: dict):
     """Return ``value`` with every nested :class:`OperandRef` remapped through
     ``mapping`` (old input index -> new input index).
 
-    Recurses tuples/lists/dicts and column-expression trees (anything exposing a
+    Recurses tuples/lists/dicts/slices and column-expression trees (anything exposing a
     ``remap_operand_refs`` method, e.g. a ``ColumnExpr`` predicate). This is the
     single walker shared by CSE edge de-duplication (``_op_cse``) and
     :meth:`IRNode._dedupe_input_refs`, so both renumber refs identically --
@@ -127,6 +129,9 @@ def remap_operand_refs(value, mapping: dict):
         return [remap_operand_refs(v, mapping) for v in value]
     if isinstance(value, dict):
         return {k: remap_operand_refs(v, mapping) for k, v in value.items()}
+    if isinstance(value, slice):
+        return slice(*(remap_operand_refs(b, mapping)
+                       for b in (value.start, value.stop, value.step)))
     if hasattr(value, "remap_operand_refs"):
         return value.remap_operand_refs(mapping)
     return value
@@ -365,6 +370,32 @@ class IRNode:
     def replace_output_of_inputs(self, new_output):
         for in_ in self.inputs:
             in_.replace_output(self, new_output)
+
+    def detach(self) -> None:
+        """Take this node out of the graph: drop it from its producers' outputs and
+        clear its own edges. Its consumers are the caller's to rewire, before or after.
+
+        Producers left without a consumer stay as they are, which is what a rewrite
+        wants while it is about to hand them a new consumer; see ``detach_and_prune``.
+        """
+        for in_ in self.inputs:
+            in_.outputs = [out for out in in_.outputs if out is not self]
+        self.inputs = []
+        self.outputs = []
+
+    def detach_and_prune(self) -> None:
+        """``detach`` this node, then every producer that leaves without a consumer.
+
+        A producer nobody consumes is unreachable from the root, but it is still in
+        its own producers' outputs, and the topological walk rejects that edge. So the
+        dead cone goes with the node. Call it only once every surviving producer has
+        its new consumer: one whose last edge is momentarily gone would be pruned too.
+        """
+        producers = list(dict.fromkeys(self.inputs))
+        self.detach()
+        for in_ in producers:
+            if not in_.outputs:
+                in_.detach_and_prune()
 
     def clone(self):
         if getattr(self.__class__, "fields", None) is None:

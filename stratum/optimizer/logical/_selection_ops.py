@@ -141,13 +141,9 @@ def make_mask_selection_op(op: GetItemOp) -> SelectionOp:
     # Filtering rows keeps the container's kind: a masked series is still a series.
     sel.output_type = src.output_type
 
-    # Detach every absorbed op from the graph (remove it from its inputs' output
-    # lists, then clear its edges).
+    # Detach every absorbed op from the graph.
     for node in absorbed:
-        for inp in node.inputs:
-            inp.outputs = [o for o in inp.outputs if o is not node]
-        node.inputs = []
-        node.outputs = []
+        node.detach()
 
     # The source and each kept leaf op now feed the selection in place of the mask
     # GetItem / the detached expression nodes they used to feed. Other (external)

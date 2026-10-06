@@ -76,11 +76,13 @@ class EvaluateTest(RuntimeTest):
         t9 = skrub.choose_from([t7, t8]).as_data_op()
         t10 = t9 + 1
         out = evaluate(t10, seed=self.seed, test_size=self.test_size)
-        self.assertEqual(len(out), 4)
-        self.assertEqual(out[0]["vals"], 13)
-        self.assertEqual(out[1]["vals"], 3)
-        self.assertEqual(out[2]["vals"], 3.5)
-        self.assertEqual(out[3]["vals"], 16)
+        # Unnamed choices are numbered by position in the id: Choice1 is t5, Choice0 t9.
+        self.assertEqual({o["id"]: o["vals"] for o in out}, {
+            "Choice1:Opt0, Choice0:Opt0": 13,   # (1 + 5) * 2 + 1
+            "Choice1:Opt0, Choice0:Opt1": 3,    # (1 + 5) / 3 + 1
+            "Choice1:Opt1, Choice0:Opt0": 16,   # (2.5 + 5) * 2 + 1
+            "Choice1:Opt1, Choice0:Opt1": 3.5,  # (2.5 + 5) / 3 + 1
+        })
 
 
     def test_evaluate(self):

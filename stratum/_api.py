@@ -1,10 +1,11 @@
 import pandas as pd
 from dataclasses import dataclass
 from skrub import DataOp
+from skrub._data_ops._evaluation import find_scoring_node
 
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import SearchConfig, optimize
-from stratum.optimizer.logical._scoring import resolve_scoring
+from stratum.optimizer.logical._scoring import resolve_declared_scoring, resolve_scoring
 from stratum.runtime._scheduler import SequentialScheduler
 from stratum.frontend._skrub_graph import get_data
 from time import perf_counter
@@ -20,8 +21,15 @@ class RunTimings:
 
 #TODO: Rename this file
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, env=None):
-    """Perform grid search with cross-validation on a DataOp DAG. ``scoring`` is required."""
-    if scoring is None:
+    """Perform grid search with cross-validation on a DataOp DAG.
+
+    ``scoring`` is required unless the DAG declares its metric with
+    ``.skb.with_scoring()``; an explicit ``scoring`` overrides that, as in skrub.
+    """
+    declared = scoring is None and find_scoring_node(dag) is not None
+    if declared:
+        metric = resolve_declared_scoring(dag)
+    elif scoring is None:
         # A search ranks a set, so every candidate has to be measured the same way.
         # `.skb.make_grid_search()` still honours scoring=None, by handing the call to
         # skrub. See docs/adr/0004-a-search-always-names-its-metric.md.
@@ -39,8 +47,8 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
         env[k] = v
     # The scorer is plan-time state: it decides what the plan's last operator computes,
     # and an unusable `scoring=` fails here rather than after a fold has been fitted.
-    search = SearchConfig(metric=resolve_scoring(scoring),
-                          return_predictions=return_predictions)
+    search = SearchConfig(metric=metric if declared else resolve_scoring(scoring),
+                          return_predictions=return_predictions, declared_kwargs=declared)
     # Resolve variables to constants at compile time, so the scheduler runs
     # without an environment.
     optimize_start = perf_counter()

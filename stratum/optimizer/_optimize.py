@@ -1,5 +1,6 @@
 from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
+from skrub._data_ops._data_ops import Apply
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque, defaultdict
 from dataclasses import dataclass
@@ -7,10 +8,10 @@ from typing import Any
 from .logical._op_cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .logical._numeric_ops import extract_numeric_op
-from .logical._candidate_ops import CollectCandidatesOp, ScoreCandidatesOp
-from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared
+from .logical._candidate_ops import CollectCandidatesOp, DeclaredScoringOp, ScoreCandidatesOp
+from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared, remap_operand_refs
 from .logical._split_ops import SplitOutput
-from ._op_utils import clone_sub_dag, find_choice_naive, replace_op_in_outputs, show_graph, topological_iterator, validate_dag
+from ._op_utils import show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
 from .logical._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
 from .logical._relational_rewrites import relational_rewrites
@@ -63,6 +64,9 @@ class SearchConfig:
 
     metric: Any
     return_predictions: bool = False
+    #: The metric is the one the plan declares with `.skb.with_scoring()`, so the
+    #: scorer also reads the kwargs declared with it, computed on each test fold.
+    declared_kwargs: bool = False
 
 
 class OptConfig():
@@ -311,10 +315,13 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
     check_choices_not_shared(nodes.values())
     order = topological_traverse(nodes, parents, children)
     root_id = order[-1]
+    feeds_estimator = _apply_fed_nodes(nodes, parents, order)
 
     # id(DataOp) -> Op. Keyed by DataOp identity (not the graph's node keys) so
     # as_op's operand binder can resolve inputs found in the impl fields directly.
     ids_to_ops = {}
+    # id(choice) -> ChoiceOp: one op per choice object, shared by all its uses.
+    choice_ops = {}
     for node_key in order:
         skrub_op = nodes[node_key]
         impl = skrub_op._skrub_impl
@@ -325,12 +332,32 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
             input_key = children.get(node_key, [])[0]
             ids_to_ops[id(skrub_op)] = ids_to_ops[id(nodes[input_key])]
             continue
-        ids_to_ops[id(skrub_op)] = as_op(skrub_op, ids_to_ops, env)
+        ids_to_ops[id(skrub_op)] = as_op(skrub_op, ids_to_ops, env,
+                                         feeds_estimator=node_key in feeds_estimator,
+                                         choice_ops=choice_ops)
 
     root = ids_to_ops[id(nodes[root_id])]
     log_time("conversion took", start)
     _debug_show_graph(root, "conversion")
     return root
+
+
+def _apply_fed_nodes(nodes: dict, parents: dict, order: list) -> set:
+    """Keys of the nodes whose value some `.skb.apply()` consumes, directly or not.
+
+    skrub decides at evaluation time whether an Apply is the last estimator: if
+    another Apply is still waiting on its output, it transforms (or predicts) in
+    every response pass instead of answering the scorer. The plan settles the same
+    question once, from the graph: any downstream Apply, through any of its fields,
+    counts. skrub's answer can depend on the order its traversal first reaches a
+    node shared by an Apply and a non-Apply path; this static rule ignores that.
+    """
+    fed = set()
+    for key in reversed(order):
+        if any(isinstance(nodes[p]._skrub_impl, Apply) or p in fed
+               for p in parents.get(key, ())):
+            fed.add(key)
+    return fed
 
 
 def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
@@ -350,6 +377,11 @@ def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
     replacing = isinstance(root, ChoiceOp)
     names = root.make_outcome_names() if replacing else ["default"]
     candidates = list(root.inputs) if replacing else [root]
+    # Postprocessing may follow the declaration of the plan's shared metric.
+    # Unrolling can clone that declaration, so retain its kwargs bindings for
+    # each candidate while still scoring the candidate's final output.
+    declarations = _scoring_declarations(root)
+    declared = [declarations[c] for c in candidates]
 
     if search is None or search.metric is None:
         node = CollectCandidatesOp(names)
@@ -369,7 +401,8 @@ def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
             # The choice is the root, so it is the only consumer being redirected. A
             # rebuild rather than `replace_output` because one operator may fill two
             # candidate slots and therefore be redirected twice.
-            candidate.outputs = [node if out is root else out for out in candidate.outputs]
+            candidate.outputs = [node if out is root else out
+                                 for out in candidate.outputs]
         else:
             candidate.add_output(node)
 
@@ -377,8 +410,63 @@ def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
         _, y_op = fold
         node.y_ref = OperandRef(node.add_input(y_op))
         y_op.add_output(node)
+        if search.declared_kwargs:
+            if any(d is None for d in declared):
+                raise ValueError(
+                    "not every candidate contains `.skb.with_scoring()`, so the declared"
+                    " scorer cannot score them all. Pass `scoring=` instead.")
+            node.kwargs_refs = [_rebind(d.scorers[0]["kwargs"], d.inputs, node)
+                                for d in declared]
+    for d in dict.fromkeys(declared):
+        if d is not None:
+            # Bypass the metadata wherever it occurs, keeping postprocessing and
+            # the scorer's kwargs alive before pruning the declaration.
+            pred = d.inputs[0]
+            for out in d.outputs:
+                while any(in_ is d for in_ in out.inputs):
+                    out.replace_input(d, pred)
+                # Positional candidate slots may now share one producer. Keep
+                # one reverse edge per slot for the topological indegree count.
+                pred.outputs = [o for o in pred.outputs if o is not out]
+                pred.outputs.extend(out for in_ in out.inputs if in_ is pred)
+            d.detach_and_prune()
     log_time("installing the candidate set took", start)
     return node
+
+
+def _scoring_declarations(root: Op) -> dict[Op, DeclaredScoringOp | None]:
+    """Propagate the shared scoring declaration through downstream operators.
+
+    Walk the graph once, including when several candidates share its upstream
+    nodes. The metric itself is already resolved in SearchConfig.
+    """
+    declarations = {}
+    for op in topological_iterator(root):
+        declarations[op] = op if isinstance(op, DeclaredScoringOp) else next(
+            (declarations[in_] for in_ in op.inputs if declarations[in_] is not None), None)
+    return declarations
+
+
+def _rebind(value, operands: list[Op], consumer: Op):
+    """``value`` with its OperandRefs into ``operands`` re-pointed at inputs of ``consumer``."""
+    mapping = {}
+    for k in _referenced(value):
+        if k not in mapping:
+            mapping[k] = consumer.add_input(operands[k])
+            operands[k].add_output(consumer)
+    return remap_operand_refs(value, mapping)
+
+
+def _referenced(value):
+    """The operand indices ``value`` refers to, through nested tuples, lists and dicts."""
+    if isinstance(value, OperandRef):
+        yield value.k
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _referenced(v)
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _referenced(v)
 
 
 def _response_mode(metric, names: list[str], candidates: list[Op]) -> str:
@@ -448,74 +536,85 @@ def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
 
 
 def choice_unrolling(root: Op):
-    """ Rewrite for unrolling the dag after choice op into separate dags for each outcome."""
+    """Unroll the choices into one candidate sub-dag per grid point.
+
+    The result ends in a single ChoiceOp whose inputs are the candidates: the root if
+    it is a choice already, otherwise one appended over the root. Choices are unrolled
+    downstream-first, so the region a choice copies never holds another choice, and
+    choices on different branches multiply into their Cartesian product. A candidate a
+    choice does not reach is kept as is: as in skrub's grid, a choice nested in one
+    outcome of another only varies when that outcome is taken.
+    """
     start = start_time()
-    contains_choice = True
-    while contains_choice:
-        dag_iter = topological_iterator(root)
-        contains_choice = False
-        for op in dag_iter:
-            if op.is_choice():
-                outcomes = op.inputs
-
-                # check if we find any choice in the sub-dag of the current choice
-                last_op, is_choice = find_choice_naive(op)
-                if last_op is op:
-                    # the choice has no consumers left: unrolling is finished
-                    contains_choice = False
-                    break
-                if is_choice:
-                    unroll_nested_choice(last_op, op, outcomes)
-                    contains_choice = True
-                else:
-                    assert root is last_op, "Root should be the last op in the dag"
-                    # we reached the end of the dag
-                    logger.debug(f"Unrolling simple choice: {op}")
-                    root = unroll_simple_choice(root, op, outcomes)
-                    logger.debug(f"New root after unrolling: {root}")
-
-                del op
-                break
+    choices = [op for op in topological_iterator(root) if op.is_choice() and op is not root]
+    if choices:
+        if root.is_choice():
+            sink = root
+        else:
+            sink = ChoiceOp(outcome_names=[[]], append_choice_name=False, inputs=[root])
+            root.add_output(sink)
+        for choice in reversed(choices):
+            logger.debug(f"Unrolling choice: {choice}")
+            unroll_choice(choice, sink)
+        sink.update_name()
+        root = sink
     log_time("unrolled took", start)
     _debug_show_graph(root, "unrolled")
     return root
 
 
+def unroll_choice(choice: ChoiceOp, sink: ChoiceOp):
+    """Replace ``choice`` by one copy of the region downstream of it per outcome.
 
-def unroll_simple_choice(root: Op, op: ChoiceOp, outcomes: list) -> Op:
-    """ Unroll a simple choice op, which has no choice in the sub-dag."""
-    dag_root = ChoiceOp(outcome_names=op.outcome_names, append_choice_name=False)
-    dag_root.inputs = [root]
+    The region (every op between ``choice`` and ``sink``) must hold no other choice.
+    The first outcome reuses the region, the others get clones. Each candidate of
+    ``sink`` the region reaches becomes one candidate per outcome, named with the
+    outcome's name in front of its own; the other candidates are kept as they are.
+    """
+    region, reached = [], {choice}
+    for op in topological_iterator(sink):
+        if op is not sink and any(in_ in reached for in_ in op.inputs):
+            assert not op.is_choice(), "choices must be unrolled downstream-first"
+            reached.add(op)
+            region.append(op)
 
-    # clones sub-dag after choice op for all outcomes[1:]
-    for outcome in outcomes[1:]:
-        outcome.outputs = []
-        leafs = clone_sub_dag(op, new_root_op=outcome)
-        assert len(leafs) == 1
-        dag_root.add_input(leafs[0])
-        leafs[0].add_output(dag_root)
+    outcomes = list(choice.inputs)
+    copies = [{choice: outcome} for outcome in outcomes]
+    # Clone before the region is rewired below, so clones still see the choice.
+    for k in range(1, len(outcomes)):
+        copy = copies[k]
+        for op in region:
+            clone = op.clone()
+            clone.inputs = [in_ if in_ is choice else copy.get(in_, in_) for in_ in op.inputs]
+            _replace_choice_input(clone, choice, outcomes[k])
+            for in_ in dict.fromkeys(clone.inputs):
+                in_.add_output(clone)
+            copy[op] = clone
+    for op in region:
+        copies[0][op] = op
+        if _replace_choice_input(op, choice, outcomes[0]):
+            outcomes[0].add_output(op)
+    choice.detach()
 
-    # reuse sub-dag for the first outcome
-    outcomes[0].outputs = []
-    replace_op_in_outputs(op, replacement=outcomes[0])
-    root.add_output(dag_root)
-    return dag_root
+    names, candidates = [], []
+    for copy, outcome_name in zip(copies, choice.outcome_names):
+        for name, candidate in zip(sink.outcome_names, sink.inputs):
+            if candidate in copy:
+                names.append(outcome_name + name)
+                candidates.append(copy[candidate])
+            elif copy is copies[0]:
+                names.append(name)
+                candidates.append(candidate)
+    sink.outcome_names = names
+    sink.inputs = candidates
+    for candidate in candidates:
+        candidate.add_output(sink)
 
 
-def unroll_nested_choice(last_op: ChoiceOp, op: ChoiceOp, outcomes):
-    """ Unroll a nested choice op, which has choice in the sub-dag."""
-    n_outcomes = len(last_op.outcome_names)
-
-    # clone the sub-dag for each outcome of the current choice
-    for outcome, outcome_name in zip(outcomes[1:], op.outcome_names[1:]):
-        outcome.outputs = []
-        clone_sub_dag(op, new_root_op=outcome, stop_at_op=last_op)
-        for i in range(n_outcomes):
-            last_op.outcome_names.append(last_op.outcome_names[i] + outcome_name)
-
-    # reuse sub-dag for the first outcome
-    outcomes[0].outputs = [op.outputs[0]]
-    for i in range(n_outcomes):
-        last_op.outcome_names[i] += op.outcome_names[0]
-    outcomes[0].outputs = []
-    replace_op_in_outputs(op, replacement=outcomes[0])
+def _replace_choice_input(op: Op, choice: ChoiceOp, outcome: Op) -> bool:
+    """Replace every input edge of ``op`` from ``choice`` by one from ``outcome``."""
+    replaced = False
+    while any(in_ is choice for in_ in op.inputs):
+        op.replace_input(choice, outcome)
+        replaced = True
+    return replaced

@@ -180,7 +180,7 @@ class _UserDefinedPredictor(RegressorMixin, BaseEstimator):
 
 def test_any_estimator_passes_through():
     X, y = make_regression(n_samples=20, n_features=2, random_state=0)
-    op = PredictorOp(estimator=_UserDefinedPredictor(), y=y, cols=All(), how="no_wrap")
+    op = PredictorOp(estimator=_UserDefinedPredictor(), y=y, cols=All(), no_wrap=True)
     select_implementations(op, _ctx())
 
     assert type(op) is PassthroughPredictor
@@ -330,7 +330,7 @@ def test_graph_fed_catboost_parameter_is_only_applied_while_fitting():
         estimator=_estimator("catboost", "CatBoostRegressor", iterations=1, verbose=0),
         y=y,
         cols=All(),
-        how="no_wrap",
+        no_wrap=True,
         param_refs={"iterations": OperandRef(1)},
     )
 
@@ -352,7 +352,7 @@ class _RefusesRefitParams(Ridge):
 def test_graph_fed_parameter_is_applied_to_a_fresh_estimator_every_fold():
     """Each fit starts from an unfitted clone, so the next fold can configure it."""
     X, y = make_regression(n_samples=20, n_features=2, random_state=0)
-    op = PredictorOp(estimator=_RefusesRefitParams(), y=y, cols=All(), how="no_wrap",
+    op = PredictorOp(estimator=_RefusesRefitParams(), y=y, cols=All(), no_wrap=True,
                      param_refs={"alpha": OperandRef(1)})
 
     op.process("fit_transform", [X, 2.0])

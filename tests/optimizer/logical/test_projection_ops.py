@@ -538,6 +538,19 @@ class TestColumnSelectorExtraction(unittest.TestCase):
         ops = optimize(data.skb.select(["a"]), OptConfig(dataframe_ops=True))
         self.assertEqual(["a"], self._one(ops, ColumnSelectorOp).selector)
 
+    def test_select_cols_on_restricted_columns_is_not_a_projection(self):
+        """Applied to part of the frame, skrub's SelectCols passes the rest through."""
+        from skrub import SelectCols
+        from tests.optimizer.physical.test_source_execs import run_plan
+        data = st.as_data_op(self.df)
+        for kwargs in ({"cols": ["a"]}, {"exclude_cols": ["a"]}):
+            with self.subTest(**kwargs):
+                dag = data.skb.apply(SelectCols([]), **kwargs)
+                ops = optimize(dag, OptConfig(dataframe_ops=True))
+                self.assertEqual([], [o for o in ops if isinstance(o, ColumnSelectorOp)])
+                self.assertEqual(sorted(dag.skb.eval().columns),
+                                 sorted(run_plan(ops).columns))
+
 
 class TestColumnSelectorProcess(unittest.TestCase):
     """ColumnSelectorOp resolves the selector at fit and reuses the list at predict."""
