@@ -32,7 +32,10 @@ class ColumnMethodSpec:
     validate: CallValidator
     pandas_eval: MethodEvaluator
     polars_eval: MethodEvaluator
-    supports_frame: bool = False
+    #: Validates the call on a DataFrame, whose arguments can mean something else
+    #: than on a Series (``fillna`` with a dict fills per column on a frame, per
+    #: index label on a Series). ``None``: the method only folds on a Series.
+    validate_frame: CallValidator | None = None
 
 
 def _is_ref_or_scalar(value) -> bool:
@@ -102,6 +105,19 @@ def _validate_fillna(args, kwargs):
     return _is_ref_or_scalar(value)
 
 
+def _validate_frame_fillna(args, kwargs):
+    """``DataFrame.fillna`` with a plain dict of column name -> scalar fill value."""
+    if len(args) == 1 and not kwargs:
+        value = args[0]
+    elif not args and set(kwargs) == {"value"}:
+        value = kwargs["value"]
+    else:
+        return False
+    return (type(value) is dict and all(
+        isinstance(k, str) and v is not None and not pd.isna(v) and _is_ref_or_scalar(v)
+        for k, v in value.items() if not isinstance(v, OperandRef)))
+
+
 def _validate_clip(args, kwargs):
     return (
         len(args) <= 2
@@ -137,6 +153,38 @@ def _validate_notna(args, kwargs):
     return not args and not kwargs
 
 
+def _map_mapping(args, kwargs):
+    """The mapping of a ``Series.map`` call (pandas 3 renamed ``arg`` to ``func``)."""
+    if len(args) == 1 and not set(kwargs) - {"na_action"}:
+        return args[0]
+    keys = set(kwargs) & {"arg", "func"}
+    if not args and len(keys) == 1 and not set(kwargs) - {"arg", "func", "na_action"}:
+        return kwargs[keys.pop()]
+    return None
+
+
+def _validate_map(args, kwargs):
+    """A plain dict of scalar keys and values: a lookup that misses to NaN.
+
+    Refused: functions and Series (arbitrary code / index alignment), dict
+    subclasses (``__missing__`` makes them a function), missing keys, and keys
+    or values that mix types beyond int/float, whose pandas result dtype
+    Polars would not reproduce.
+    """
+    mapping = _map_mapping(args, kwargs)
+    if type(mapping) is not dict or kwargs.get("na_action") not in (None, "ignore"):
+        return False
+
+    def homogeneous(values):
+        types = {type(v) for v in values if v is not None}
+        return len(types) <= 1 or types <= {int, float}
+
+    return (all(type(k) in (str, int, float) and not pd.isna(k) for k in mapping)
+            and all(v is None or type(v) in (str, int, float, bool)
+                    for v in mapping.values())
+            and homogeneous(mapping) and homogeneous(mapping.values()))
+
+
 def _pandas_method(name):
     def evaluate(obj, args, kwargs, dtype=None):
         return getattr(obj, name)(*args, **kwargs)
@@ -161,11 +209,39 @@ def _polars_fillna(obj, args, kwargs, dtype=None):
     # so any derived operand ((a / b).fillna(0), a chained clip/where/fillna)
     # silently keeps its NaNs here while pandas replaces them.
     value = _arg(args, kwargs, 0, "value")
+    if isinstance(obj, pl.DataFrame):
+        return _polars_frame_fillna(obj, value)
     result = obj.fill_null(value)
     actual_dtype = getattr(obj, "dtype", None) or dtype
     if actual_dtype is not None and actual_dtype.is_float():
         result = result.fill_nan(value)
     return result
+
+
+def _fill_value_fits(value, dtype) -> bool:
+    """Whether filling ``value`` keeps the column's kind, as pandas does then."""
+    if isinstance(value, bool):
+        return dtype == pl.Boolean
+    if isinstance(value, (int, float, np.number)):
+        return dtype.is_numeric()
+    if isinstance(value, str):
+        return dtype in (pl.String, pl.Categorical)
+    return False
+
+
+def _polars_frame_fillna(frame, values: dict):
+    columns = []
+    for name, value in values.items():
+        if name not in frame.columns:  # pandas ignores unknown columns
+            continue
+        dtype = frame.schema[name]
+        if not _fill_value_fits(value, dtype):
+            # FIXME(#227): fall back to pandas, which upcasts to object here.
+            raise NotImplementedError(
+                f"fillna({{{name!r}: {value!r}}}) on a {dtype} column has no exact "
+                f"polars translation: pandas would mix types in an object column.")
+        columns.append(_polars_fillna(pl.col(name), [value], {}, dtype).alias(name))
+    return frame.with_columns(columns) if columns else frame
 
 
 def _polars_clip(obj, args, kwargs, dtype=None):
@@ -206,25 +282,37 @@ def _polars_notna(obj, args, kwargs, dtype=None):
     return result
 
 
-def _spec(name, validate, polars_eval, *, supports_frame=False):
+def _polars_map(obj, args, kwargs, dtype=None):
+    # Misses become missing, like pandas (unlike replace(), which keeps them).
+    # A missing input misses too, so na_action="ignore" needs nothing extra.
+    mapping = _map_mapping(args, kwargs)
+    if {type(v) for v in mapping.values() if v is not None} == {int, float}:
+        # pandas gives float64; Polars types the lookup by its first value.
+        mapping = {k: None if v is None else float(v) for k, v in mapping.items()}
+    return obj.replace_strict(mapping, default=None)
+
+
+def _spec(name, validate, polars_eval, *, validate_frame=None):
     return ColumnMethodSpec(
         name=name,
         validate=validate,
         pandas_eval=_pandas_method(name),
         polars_eval=polars_eval,
-        supports_frame=supports_frame,
+        validate_frame=validate_frame,
     )
 
 
 COLUMN_METHOD_SPECS = {
     spec.name: spec
     for spec in (
-        _spec("astype", _validate_astype, _polars_astype, supports_frame=True),
-        _spec("fillna", _validate_fillna, _polars_fillna),
+        _spec("astype", _validate_astype, _polars_astype, validate_frame=_validate_astype),
+        _spec("fillna", _validate_fillna, _polars_fillna,
+              validate_frame=_validate_frame_fillna),
         _spec("clip", _validate_clip, _polars_clip),
         _spec("where", _validate_where, _polars_where),
         _spec("isin", _validate_isin, _polars_isin),
         _spec("notna", _validate_notna, _polars_notna),
+        _spec("map", _validate_map, _polars_map),
     )
 }
 
@@ -237,10 +325,9 @@ def is_supported_column_method(op: MethodCallOp) -> bool:
     spec = get_column_method_spec(op.method_name)
     if spec is None or not op.inputs:
         return False
-    if (op.inputs[0].output_type is OutputType.FRAME
-            and not spec.supports_frame):
-        return False
-    return spec.validate(tuple(op.args or ()), dict(op.kwargs or {}))
+    validate = (spec.validate_frame if op.inputs[0].output_type is OutputType.FRAME
+                else spec.validate)
+    return validate is not None and validate(tuple(op.args or ()), dict(op.kwargs or {}))
 
 
 class ColumnMethodOp(Op):

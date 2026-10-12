@@ -1,3 +1,4 @@
+import re
 from typing import Callable
 from skrub.selectors._base import make_selector
 from stratum.optimizer.logical._ops import (OutputType, CallOp, GetAttrOp,
@@ -20,9 +21,11 @@ def resolve_selector_columns(frame, selector) -> list[str]:
     return make_selector(selector).expand(frame)
 
 # pandas ``.str.<method>`` name -> polars ``.str.<method>`` name, for the methods
-# whose names differ between backends. Methods that match (contains, replace, ...)
-# need no entry. A method absent from a backend's str namespace simply won't run
-# there. Shared by :class:`StringMethodOp` and the column-expression ``StrExpr``.
+# whose names differ between backends. Methods that match (contains, ...) need no
+# entry; methods whose *arguments* differ are translated in
+# :func:`polars_string_method`. A method absent from a backend's str namespace
+# simply won't run there. Shared by :class:`StringMethodOp` and the
+# column-expression ``StrExpr``.
 STR_POLARS_METHODS = {
     "count": "count_matches",
     "lower": "to_lowercase",
@@ -34,6 +37,69 @@ STR_POLARS_METHODS = {
     "lstrip": "strip_chars_start",
     "rstrip": "strip_chars_end",
 }
+
+
+def polars_string_method(obj, method: str, args=(), kwargs=None):
+    """Run a pandas-spelled ``.str.<method>`` call on a polars Series or expression."""
+    kwargs = kwargs or {}
+    if method == "replace":
+        return _polars_str_replace(obj, *args, **kwargs)
+    name = STR_POLARS_METHODS.get(method, method)
+    return getattr(obj.str, name)(*args, **kwargs)
+
+
+# A regex construct the Rust regex engine lacks (lookaround, inline groups and
+# flags) or that means something else there (a numbered backreference).
+_UNPORTABLE_REGEX = re.compile(r"\(\?|\\[1-9]")
+
+
+def polars_str_replace_unsupported(pat, repl=None, n=-1, case=None, flags=0,
+                                   regex=False) -> str | None:
+    """Why a pandas ``str.replace`` call has no exact polars translation, or None.
+
+    Only literal string patterns and replacements translate. Refused:
+    compiled patterns and callable replacements (pandas-only), ``case``/``flags``,
+    an empty pattern, lookarounds and backreferences (unsupported by Rust regex),
+    and a regex replacement containing ``\\`` or ``$`` (the two engines spell
+    group references differently).
+
+    Accepted divergence: on an *object*-dtype column, Python's ``$`` also
+    matches before a trailing newline, Rust's does not. pandas 3's default
+    ``str`` dtype already uses pyarrow's RE2, whose ``$`` is end-of-text like
+    Rust's, so a pipeline reading strings from files sees no difference.
+    """
+    if not isinstance(pat, str) or not isinstance(repl, str):
+        return "only string patterns and replacements translate"
+    if case not in (None, True) or flags:
+        return "case=/flags= are not translated"
+    if not isinstance(n, int) or isinstance(n, bool):
+        return f"n={n!r} is not an integer"
+    if regex:
+        if pat == "":
+            return "an empty regex pattern is not translated"
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            return f"invalid regex: {exc}"
+        if _UNPORTABLE_REGEX.search(pat):
+            return "lookarounds, inline groups/flags and backreferences are not portable"
+        if "\\" in repl or "$" in repl:
+            return "group references in the replacement are not portable"
+    return None
+
+
+def _polars_str_replace(obj, pat, repl=None, n=-1, case=None, flags=0, regex=False):
+    reason = polars_str_replace_unsupported(pat, repl, n, case, flags, regex)
+    if reason is not None:
+        # FIXME(#227): fall back to the recorded pandas call instead of failing.
+        raise NotImplementedError(
+            f"str.replace({pat!r}, {repl!r}, n={n}, case={case}, flags={flags}, "
+            f"regex={regex}) has no exact polars translation: {reason}.")
+    if n == 0:  # pandas makes no replacement for n=0
+        return obj
+    if n < 0:  # pandas replaces every match for any negative n
+        return obj.str.replace_all(pat, repl, literal=not regex)
+    return obj.str.replace(pat, repl, literal=not regex, n=n)
 
 
 _POLARS_DATETIME_KWARGS = frozenset({"format", "errors", "exact", "cache"})

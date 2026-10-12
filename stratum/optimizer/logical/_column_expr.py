@@ -21,13 +21,14 @@ import numpy as np
 import polars as pl
 import pandas as pd
 
-from stratum.optimizer.logical._ops import OperandRef, BinOp, UnaryOp, GetItemOp, Op, ValueOp
+from stratum.optimizer.logical._ops import (OperandRef, BinOp, UnaryOp, GetItemOp, Op,
+                                            ValueOp, apply_binary)
 from stratum.optimizer.logical._base import config_key
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, get_column_method_spec, polars_dtype)
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, DatetimeConversionOp, GetAttrProjectionOp, StringMethodOp,
-    STR_POLARS_METHODS, polars_datetime_kwargs)
+    polars_datetime_kwargs, polars_string_method)
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
 # corresponding map is not foldable into a column expression.
@@ -244,7 +245,7 @@ class BinOpExpr(ColumnExpr):
         return self.op(self.left.to_pandas(ctx), self.right.to_pandas(ctx))
 
     def to_polars(self, ctx):
-        return self.op(self.left.to_polars(ctx), self.right.to_polars(ctx))
+        return apply_binary(self.op, self.left.to_polars(ctx), self.right.to_polars(ctx))
 
     def to_pandas_query(self, params):
         sym = BINARY_SYMBOLS.get(self.op)
@@ -333,8 +334,7 @@ class StrExpr(ColumnExpr):
 
     def to_polars(self, ctx):
         obj = self.operand.to_polars(ctx)
-        name = STR_POLARS_METHODS.get(self.method, self.method)
-        return getattr(obj.str, name)(*self.args, **self.kwargs)
+        return polars_string_method(obj, self.method, self.args, self.kwargs)
 
     def iter_operand_refs(self):
         yield from self.operand.iter_operand_refs()

@@ -238,7 +238,13 @@ def rewrite_pass(match_fn, action_fn):
         A rewrite function: root -> updated_root
     """
     def run(root):
-        for op in topological_iterator(root):
+        # A rewrite may detach the op being visited. A live iterator reads that
+        # op's outputs after yielding it, so the traversal would stop before its
+        # downstream consumers. Freeze the visit order first, and skip ops that
+        # an earlier rewrite in this pass detached.
+        for op in list(topological_iterator(root)):
+            if op is not root and not op.outputs:
+                continue
             matched = match_fn(op)
             if matched is not None:
                 root = action_fn(*matched, root)

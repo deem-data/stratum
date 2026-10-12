@@ -21,7 +21,8 @@ from stratum.optimizer.logical._base import OperandRef, _resolve_args, _resolve_
 from stratum.optimizer.logical._projection_ops import (
     ApplyUDFOp, AssignOp, ColumnProjectionOp, ColumnSelectorOp,
     DatetimeConversionOp, DropOp, GetAttrProjectionOp, MetadataOp, ProjectionOp,
-    StringMethodOp, STR_POLARS_METHODS, polars_datetime_kwargs,
+    StringMethodOp, polars_datetime_kwargs, polars_string_method,
+    polars_str_replace_unsupported,
     resolve_selector_columns)
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, get_column_method_spec)
@@ -270,10 +271,24 @@ class PandasStringMethodOp(StringMethodOp, PhysicalOp):
 
 @physical_impl(of=StringMethodOp, backend="polars")
 class PolarsStringMethodOp(StringMethodOp, PhysicalOp):
+    def on_impl_selected(self, ctx) -> None:
+        # Literal arguments are known now, so an untranslatable call fails the
+        # plan rather than the run. Arguments that are plan values (OperandRefs)
+        # are checked again when the call runs.
+        if self.method == "replace" and not _has_operand_refs(self.args, self.kwargs):
+            reason = polars_str_replace_unsupported(*self.args, **self.kwargs)
+            if reason is not None:
+                # FIXME(#227): bind the pandas call instead of failing the plan.
+                raise NotImplementedError(
+                    f"{self} has no exact polars translation: {reason}.")
+
     def process(self, mode: str, inputs: list):
         _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
-        name = STR_POLARS_METHODS.get(self.method, self.method)
-        return getattr(_obj.str, name)(*_args, **_kwargs)
+        return polars_string_method(_obj, self.method, _args, _kwargs)
+
+
+def _has_operand_refs(args, kwargs) -> bool:
+    return any(isinstance(v, OperandRef) for v in (*args, *kwargs.values()))
 
 
 # --- GetAttrProjectionOp (col.dt.year, ...) -----------------------------------

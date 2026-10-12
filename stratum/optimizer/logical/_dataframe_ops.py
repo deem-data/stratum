@@ -20,7 +20,7 @@ from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, GroupedDataframeOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
     _is_aggregation, _is_value_counts, _extract_grouping, _extract_aggregations,
     make_aggregate_op, make_value_counts_ops)
-from stratum.optimizer.logical._sort_ops import SortOp
+from stratum.optimizer.logical._sort_ops import SortOp, make_sort_op
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, MetadataOp, ProjectionOp, DropOp,
     ApplyUDFOp, AssignOp, DatetimeConversionOp, GetAttrProjectionOp,
@@ -236,6 +236,8 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 new_op = make_value_counts_ops(op)
             elif op.method_name == "reset_index":
                 new_op = make_reset_index_op(op)
+            elif op.method_name == "sort_values":
+                new_op = make_sort_op(op)
             elif op.method_name in ["rename"]:
                 new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs,
                                     outputs=op.outputs)

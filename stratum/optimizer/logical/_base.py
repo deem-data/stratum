@@ -15,11 +15,28 @@ output-kind lattice (:class:`OutputType`) live here too, because both layers
 reference operands and carry an output kind.
 """
 from __future__ import annotations
+import copy
 from enum import Enum, auto
 
 from sklearn.base import BaseEstimator
 from skrub._data_ops._data_ops import DataOp
 from skrub.selectors._base import All
+
+
+def rebuild_dict(original: dict, items) -> dict:
+    """A dict with ``items`` and the same type as ``original``.
+
+    The operand helpers rebuild nested containers to swap operands for values.
+    A dict subclass carries behaviour a plain dict loses (``defaultdict``'s
+    ``__missing__`` turns ``Series.map`` into a function), so keep its type.
+    """
+    if type(original) is dict:
+        return dict(items)
+    rebuilt = copy.copy(original)
+    rebuilt.clear()
+    for key, value in items:  # not update(): Counter.update adds counts
+        rebuilt[key] = value
+    return rebuilt
 
 
 class OutputType(Enum):
@@ -95,7 +112,7 @@ def _resolve_operand(value, inputs):
     if isinstance(value, list):
         return [_resolve_operand(v, inputs) for v in value]
     if isinstance(value, dict):
-        return {k: _resolve_operand(v, inputs) for k, v in value.items()}
+        return rebuild_dict(value, ((k, _resolve_operand(v, inputs)) for k, v in value.items()))
     if isinstance(value, slice):
         return slice(*(_resolve_operand(b, inputs) for b in (value.start, value.stop, value.step)))
     return value
@@ -128,7 +145,7 @@ def remap_operand_refs(value, mapping: dict):
     if isinstance(value, list):
         return [remap_operand_refs(v, mapping) for v in value]
     if isinstance(value, dict):
-        return {k: remap_operand_refs(v, mapping) for k, v in value.items()}
+        return rebuild_dict(value, ((k, remap_operand_refs(v, mapping)) for k, v in value.items()))
     if isinstance(value, slice):
         return slice(*(remap_operand_refs(b, mapping)
                        for b in (value.start, value.stop, value.step)))
@@ -166,7 +183,10 @@ def config_key(value):
     if isinstance(value, (list, tuple)):
         return (type(value).__name__, tuple(config_key(v) for v in value))
     if isinstance(value, dict):
-        return ("__dict__", frozenset((k, config_key(v)) for k, v in value.items()))
+        # The type is part of the key: a defaultdict is not the same argument
+        # as a plain dict with the same items.
+        return ("__dict__", type(value),
+                frozenset((k, config_key(v)) for k, v in value.items()))
     if isinstance(value, (set, frozenset)):
         return ("__set__", frozenset(config_key(v) for v in value))
     try:
@@ -191,7 +211,7 @@ def estimator_key(est: BaseEstimator):
 
 def clone_value(value):
     if isinstance(value, dict):
-        return {k: clone_value(v) for k, v in value.items()}
+        return rebuild_dict(value, ((k, clone_value(v)) for k, v in value.items()))
     elif isinstance(value, tuple):
         return tuple(clone_value(el) for el in value)
     else:

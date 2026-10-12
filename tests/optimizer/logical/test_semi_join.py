@@ -199,6 +199,16 @@ class TestSemiJoinPromotion(unittest.TestCase):
         pd.testing.assert_frame_equal(
             _run(ops), self.df[~self.df["c"].isin(self.other["c"])])
 
+    def test_replacing_a_selection_does_not_skip_downstream_rewrites(self):
+        data, other = st.as_data_op(self.df), st.as_data_op(self.other)
+        first = data[data["c"].isin(other["c"])]
+        second = first[~first["c"].isin(other[other["c"] == "a"]["c"])]
+        ops = self._plan(lambda: second)
+        self.assertEqual(["semi", "anti"], [op.how for op in self._joins(ops)])
+        expected = self.df[self.df["c"].isin(self.other["c"])]
+        expected = expected[~expected["c"].isin(self.other[self.other["c"] == "a"]["c"])]
+        pd.testing.assert_frame_equal(_run(ops), expected)
+
     def test_a_shared_key_column_is_still_promoted(self):
         # The column being filtered is also read by something else, so it stays
         # an operand instead of folding into a Col. It is still a column of the
