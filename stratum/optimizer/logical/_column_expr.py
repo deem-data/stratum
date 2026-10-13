@@ -223,7 +223,12 @@ class OperandLeaf(ColumnExpr):
         yield self.ref
 
     def remap_operand_refs(self, mapping):
-        return OperandLeaf(OperandRef(mapping[self.ref.k]))
+        # A ColumnExpr target substitutes the leaf, e.g. a projected input that a
+        # rewrite turns into a column of the frame (see push_projection_through_map).
+        target = mapping[self.ref.k]
+        if isinstance(target, ColumnExpr):
+            return target
+        return OperandLeaf(OperandRef(target))
 
 
 class BinOpExpr(ColumnExpr):

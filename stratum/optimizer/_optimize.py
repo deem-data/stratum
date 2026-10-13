@@ -81,6 +81,7 @@ class OptConfig():
         algebraic_rewrite_config: AlgebraicRewritesConfig | None = None,
         propagate_schema: bool = True,
         semi_join_rewrite: bool = True,
+        projection_pushup: bool = True,
         selector: ImplementationSelector | None = None,
         pandas_query: bool = False,
     ):
@@ -103,6 +104,7 @@ class OptConfig():
         self.numeric_ops = numeric_ops
         self.algebraic_rewrites = algebraic_rewrites
         self.semi_join_rewrite = semi_join_rewrite
+        self.projection_pushup = projection_pushup
         if algebraic_rewrite_config is None:
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
@@ -216,9 +218,15 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
         _debug_show_graph(root, "algebraic_rewrite")
 
+    # The relational rewrites read schemas (projection pushup does), so propagate
+    # them first. From here on a rewrite keeps them current for the ops it creates.
+    if config.propagate_schema:
+        propagate_output_schema(root)
+
     # Shape rewrites after the expression ones, and after CSE, so the build side
     # a promoted join reads is already shared with whatever else produced it.
-    root = relational_rewrites(root, semi_join=config.semi_join_rewrite)
+    root = relational_rewrites(root, semi_join=config.semi_join_rewrite,
+                               projection_pushup=config.projection_pushup)
     _debug_show_graph(root, "relational_rewrite")
 
     # Last, so every rewrite above sees the plan shape it was written against. A plan
@@ -227,11 +235,11 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
     if config.unroll_choices:
         root = install_candidate_set(root, search)
 
-    # Schemas go last of all, once the plan shape is final: anything above that
-    # creates or replaces an op would otherwise leave the new op without a schema
-    # and the replaced one stale. No rewrite consumes output_schema today.
+    # Once more over the final shape, for the ops created since that do not keep
+    # their own schema (the candidate set). Under validate_dag it also checks that
+    # the relational rewrites left every schema they had current.
     if config.propagate_schema:
-        propagate_output_schema(root)
+        propagate_output_schema(root, check=FLAGS.validate_dag)
 
     _debug_validate_dag(root)  # operand refs after all logical rewrites, before lowering
     return root
@@ -294,11 +302,21 @@ def extract_numeric_operators(root):
     return root
 
 
-def propagate_output_schema(root):
-    """Propagate each op's output schema from its inputs, bottom-up."""
+def propagate_output_schema(root, check: bool = False):
+    """Propagate each op's output schema from its inputs, bottom-up.
+
+    With ``check``, a schema an op already had must match the recomputed one: a
+    rewrite that left it stale would mislead every rewrite that read it. A missing
+    schema is not checked, since unknown is always a safe answer.
+    """
     start = start_time()
     for op in topological_iterator(root):
+        before = op.output_schema
         op.propagate_output_schema()
+        if check and before is not None and before != op.output_schema:
+            raise AssertionError(
+                f"stale output schema on {op!r}: {before} was set, but its inputs "
+                f"give {op.output_schema}")
     log_time("schema_propagation took", start)
 
 

@@ -3,6 +3,11 @@
 The algebraic rewrites simplify *expressions*; these change the plan's operator
 *shape*, replacing one relational operator with another that means the same thing
 but that the cost model and join reordering can reason about.
+
+They run after schema propagation, and each one keeps the schemas current: the
+subgraph a rewrite installs produces what the replaced one did, so only the ops it
+creates need a schema, which the rewrite propagates itself (inputs first). A later
+rewrite in this stage can then read any op's ``output_schema``.
 """
 import operator
 
@@ -12,8 +17,10 @@ from stratum.optimizer.logical._column_expr import (
     AggExpr, BinOpExpr, Col, ColumnMethodExpr, Const, OperandLeaf, UnaryOpExpr)
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._join_ops import JoinOp
+from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._ops import GetItemOp, Op, OperandRef, OutputType
-from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
+from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, DropOp
+from stratum.optimizer.logical import _schema
 from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 
@@ -104,6 +111,7 @@ def _promote_to_filtering_join(op: SelectionOp, how: str, key: str, build: Op,
         producer.add_output(join)
     op.replace_input_of_outputs(join)
     op.detach()
+    join.propagate_output_schema()
     return join if root is op else root
 
 
@@ -192,6 +200,8 @@ def _replace_counted_group_keys(op: IndexAccessOp, selection: SelectionOp,
     for old in (op, selection, sort, agg, projection):
         if old is not None:
             old.detach()
+    for new in (count, filtered, keys):
+        new.propagate_output_schema()
     return keys if root is op else root
 
 
@@ -199,9 +209,131 @@ promote_counted_group_keys = rewrite_pass(_match_counted_group_keys,
                                           _replace_counted_group_keys)
 
 
-def relational_rewrites(root: Op, semi_join: bool = True) -> Op:
+def _kept_columns(projection: Op) -> list[str] | None:
+    """The columns a pure column projection keeps, in order, or ``None``.
+
+    Only projections that keep every row and pick columns by name qualify. A literal
+    ``df[[...]]`` names its columns itself. A ``drop`` needs the schema: the kept
+    columns are whatever its input has besides the dropped ones, and every dropped
+    one must exist there, since dropping a missing column raises.
+    """
+    if len(projection.inputs) != 1:
+        return None
+    if isinstance(projection, ColumnProjectionOp):
+        names = _schema.as_column_list(projection.key)
+        if isinstance(projection.key, str) or names is None or len(set(names)) != len(names):
+            return None
+        return names
+    if isinstance(projection, DropOp) and projection._drops_columns():
+        source = projection.inputs[0].output_schema
+        dropped = _schema.as_column_list(projection._dropped_columns())
+        kwargs = projection.kwargs or {}
+        if (not _schema.is_known(source) or dropped is None
+                or not set(dropped) <= set(source)
+                or not set(kwargs) <= {"columns", "axis"}
+                or projection.args and "columns" in kwargs):
+            return None
+        return [name for name in source if name not in dropped]
+    return None
+
+
+def _column_of(leaf: Op, sources: dict[int, set[str] | None]) -> str | None:
+    """The column name ``leaf`` reads, if it is one column of a frame in ``sources``.
+
+    ``sources`` maps a frame's id to the columns it can be read for, ``None`` for all.
+    """
+    if not (isinstance(leaf, (ColumnProjectionOp, GetItemOp))
+            and isinstance(leaf.key, str) and len(leaf.inputs) == 1
+            and id(leaf.inputs[0]) in sources):
+        return None
+    allowed = sources[id(leaf.inputs[0])]
+    return leaf.key if allowed is None or leaf.key in allowed else None
+
+
+def _match_projection_under_map(op: Op):
+    """Match a map over a column projection whose leaves read the unprojected frame.
+
+    ``df[["a", "b"]].assign(c=df["x"] * 2)`` folds against the projection, so
+    ``df["x"]`` stays an input of the map and is materialised on its own. The map
+    can run on ``df`` itself, where ``x`` is a column, with the projection after it.
+    """
+    if not isinstance(op, AssignMapOp):
+        return None
+    projection = op.inputs[0]
+    kept = _kept_columns(projection)
+    if kept is None:
+        return None
+    source = projection.inputs[0]
+    if source.output_type is not OutputType.FRAME:
+        return None
+    if any(ref.k == 0 for expr in op.entries.values() for ref in expr.iter_operand_refs()):
+        return None  # the projected frame itself is an operand, not just a column source
+    # A column of the projection is the same column of its source.
+    sources = {id(source): None, id(projection): set(kept)}
+    columns = {k: name for k, leaf in enumerate(op.inputs[1:], start=1)
+               if (name := _column_of(leaf, sources)) is not None}
+    if not columns:
+        return None
+    return op, projection, kept, columns
+
+
+def _push_projection_through_map(op: AssignMapOp, projection: Op, kept: list[str],
+                                 columns: dict[int, str], root: Op) -> Op:
+    """Run the map on the projection's source and project its result instead.
+
+    The map evaluates all entries against its input frame before assigning, so a
+    column read through a leaf is the same column read from the source. Projected
+    columns keep their order and entries overwrite in place or append, as pandas
+    ``assign`` does on the projected frame.
+    """
+    source = projection.inputs[0]
+    old_inputs = list(op.inputs)
+    inputs = [source]
+    mapping = {0: 0}
+    for k, leaf in enumerate(old_inputs[1:], start=1):
+        if k in columns:
+            mapping[k] = Col(columns[k])
+        elif any(in_ is leaf for in_ in inputs):
+            mapping[k] = next(i for i, in_ in enumerate(inputs) if in_ is leaf)
+        else:
+            mapping[k] = len(inputs)
+            inputs.append(leaf)
+    op.entries = {name: expr.remap_operand_refs(mapping)
+                  for name, expr in op.entries.items()}
+    for producer in dict.fromkeys(old_inputs):
+        producer.outputs = [out for out in producer.outputs if out is not op]
+    op.inputs = inputs
+    for producer in dict.fromkeys(inputs):
+        producer.add_output(op)
+
+    keep = kept + [name for name in op.entries if name not in kept]
+    pushed = ColumnProjectionOp(key=keep, inputs=[op], outputs=list(op.outputs))
+    pushed.is_X, pushed.is_y = op.is_X, op.is_y
+    op.is_X = op.is_y = False
+    for consumer in dict.fromkeys(op.outputs):
+        while any(in_ is op for in_ in consumer.inputs):
+            consumer.replace_input(op, pushed)
+    op.outputs = [pushed]
+
+    # Every surviving producer has its consumer now, so the dead ones can go.
+    for old in dict.fromkeys(old_inputs):
+        if not old.outputs:
+            old.detach_and_prune()
+    op.propagate_output_schema()
+    pushed.propagate_output_schema()
+    return pushed if root is op else root
+
+
+push_projection_through_map = rewrite_pass(_match_projection_under_map,
+                                           _push_projection_through_map)
+
+
+def relational_rewrites(root: Op, semi_join: bool = True,
+                        projection_pushup: bool = True) -> Op:
     """Run the enabled relational rewrites, one pass each."""
     if semi_join:
         root = promote_isin_to_filtering_join(root)
         root = promote_counted_group_keys(root)
+    if projection_pushup:
+        root = push_projection_through_map(root)
     return root

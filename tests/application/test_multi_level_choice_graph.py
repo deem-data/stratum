@@ -140,9 +140,10 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
             plan_output = io.StringIO()
             with st.config(DEBUG=False, open_graph=False, scheduler=True,
                            rust_backend=False, implementation_selector="greedy",
-                           explain="physical_impl"):
+                           explain="physical_impl", stats=True):
                 with redirect_stdout(plan_output):
                     search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
                 self.assertIsNotNone(search.results_)
                 self.assertGreater(len(search.results_), 0)
+            print(plan_output.getvalue())
             self.assertIn("PolarsReadCSV", plan_output.getvalue())
