@@ -113,7 +113,8 @@ def eliminate_two_op_chain(op1, op2):
     """
     x = op1.inputs[0]
     replace_op_in_outputs(op2, x)
-    op2.detach_and_prune()
+    # When op2 is the root, x is left without a consumer but becomes the new root.
+    op2.detach_and_prune(keep=x)
     return x
 
 

@@ -1,6 +1,7 @@
 import unittest
 import stratum as st
 import numpy as np
+import pandas as pd
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer.logical._ops import ValueOp
@@ -107,6 +108,26 @@ class TestNumericComplexFanout(unittest.TestCase):
         for op in linearized_dag:
             if isinstance(op, NumericOp):
                 self.assertNotIn(op.type, [NumericOpType.LOG, NumericOpType.EXP])
+
+    def test_chain_is_root_keeps_upstream_of_new_root(self):
+        """
+        Scenario:
+          frame -> x = frame[["x"]] -> exp -> log  (log is the root)
+
+        Expected after optimization:
+          frame -> x, and x is the root; pruning the chain must stop at x.
+        """
+        frame = st.as_data_op(pd.DataFrame({"x": [1.0, 2.0]}))
+        x = frame[["x"]]
+        dag = x.skb.apply_func(np.exp).skb.apply_func(np.log)
+
+        linearized_dag, *_ = optimize(dag)
+
+        self.assertEqual(len(linearized_dag), 2)
+        source, root = linearized_dag
+        self.assertEqual(source.outputs, [root])
+        self.assertEqual(root.inputs, [source])
+        self.assertEqual(root.outputs, [])
 
     def test_chain_is_root_with_other_fanout(self):
         """

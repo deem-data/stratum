@@ -403,19 +403,21 @@ class IRNode:
         self.inputs = []
         self.outputs = []
 
-    def detach_and_prune(self) -> None:
+    def detach_and_prune(self, keep: "IRNode | None" = None) -> None:
         """``detach`` this node, then every producer that leaves without a consumer.
 
         A producer nobody consumes is unreachable from the root, but it is still in
         its own producers' outputs, and the topological walk rejects that edge. So the
         dead cone goes with the node. Call it only once every surviving producer has
         its new consumer: one whose last edge is momentarily gone would be pruned too.
+        ``keep`` is the exception, for a producer that survives without a consumer
+        because it becomes the new root.
         """
         producers = list(dict.fromkeys(self.inputs))
         self.detach()
         for in_ in producers:
-            if not in_.outputs:
-                in_.detach_and_prune()
+            if not in_.outputs and in_ is not keep:
+                in_.detach_and_prune(keep)
 
     def clone(self):
         if getattr(self.__class__, "fields", None) is None:
