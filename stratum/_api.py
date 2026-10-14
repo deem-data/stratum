@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from skrub import DataOp
 from skrub._data_ops._evaluation import find_scoring_node
 
+from stratum import _instrumentation as instrumentation
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import SearchConfig, optimize
 from stratum.optimizer.logical._scoring import resolve_declared_scoring, resolve_scoring
@@ -19,7 +20,9 @@ class RunTimings:
     optimization: float
     execution: float
 
+
 #TODO: Rename this file
+@instrumentation.record_run("grid_search")
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, env=None):
     """Perform grid search with cross-validation on a DataOp DAG.
 
@@ -51,43 +54,41 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
                           return_predictions=return_predictions, declared_kwargs=declared)
     # Resolve variables to constants at compile time, so the scheduler runs
     # without an environment.
-    optimize_start = perf_counter()
-    linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search)
-    optimize_end = perf_counter()
-    sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0)
-
     # Without an explicit `cv`, the folds come from the splitter the plan declares with
     # `mark_as_X(cv=...)`, which the plan computes itself (see BuildSplitterOp).
-    preds = sched.grid_search(cv)
-    execution_end = perf_counter()
-
-    stats_printer(sched, RunTimings(
-        total=execution_end - optimize_start,
-        optimization=optimize_end - optimize_start,
-        execution=execution_end - optimize_end,
-    ))
+    sched, preds = _execute(dag, env, t0, lambda sched: sched.grid_search(cv), search=search)
 
     return (sched,preds) if return_predictions else sched
 
 
+@instrumentation.record_run("evaluate")
 def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
     """Evaluate a DataOp DAG with train/test split."""
     t0 = perf_counter()
     # Resolve variables to constants at compile time, so the scheduler runs
     # without an environment.
     env = get_data(dag)
+    _, out = _execute(dag, env, t0, lambda sched: sched.evaluate(seed, test_size))
+    return out
+
+
+def _execute(dag, env, t0, execute, search=None):
+    instrumentation.optimization_started()
     optimize_start = perf_counter()
-    linearized_dag, split_pos, flagged_ops = optimize(dag, env=env)
+    linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search)
     optimize_end = perf_counter()
     sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0)
-    out = sched.evaluate(seed, test_size)
+    instrumentation.execution_started(sched)
+    out = execute(sched)
     execution_end = perf_counter()
-    stats_printer(sched, RunTimings(
+    run = RunTimings(
         total=execution_end - optimize_start,
         optimization=optimize_end - optimize_start,
         execution=execution_end - optimize_end,
-    ))
-    return out
+    )
+    instrumentation.record_timings(run)
+    stats_printer(sched, run)
+    return sched, out
 
 
 def stats_printer(sched: SequentialScheduler, run: RunTimings):

@@ -20,6 +20,7 @@ class Scheduler:
         self.recompute_ops: list[Op] = []
         self.pos_split_op: int | None = None
         self.timings = [] if print_heavy_hitters else None
+        self.observer = None  # Inspection-only hooks, see stratum._instrumentation.
         self.results_ = None
         self.cv_id = -1
         self.pool = BufferPool()
@@ -159,6 +160,8 @@ class Scheduler:
             return op
         logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
 
+        obs = self.observer
+        token = t1 = t2 = None
         try:
             t0 = perf_counter()
 
@@ -166,6 +169,8 @@ class Scheduler:
             inputs = [self.pool.pin(in_op) for in_op in op.inputs]
 
             # 2. process operator
+            if obs is not None:
+                token = obs.before(op)
             t1 = perf_counter()
             result = op.process(mode=self.mode, inputs=inputs)
             t2 = perf_counter()
@@ -190,8 +195,12 @@ class Scheduler:
             if self.timings is not None:
                 duration = t2 - t1
                 self.timings.append((str(op), process_duration))
+            if obs is not None:
+                obs.after(op, self.mode, self.cv_id, token, t1, t2, buffer_overhead)
 
         except Exception as e:
+            if obs is not None:
+                obs.failed(op, self.mode, self.cv_id, token, t0, t1, t2)
             raise RuntimeError(f"[{self.mode}] Error processing '{op}': {e}")
 
         return op

@@ -2,7 +2,7 @@ from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from typing import Any, List
 
-from ._config import set_config, get_config, config
+from ._config import set_config, get_config, config, dev_config
 
 def _first_version(*names):
     for n in names:
@@ -32,6 +32,7 @@ __all__ = [
     "StringEncoder",
     "OneHotEncoder",
     "config",
+    "dev_config",
     "__version__",
     "__skrub_version__",
     "versions",

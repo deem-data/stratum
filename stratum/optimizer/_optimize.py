@@ -29,6 +29,7 @@ from .physical import _generic_execs  # noqa: F401
 from stratum.frontend._skrub_graph import build_graph
 import logging
 from stratum._config import FLAGS
+from stratum._instrumentation._diagnostics import capture_plan, diagnostics_enabled
 from stratum.utils._utils import start_time, log_time
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,9 @@ class OptConfig():
         self.pandas_query = pandas_query
 
 def _debug_show_graph(root: Op, name: str):
+    if diagnostics_enabled():
+        capture_plan("selected_physical" if name == "physical" else name,
+                     topological_iterator(root))
     if FLAGS.debug_graph:
         show_graph(root, name)
 
@@ -127,6 +131,8 @@ def _debug_explain_dag(level: str, root: Op):
 
     These levels have no split/CV structure yet, so the plan is a flat
     topological listing (``split_pos=None``)."""
+    if diagnostics_enabled():
+        capture_plan(level, topological_iterator(root))
     if level in FLAGS.explain:
         explain_linear_plan(level, list(topological_iterator(root)), split_pos=None)
 
@@ -267,6 +273,8 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
     plan_input_removals(linearized_dag, pinned_ops)
     mark_fit_dead_ops(linearized_dag, split_pos, flagged_ops)
 
+    if diagnostics_enabled():
+        capture_plan("physical_impl", linearized_dag, split_pos, flagged_ops)
     _debug_explain_linear_plan("physical_impl", linearized_dag, split_pos)
     return linearized_dag, split_pos, flagged_ops
 

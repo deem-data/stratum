@@ -60,6 +60,9 @@ cu126 = [
 benchmark = [
     "psutil>=7.2"
 ]
+hardware = [
+    "psutil>=7.2"
+]
 dev = [
     "ipykernel>=7.3.0",
 ]
@@ -125,6 +128,7 @@ omit = [
     "**/tests/**",
     "*/__pycache__/*",
     "*/_rust_backend_native.*",
+    "*/stratum/_instrumentation/*",  # inspection-only, see codecov.yml
 ]
 
 [tool.coverage.report]
