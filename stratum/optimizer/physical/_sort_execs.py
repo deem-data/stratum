@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import polars as pl
 
-from stratum.optimizer.logical._base import OutputType
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
@@ -34,11 +33,8 @@ class PandasSortOp(SortOp, PhysicalOp):
 
 @physical_impl(of=SortOp, backend="polars")
 class PolarsSortOp(SortOp, PhysicalOp):
-    @classmethod
-    def supports(cls, op: SortOp, ctx) -> bool:
-        # A pandas Series fallback (notably value_counts) keeps pandas's index.
-        return not (op.output_type is OutputType.SERIES and op.inputs
-                    and getattr(op.inputs[0], "_selected_backend", None) == "pandas")
+    # A pandas Series (notably value_counts' pandas fallback) keeps its index on
+    # pandas: its frame library is pandas, which this impl does not accept (#226).
 
     def process(self, mode: str, inputs: list):
         obj = inputs[0]

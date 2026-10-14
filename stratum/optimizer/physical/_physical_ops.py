@@ -76,6 +76,30 @@ class PhysicalOp(IRNode):
         # TODO: placeholder until the memory model lands.
         return 0
 
+    # --- Frame representation (#226) ------------------------------------------
+
+    #: The frame library this impl reads and writes. ``None``: backend-agnostic
+    #: (estimators, numpy, Rust kernels) -- it accepts either library and its
+    #: output keeps the library of its input. ``@physical_impl`` sets it from the
+    #: backend unless the class defines it. See ``_representation``.
+    frame_lib = None
+
+    @classmethod
+    def accepts_input_lib(cls, op: IRNode, index: int, lib) -> bool:
+        """Whether this impl of ``op`` reads its ``index``-th input as ``lib``.
+
+        Override only when ``process`` really handles another library (and say
+        how), never to admit an input the impl would misread.
+        """
+        return cls.frame_lib is None or lib == cls.frame_lib
+
+    @classmethod
+    def output_frame_lib(cls, op: IRNode, input_libs: list):
+        """The frame library this impl of ``op`` produces."""
+        if cls.frame_lib is not None:
+            return cls.frame_lib
+        return next((lib for lib in input_libs if lib is not None), None)
+
     # --- Plan-time binding ----------------------------------------------------
 
     def on_impl_selected(self, ctx) -> None:

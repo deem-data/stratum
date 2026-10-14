@@ -19,6 +19,7 @@ from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._base import OutputType
 from stratum.optimizer.logical._column_expr import AllCols, Col, EvalContext
 from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._representation import refuse_unsupported_exprs
 from stratum.optimizer.physical._registry import physical_impl
 
 
@@ -32,11 +33,6 @@ class AggregateExec(AggregateOp, PhysicalOp):
 @physical_impl(of=AggregateOp, backend="pandas")
 class PandasAggregateOp(AggregateExec):
     def process(self, mode: str, inputs: list):
-        # A Series aggregate has no Polars implementation yet. The greedy
-        # selector may therefore bind this pandas fallback after a Polars
-        # projection; normalise that one input at the backend boundary.
-        if isinstance(inputs[0], pl.Series):
-            inputs = [inputs[0].to_pandas(), *inputs[1:]]
         ctx = self._ctx(inputs, mode)
         if not self.grouped:
             return self._reduce_whole(ctx)
@@ -124,7 +120,8 @@ class PolarsAggregateOp(AggregateExec):
         # Polars has no pandas index labels or unobserved categorical groups.
         if op.options.get("observed") is False or op.options.get("level") is not None:
             return False
-        return all(agg.supports_polars() for _, agg in op.aggregations)
+        return refuse_unsupported_exprs(
+            op, [*(agg for _, agg in op.aggregations), *op.grouping])
 
     def process(self, mode: str, inputs: list):
         # pandas treats floating NaN as missing for grouping and reductions.

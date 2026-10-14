@@ -3,6 +3,7 @@ import operator
 from enum import Enum
 
 import numpy as np
+import polars as pl
 
 from stratum.optimizer.logical._base import _resolve_args, _resolve_kwargs
 from stratum.optimizer.logical._ops import BinOp, CallOp, Op, OperandRef
@@ -49,6 +50,9 @@ _NUMPY_UNARY_MAP = {
     np.expm1: NumericOpType.EXPM1,
     np.sum: NumericOpType.SUM,
 }
+
+_OPERATOR_OF = {t: op for op, t in _ARITH_OP_MAP.items()}
+_POLARS_TYPES = (pl.Series, pl.DataFrame)
 
 _UNARY_NUMPY_FUNCS = frozenset(_NUMPY_UNARY_MAP.keys())
 _BINARY_TYPES = frozenset(_ARITH_OP_MAP.values())
@@ -114,6 +118,12 @@ class NumericOp(Op):
             primary = inputs[0]
             operand = inputs[self.opt_operand.k] if isinstance(self.opt_operand, OperandRef) else self.constant
             left, right = (operand, primary) if self.reversed else (primary, operand)
+            if isinstance(left, _POLARS_TYPES) or isinstance(right, _POLARS_TYPES):
+                # numpy ufuncs on a polars Series accept numbers only, while the
+                # recorded operator is also string concatenation and date
+                # arithmetic. Polars' own operator covers all three.
+                from stratum.optimizer.logical._ops import apply_binary
+                return apply_binary(_OPERATOR_OF[self.type], left, right)
             if self.type == NumericOpType.ADD:
                 return np.add(left, right)
             elif self.type == NumericOpType.SUBTRACT:

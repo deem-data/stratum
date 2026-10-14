@@ -6,6 +6,7 @@ from stratum.optimizer.logical._base import _resolve_args, _resolve_kwargs
 from stratum.optimizer.logical._ops import CallOp, MethodCallOp, ValueOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._representation import FrameLib
 
 
 class ValueExec(ValueOp, PhysicalOp):
@@ -16,6 +17,9 @@ class ValueExec(ValueOp, PhysicalOp):
 
 
 class MethodCallExec(MethodCallOp, PhysicalOp):
+    #: Runs the recorded pandas method verbatim (#226).
+    frame_lib = FrameLib.PANDAS
+
     def process(self, mode: str, inputs: list):
         obj = inputs[0]
         args = _resolve_args(self.args, inputs)
@@ -26,6 +30,9 @@ class MethodCallExec(MethodCallOp, PhysicalOp):
 
 
 class CallExec(CallOp, PhysicalOp):
+    #: Runs the recorded call verbatim; its frame operands are pandas (#226).
+    frame_lib = FrameLib.PANDAS
+
     def process(self, mode: str, inputs: list):
         args = _resolve_args(self.args, inputs)
         kwargs = _resolve_kwargs(self.kwargs, inputs)

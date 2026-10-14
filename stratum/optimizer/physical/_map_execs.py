@@ -15,6 +15,7 @@ import polars as pl
 
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._representation import refuse_unsupported_exprs
 from stratum.optimizer.physical._registry import physical_impl
 
 logger = logging.getLogger(__name__)
@@ -30,16 +31,16 @@ class PandasAssignMapOp(AssignMapOp, PhysicalOp):
 
 @physical_impl(of=AssignMapOp, backend="polars")
 class PolarsAssignMapOp(AssignMapOp, PhysicalOp):
+    @classmethod
+    def supports(cls, op: AssignMapOp, ctx) -> bool:
+        return refuse_unsupported_exprs(op, op.entries.values())
+
     def process(self, mode: str, inputs: list):
         ctx = self.make_context(mode, inputs)
         columns = {}
         for name, expr in self.entries.items():
             result = expr.to_polars(ctx)
-            if isinstance(result, (pd.Series, pd.DataFrame)):
-                # An OperandLeaf can feed pandas data into a polars plan.
-                logger.warning(f"Converting pandas object to polars object for column {name}")
-                result = pl.from_pandas(result)
-            elif isinstance(result, list):
+            if isinstance(result, list):
                 # Polars treats a list passed through the keyword API as one
                 # list-valued scalar; assign semantics require a column.
                 result = pl.Series(result)

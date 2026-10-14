@@ -462,8 +462,27 @@ def estimator_parallel_config(n_jobs: int = None):
         return DummyConfigManager()
 
 def estm_supports_polars(estimator):
-    is_sklearn = estimator.__class__.__module__.startswith("sklearn.") or estimator.__class__.__module__.startswith("skrub.")
-    is_stratum = estimator.__class__.__module__.startswith("stratum.") and estimator.__class__.__name__.startswith("Rusty")
+    """Whether ``estimator`` -- and every estimator it wraps -- accepts polars input.
+
+    A meta-estimator (a pipeline, a voting ensemble) hands its input to the
+    estimators it wraps, so it supports polars only if they all do: sklearn
+    tries to set ``feature_names_in_`` on a wrapped LightGBM model, which is a
+    read-only property there.
+    """
+    if not _supports_polars_itself(estimator):
+        return False
+    try:
+        params = estimator.get_params(deep=True)
+    except Exception:  # noqa: BLE001 - not an sklearn-style estimator
+        return True
+    return all(_supports_polars_itself(v) for v in params.values()
+               if isinstance(v, BaseEstimator))
+
+
+def _supports_polars_itself(estimator):
+    module = estimator.__class__.__module__
+    is_sklearn = module.startswith("sklearn.") or module.startswith("skrub.")
+    is_stratum = module.startswith("stratum.") and estimator.__class__.__name__.startswith("Rusty")
     # other_frameworks = estimator.__class__.__module__.startswith("xgboost.")
     return is_sklearn or is_stratum #or other_frameworks
 
@@ -476,9 +495,11 @@ def check_estm_inputs(estimator, mode, x, y):
     if input_is_polars and not estm_supports_polars(estimator):
         converted = True
         logger.debug(f"Predictor {estimator.__class__.__name__} does not support Polars DataFrame. Converting to Pandas DataFrame.")
-        x = x.to_pandas()
+        from stratum.optimizer.physical._conversion import to_pandas
+        x = to_pandas(x)
         if y is not None and mode == "fit_transform":
-            y = y.to_pandas()
+            # y may already be pandas: the plan converts edges explicitly now.
+            y = to_pandas(y)
     return converted, x, y
 
 def process_estimator_task(task_data):

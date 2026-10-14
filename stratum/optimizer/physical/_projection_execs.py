@@ -22,7 +22,7 @@ from stratum.optimizer.logical._projection_ops import (
     ApplyUDFOp, AssignOp, ColumnProjectionOp, ColumnSelectorOp,
     DatetimeConversionOp, DropOp, GetAttrProjectionOp, MetadataOp, ProjectionOp,
     StringMethodOp, polars_datetime_kwargs, polars_string_method,
-    polars_str_replace_unsupported,
+    polars_str_method_unsupported,
     resolve_selector_columns)
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, get_column_method_spec)
@@ -111,13 +111,25 @@ class PandasDropOp(DropOp, PhysicalOp):
 
 @physical_impl(of=DropOp, backend="polars")
 class PolarsDropOp(DropOp, PhysicalOp):
+    @classmethod
+    def supports(cls, op: DropOp, ctx) -> bool:
+        # Dropping by index label (rows, or a Series' entries) has no polars
+        # counterpart; only an explicit column drop translates.
+        if op._drops_columns() is not True:
+            op._unsupported_reason = "drops by index label"
+            return False
+        unsupported = set(op.kwargs or {}) - {"columns", "labels", "axis", "errors"}
+        if unsupported:
+            op._unsupported_reason = f"drop options {sorted(unsupported)}"
+            return False
+        return True
+
     def process(self, mode: str, inputs: list):
         _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
-        if "columns" in _kwargs:
-            _args.append(_kwargs["columns"])
-        if "ignore_errors" in _kwargs:
-            _args.append(_kwargs["ignore_errors"] == "raise")
-        return _obj.drop(*_args)
+        columns = _kwargs.get("columns", _kwargs.get("labels", _args[0] if _args else []))
+        columns = [columns] if isinstance(columns, str) else list(columns)
+        # pandas' errors="ignore" skips labels that are not there.
+        return _obj.drop(columns, strict=_kwargs.get("errors", "raise") == "raise")
 
 
 # --- ColumnSelectorOp (skb.select) --------------------------------------------
@@ -219,6 +231,7 @@ class PolarsAssignOp(AssignOp, PhysicalOp):
             if isinstance(v, OperandRef):
                 raise NotImplementedError("Is not yet suppoerted, please report this issue")
             elif isinstance(v, pd.Series) or isinstance(v, pd.DataFrame):
+                # A literal pandas value recorded in the call, not a plan edge.
                 logger.warning(f"Converting pandas object to polars object for column {k}")
                 checked_kwargs[k] = pl.from_pandas(v)
             elif isinstance(v, list):
@@ -271,16 +284,21 @@ class PandasStringMethodOp(StringMethodOp, PhysicalOp):
 
 @physical_impl(of=StringMethodOp, backend="polars")
 class PolarsStringMethodOp(StringMethodOp, PhysicalOp):
-    def on_impl_selected(self, ctx) -> None:
-        # Literal arguments are known now, so an untranslatable call fails the
-        # plan rather than the run. Arguments that are plan values (OperandRefs)
-        # are checked again when the call runs.
-        if self.method == "replace" and not _has_operand_refs(self.args, self.kwargs):
-            reason = polars_str_replace_unsupported(*self.args, **self.kwargs)
-            if reason is not None:
-                # FIXME(#227): bind the pandas call instead of failing the plan.
-                raise NotImplementedError(
-                    f"{self} has no exact polars translation: {reason}.")
+    @classmethod
+    def supports(cls, op: StringMethodOp, ctx) -> bool:
+        # An untranslatable call binds the pandas impl. With plan-valued
+        # arguments only the method can be checked now; replace's arguments
+        # are then checked when the call runs.
+        if not _has_operand_refs(op.args, op.kwargs):
+            reason = polars_str_method_unsupported(op.method, op.args, op.kwargs)
+        elif op.method != "replace":
+            reason = polars_str_method_unsupported(op.method)
+        else:
+            reason = None
+        if reason is not None:
+            op._unsupported_reason = f"str.{op.method}: {reason}"
+            return False
+        return True
 
     def process(self, mode: str, inputs: list):
         _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)

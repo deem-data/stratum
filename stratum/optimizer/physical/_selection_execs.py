@@ -18,6 +18,7 @@ from stratum.optimizer.logical._column_expr import EvalContext
 from stratum.optimizer.logical._selection_ops import (
     SelectionKind, SelectionOp, _SELECTION_PANDAS_METHOD, _SELECTION_POLARS_METHOD)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._representation import refuse_unsupported_exprs
 from stratum.optimizer.physical._registry import physical_impl
 
 
@@ -89,9 +90,11 @@ class PandasIndexSelectionOp(SelectionOp, PhysicalOp):
 class PolarsSelectionOp(SelectionOp, PhysicalOp):
     @classmethod
     def supports(cls, op: SelectionOp, ctx) -> bool:
-        # Keep a pandas Series's labelled values on pandas through filtering.
-        return not (op.output_type is OutputType.SERIES and op.inputs
-                    and getattr(op.inputs[0], "_selected_backend", None) == "pandas")
+        # A pandas Series's labelled values stay on pandas: its frame library is
+        # pandas, which this impl does not accept (#226).
+        if op.kind is SelectionKind.MASK and op.predicate is not None:
+            return refuse_unsupported_exprs(op, [op.predicate])
+        return True
 
     def process(self, mode: str, inputs: list):
         _obj = inputs[0]

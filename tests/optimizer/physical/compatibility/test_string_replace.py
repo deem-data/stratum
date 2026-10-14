@@ -11,6 +11,7 @@ from stratum._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._projection_ops import polars_string_method
+from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
 from stratum.optimizer.physical._projection_execs import PolarsStringMethodOp
 from stratum.optimizer.physical._selection_execs import PolarsSelectionOp
@@ -80,20 +81,24 @@ def test_translated_replace_matches_pandas(path, args, kwargs):
 
 @pytest.mark.parametrize("path", ["standalone", "assign", "selection"])
 @pytest.mark.parametrize("args,kwargs", REFUSED)
-def test_untranslatable_replace_is_refused(path, args, kwargs):
+def test_untranslatable_replace_falls_back_to_pandas(path, args, kwargs):
+    # Polars refuses the call, so it runs as the recorded pandas call behind an
+    # explicit conversion, and the result is pandas'.
     plan, _ = _plan(path, args, kwargs)
+    replaced = FRAME["s"].str.replace(*args, **kwargs)
+    expected = {"standalone": replaced,
+                "assign": FRAME.assign(replaced=replaced),
+                "selection": FRAME[replaced == "xxx"]}[path].reset_index(drop=True)
     with stratum.config(scheduler=True, implementation_selector="greedy"):
-        with pytest.raises((NotImplementedError, RuntimeError),
-                           match="no exact polars translation"):
-            evaluate(plan)
-
-
-@pytest.mark.parametrize("args,kwargs", REFUSED)
-def test_untranslatable_standalone_replace_fails_at_plan_time(args, kwargs):
-    plan, _ = _plan("standalone", args, kwargs)
-    with stratum.config(scheduler=True, implementation_selector="greedy"):
-        with pytest.raises(NotImplementedError, match="no exact polars translation"):
-            optimize(plan, env=get_data(plan))
+        ops, *_ = optimize(plan, env=get_data(plan))
+        assert any(isinstance(op, ConversionOp) for op in ops)
+        result = evaluate(plan)
+    result = result.to_pandas() if hasattr(result, "to_pandas") else result
+    result = result.reset_index(drop=True)
+    if path == "standalone":
+        pd.testing.assert_series_equal(result, expected, check_dtype=False)
+    else:
+        pd.testing.assert_frame_equal(result, expected, check_dtype=False)
 
 
 @pytest.mark.parametrize("args,kwargs", TRANSLATED + REFUSED)

@@ -289,11 +289,14 @@ class TestDropOpPolars(PolarsTestCase):
         result = run_op(op, pl.DataFrame({"a": [1], "b": [2], "c": [3]}))
         self.assertNotIn("b", result.columns)
 
-    def test_ignore_errors_kwarg_branch(self):
-        # NOTE: current code path appends a bool to polars' positional args, which
-        # polars rejects. Test pins this (buggy) behaviour for coverage.
-        op = DropOp(args=(), kwargs={"columns": ["a"], "ignore_errors": "raise"})
-        with self.assertRaises(TypeError):
+    def test_errors_ignore_skips_missing_columns(self):
+        op = DropOp(args=(), kwargs={"columns": ["a", "missing"], "errors": "ignore"})
+        result = run_op(op, pl.DataFrame({"a": [1], "b": [2]}))
+        self.assertEqual(["b"], result.columns)
+
+    def test_a_missing_column_raises_by_default(self):
+        op = DropOp(args=(), kwargs={"columns": ["missing"]})
+        with self.assertRaises(Exception):
             run_op(op, pl.DataFrame({"a": [1], "b": [2]}))
 
 

@@ -28,7 +28,8 @@ from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, get_column_method_spec, polars_dtype)
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, DatetimeConversionOp, GetAttrProjectionOp, StringMethodOp,
-    polars_datetime_kwargs, polars_string_method)
+    STR_POLARS_METHODS, polars_datetime_kwargs, polars_str_method_unsupported,
+    polars_string_method)
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
 # corresponding map is not foldable into a column expression.
@@ -116,6 +117,43 @@ class ColumnExpr:
         """
         return False
 
+    def polars_unsupported(self) -> str | None:
+        """Why ``to_polars`` cannot evaluate this subtree exactly, or ``None``.
+
+        Checked at plan time by the polars impls' ``supports`` (#226), so an
+        expression the polars compiler cannot express binds the pandas impl
+        instead of failing -- or silently differing -- during execution. The
+        first offending node is named.
+        """
+        reason = self._polars_unsupported_here()
+        if reason is not None:
+            return f"{self!r}: {reason}"
+        for child in self._child_exprs():
+            reason = child.polars_unsupported()
+            if reason is not None:
+                return reason
+        return None
+
+    def _polars_unsupported_here(self) -> str | None:
+        """This node's own polars restriction; children are checked separately."""
+        return None
+
+    def _child_exprs(self):
+        for cls in type(self).__mro__:
+            for name in getattr(cls, "__slots__", ()):
+                yield from _nested_exprs(getattr(self, name, None))
+
+
+def _nested_exprs(value):
+    if isinstance(value, ColumnExpr):
+        yield value
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            yield from _nested_exprs(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _nested_exprs(item)
+
 
 class Col(ColumnExpr):
     """Reference to a source-frame column."""
@@ -186,6 +224,14 @@ class Const(ColumnExpr):
 
     def to_polars(self, ctx):
         return pl.lit(self.value)
+
+    def _polars_unsupported_here(self):
+        try:
+            pl.lit(self.value)
+        except Exception as exc:  # noqa: BLE001 - any refusal means no literal
+            first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            return f"no polars literal for {type(self.value).__name__} ({first_line})"
+        return None
 
     def to_pandas_query(self, params):
         # Bind the literal as a real object (referenced as @p<i>) rather than
@@ -341,6 +387,9 @@ class StrExpr(ColumnExpr):
         obj = self.operand.to_polars(ctx)
         return polars_string_method(obj, self.method, self.args, self.kwargs)
 
+    def _polars_unsupported_here(self):
+        return polars_str_method_unsupported(self.method, self.args, self.kwargs)
+
     def iter_operand_refs(self):
         yield from self.operand.iter_operand_refs()
 
@@ -380,6 +429,12 @@ class DtExpr(ColumnExpr):
             return obj.dt.month_end() == obj
         name = GetAttrProjectionOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
         return getattr(obj.dt, name)()
+
+    def _polars_unsupported_here(self):
+        name = GetAttrProjectionOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
+        if self.attr != "is_month_end" and not hasattr(pl.col("_").dt, name):
+            return f"polars has no .dt.{name}"
+        return None
 
     def iter_operand_refs(self):
         yield from self.operand.iter_operand_refs()
@@ -423,6 +478,11 @@ class DatetimeExpr(ColumnExpr):
         # TODO: Support already-datetime and numeric operands natively; the
         # Polars string namespace only accepts string input.
         return obj.str.to_datetime(**translated)
+
+    def _polars_unsupported_here(self):
+        if polars_datetime_kwargs(self.args, self.kwargs) is None:
+            return "to_datetime options without a polars equivalent"
+        return None
 
     def iter_operand_refs(self):
         yield from self.operand.iter_operand_refs()
@@ -545,6 +605,9 @@ class AggExpr(ColumnExpr):
             # pandas 3.0 has no Series.first/last; they only exist on a groupby.
             return obj.iloc[0 if self.func == "first" else -1]
         return getattr(obj, self.func)(**params)
+
+    def _polars_unsupported_here(self):
+        return None if self.supports_polars() else f"no polars lowering for {self.func!r}"
 
     def supports_polars(self):
         # arg_min/arg_max return positions within a group, not index labels.

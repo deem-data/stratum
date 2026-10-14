@@ -171,6 +171,9 @@ def physical_impl(of: type[IRNode], backend: BackendName,
     ``backend`` until their backend grows its own schema.
     """
     def deco(cls):
+        if "frame_lib" not in vars(cls):
+            from stratum.optimizer.physical._representation import BACKEND_FRAME_LIB
+            cls.frame_lib = BACKEND_FRAME_LIB.get(backend)
         _DECORATED_IMPLS.append(PhysicalImpl(
             op_type=of,
             backend_name=backend,

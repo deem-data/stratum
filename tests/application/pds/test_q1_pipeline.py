@@ -23,6 +23,7 @@ from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._ops import ValueOp
 from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._selection_execs import PolarsSelectionOp
 from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
 from stratum.frontend._skrub_graph import get_data
@@ -186,7 +187,7 @@ def test_q1_plan_folds_filter_and_map(polars):
     Both derived columns are pure column arithmetic, so neither needs an
     ``OperandLeaf`` and the map takes only the filtered frame.
     """
-    ops = _plan(build_q1(make_lineitem()))
+    ops = _plan(build_q1_prefix(make_lineitem()))
     sel = _one(ops, SelectionOp)
     amo = _one(ops, AssignMapOp)
 
@@ -216,13 +217,29 @@ def test_q1_filter_inlines_the_date_constant(polars):
     A ``date`` is a scalar, so the predicate absorbs it as a ``Const`` and the frame
     is the selection's only input.
     """
-    ops = _plan(build_q1(make_lineitem()))
+    ops = _plan(build_q1_prefix(make_lineitem()))
     sel = _one(ops, SelectionOp)
 
     assert BinOpExpr(operator.le,
                      Col("l_shipdate"), Const(SHIPDATE_CUTOFF)) == sel.predicate
     assert len(sel.inputs) == 1, "the date threshold should not be a graph input"
     assert [] == [o for o in ops if isinstance(o, ValueOp)]
+
+
+def test_q1_runs_under_greedy_behind_a_conversion():
+    """The NamedAgg groupby is not fused, so it stays the recorded pandas call.
+    It reads the filtered frame, whose pandas index labels a conversion from
+    polars could not restore, so the filter runs on pandas too and the plan
+    converts the source instead (#227)."""
+    df = make_lineitem()
+    with st.config(implementation_selector="greedy"):
+        ops = _plan(build_q1(df))
+        result = st._api.evaluate(build_q1(df))
+    conversions = [op for op in ops if isinstance(op, ConversionOp)]
+    assert len(conversions) == 1 and conversions[0].inputs[0] is ops[0]
+    pd.testing.assert_frame_equal(q1_reference(df).reset_index(drop=True),
+                                  pd.DataFrame(result).reset_index(drop=True),
+                                  check_dtype=False)
 
 
 def test_q1_filter_binds_query_impl_under_flag():

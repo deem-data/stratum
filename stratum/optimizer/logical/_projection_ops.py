@@ -88,6 +88,16 @@ def polars_str_replace_unsupported(pat, repl=None, n=-1, case=None, flags=0,
     return None
 
 
+def polars_str_method_unsupported(method: str, args=(), kwargs=None) -> str | None:
+    """Why a pandas ``.str.<method>`` call has no exact polars translation, or None."""
+    if method == "replace":
+        return polars_str_replace_unsupported(*args, **(kwargs or {}))
+    name = STR_POLARS_METHODS.get(method, method)
+    if not hasattr(pl.col("_").str, name):
+        return f"polars has no .str.{name}"
+    return None
+
+
 def _polars_str_replace(obj, pat, repl=None, n=-1, case=None, flags=0, regex=False):
     reason = polars_str_replace_unsupported(pat, repl, n, case, flags, regex)
     if reason is not None:
