@@ -92,7 +92,7 @@ class OptConfig():
         ``FlagBasedSelector(backend="polars")``, which pins a plan to one
         dataframe backend so the polars impls can be exercised directly.
 
-        ``pandas_query`` lets ``PandasQuerySelectionOp`` bid for a MASK selection
+        ``pandas_query`` lets ``PandasQuerySelectionOp`` bid for a mask selection
         whose predicate compiles to a query string. It lives here, on the
         optimizer's own config, because it is a technical impl choice between two
         pandas selection kernels rather than anything a user should reason about:
@@ -242,6 +242,7 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
         propagate_output_schema(root, check=FLAGS.validate_dag)
 
     _debug_validate_dag(root)  # operand refs after all logical rewrites, before lowering
+    _debug_show_graph(root, "final_logical_plan")
     return root
 
 
@@ -258,7 +259,7 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
         selector = get_implementation_selector(ctx.implementation_selector)
     root = select_implementations(root, ctx, registry=registry, selector=selector)
     _debug_validate_dag(root)
-    _debug_show_graph(root, "physical")
+    _debug_show_graph(root, "physical_impl")
     # similarly we can do the things like parallelization planning here
 
     # Linearize and mark last used intermediates for removal

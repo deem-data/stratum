@@ -11,9 +11,10 @@ from stratum.optimizer.logical._aggregation_ops import (
     _is_value_counts, make_aggregate_op, make_value_counts_ops)
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, BinOpExpr, Col, DtExpr, OperandLeaf)
-from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, MetadataOp
+from stratum.optimizer.logical._metadata_ops import MetadataOp
+from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
-from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
+from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._source_ops import DataSourceOp
 from stratum.optimizer.logical._ops import MethodCallOp, Op, OperandRef, OutputType
@@ -790,8 +791,7 @@ class TestValueCountsPipeline(unittest.TestCase):
         # counts, a mask on a *series*, which used to be refused, and one over
         # the rows of the frame.
         unpromoted, _ = self._plan(semi_join_rewrite=False)
-        masks = [o for o in unpromoted if isinstance(o, SelectionOp)
-                 and o.kind is SelectionKind.MASK]
+        masks = [o for o in unpromoted if isinstance(o, MaskSelectionOp)]
         self.assertEqual(2, len(masks))
         self.assertEqual({OutputType.SERIES, OutputType.FRAME},
                          {m.output_type for m in masks})

@@ -382,12 +382,14 @@ def _plan_selection(ops, ctx, registry, selector,
 def _requires_label_alignment(op: IRNode, index_memo: dict) -> bool:
     """Whether polars' positional pairing differs from pandas' label alignment."""
     from stratum.optimizer.logical._dataframe_ops import ConcatOp
-    from stratum.optimizer.logical._join_ops import JoinOp
+    from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
     from stratum.optimizer.logical._ops import BaseEstimatorOp
 
     if isinstance(op, JoinOp):
         # Index joins key on labels.
         return op.left_index or op.right_index
+    if isinstance(op, FilteringJoinOp):
+        return False  # matches key values, never labels
     if isinstance(op, BaseEstimatorOp):
         return False  # positional on both backends
     if isinstance(op, ConcatOp) and op.axis in (0, "index", "rows"):

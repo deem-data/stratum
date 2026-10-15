@@ -16,12 +16,12 @@ from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import (
     AggExpr, BinOpExpr, Col, ColumnMethodExpr, Const, OperandLeaf, UnaryOpExpr)
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
-from stratum.optimizer.logical._join_ops import JoinOp
+from stratum.optimizer.logical._join_ops import FilteringJoinOp
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._ops import GetItemOp, Op, OperandRef, OutputType
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, DropOp
 from stratum.optimizer.logical import _schema
-from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
+from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 
 
@@ -32,16 +32,16 @@ def _is_isin(expr) -> bool:
 
 
 def _membership_predicate(predicate):
-    """``("semi" | "anti", (child, values))`` for a membership test, else ``None``."""
-    how = "semi"
+    """``(anti, (child, values))`` for a membership test, else ``None``."""
+    anti = False
     if isinstance(predicate, UnaryOpExpr) and predicate.op is operator.invert:
-        how, predicate = "anti", predicate.operand
+        anti, predicate = True, predicate.operand
     if not _is_isin(predicate):
         return None
-    return how, (predicate.operand, predicate.args[0])
+    return anti, (predicate.operand, predicate.args[0])
 
 
-def _left_key(op: SelectionOp, child) -> str | None:
+def _left_key(op: MaskSelectionOp, child) -> str | None:
     """The left relation's key column for the membership test's subject.
 
     Usually the column folded into a ``Col``. It stays an operand instead when
@@ -71,14 +71,14 @@ def _match_isin_against_a_relation(op: Op):
     constant is a property of the operand's *producer*, and extraction is local
     to one op by design.
     """
-    if not (isinstance(op, SelectionOp) and op.kind is SelectionKind.MASK):
+    if not isinstance(op, MaskSelectionOp):
         return None
     if op.output_type is not OutputType.FRAME:
         return None
     matched = _membership_predicate(op.predicate)
     if matched is None:
         return None
-    how, (child, values) = matched
+    anti, (child, values) = matched
     if not isinstance(values, OperandLeaf):
         return None
     key = _left_key(op, child)
@@ -91,19 +91,19 @@ def _match_isin_against_a_relation(op: Op):
         allowed.add(child.ref.k)
     if {ref.k for ref in op.predicate.iter_operand_refs()} != allowed:
         return None
-    return (op, how, key, op.inputs[values.ref.k])
+    return (op, anti, key, op.inputs[values.ref.k])
 
 
-def _promote_to_filtering_join(op: SelectionOp, how: str, key: str, build: Op,
+def _promote_to_filtering_join(op: MaskSelectionOp, anti: bool, key: str, build: Op,
                                root: Op) -> Op:
     """Replace the selection with the equivalent semi/anti join, in place."""
     left = op.inputs[0]
-    join = JoinOp(how=how, left_on=key,
-                  # The build side is the sequence of key values itself, which is
-                  # what an `isin` against a column produces; it has no key
-                  # column of its own to name.
-                  right_on=None,
-                  inputs=[left, build], outputs=list(op.outputs))
+    join = FilteringJoinOp(anti=anti, left_on=key,
+                           # The build side is the sequence of key values itself,
+                           # which is what an `isin` against a column produces; it
+                           # has no key column of its own to name.
+                           right_on=None,
+                           inputs=[left, build], outputs=list(op.outputs))
     # Every producer loses the selection, including the column operand, which the
     # join reads by name instead and which stays in the graph for its other
     # consumers.
@@ -127,13 +127,11 @@ def _match_counted_group_keys(op: Op):
     """
     if not isinstance(op, IndexAccessOp) or len(op.inputs) != 1:
         return None
-    if (len(op.outputs) != 1 or not isinstance(op.outputs[0], JoinOp)
-            or op.outputs[0].how not in ("semi", "anti")
+    if (len(op.outputs) != 1 or not isinstance(op.outputs[0], FilteringJoinOp)
             or op.outputs[0].inputs[1] is not op):
         return None
     selection = op.inputs[0]
-    if (not isinstance(selection, SelectionOp)
-            or selection.kind is not SelectionKind.MASK
+    if (not isinstance(selection, MaskSelectionOp)
             or selection.output_type is not OutputType.SERIES
             or selection.outputs != [op] or len(selection.inputs) != 1):
         return None
@@ -174,7 +172,7 @@ def _match_counted_group_keys(op: Op):
     return op, selection, sort, agg, projection
 
 
-def _replace_counted_group_keys(op: IndexAccessOp, selection: SelectionOp,
+def _replace_counted_group_keys(op: IndexAccessOp, selection: MaskSelectionOp,
                                 sort: SortOp | None, agg: AggregateOp,
                                 projection: ColumnProjectionOp, root: Op) -> Op:
     source = projection.inputs[0]
@@ -185,8 +183,7 @@ def _replace_counted_group_keys(op: IndexAccessOp, selection: SelectionOp,
         aggregations=((count_name, AggExpr("size", Col(key))),),
         options={"sort": False, "dropna": agg.options["dropna"]},
         output_type=OutputType.FRAME, inputs=[source])
-    filtered = SelectionOp(
-        kind=SelectionKind.MASK,
+    filtered = MaskSelectionOp(
         predicate=BinOpExpr(operator.ge, Col(count_name),
                             Const(selection.predicate.right.value)),
         inputs=[count])

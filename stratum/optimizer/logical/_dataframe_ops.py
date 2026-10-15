@@ -14,17 +14,20 @@ import numpy as np
 # `from ..._dataframe_ops import X` import sites keep working (re-export hub).
 from stratum.optimizer.logical._source_ops import DataSourceOp, make_read_op, try_make_read_op
 from stratum.optimizer.logical._selection_ops import (
-    SelectionKind, SelectionOp, _SELECTION_METHODS, make_selection_op,
-    is_mask_selection, make_mask_selection_op)
+    SelectionOp, MaskSelectionOp, DropMissingSelectionOp, DropDuplicatesSelectionOp,
+    SliceSelectionOp, SampleSelectionOp, DropLabelsSelectionOp, _SELECTION_METHODS,
+    make_selection_op, is_mask_selection, make_mask_selection_op)
 from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, GroupedDataframeOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
     _is_aggregation, _is_value_counts, _extract_grouping, _extract_aggregations,
     make_aggregate_op, make_value_counts_ops)
 from stratum.optimizer.logical._sort_ops import SortOp, make_sort_op
 from stratum.optimizer.logical._projection_ops import (
-    ColumnProjectionOp, ColumnSelectorOp, MetadataOp, ProjectionOp, DropOp,
+    ColumnProjectionOp, ColumnSelectorOp, ProjectionOp, DropOp,
     drop_targets_columns, make_column_projection_op, make_column_selector_op,
-    make_drop_op, make_reset_index_op, resolve_selector_columns)
+    make_drop_op, resolve_selector_columns)
+from stratum.optimizer.logical._metadata_ops import (
+    MetadataOp, RenameOp, ResetIndexOp, make_rename_op, make_reset_index_op)
 from stratum.optimizer.logical._map_ops import (
     MapOp, AccessorMapOp, ApplyUDFOp, AssignMapOp, AssignOp, DatetimeConversionOp,
     StringMethodOp, make_assign_map_op, make_datetime_conversion_op,
@@ -32,7 +35,7 @@ from stratum.optimizer.logical._map_ops import (
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, is_supported_column_method, make_column_method_op)
 from stratum.optimizer.logical._join_ops import (
-    JoinOp, _MERGE_POSITIONAL, _JOIN_POSITIONAL, _JOIN_OP_FIELDS, make_join_op,
+    JoinOp, FilteringJoinOp, _MERGE_POSITIONAL, _JOIN_POSITIONAL, _JOIN_OP_FIELDS, make_join_op,
     _make_chained_join_op)
 from stratum.optimizer.logical._split_ops import SplitOp, SplitOutput, add_splitting_op
 
@@ -123,7 +126,7 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
     """
     source = op.inputs[0].output_type
     if op.method_name in {"where", "map", "sort_values", "dropna", "fillna",
-                          "set_axis", "drop"}:
+                          "set_axis", "drop", "drop_duplicates", "sample", "rename"}:
         return source
     if op.method_name == "to_frame" and source is OutputType.SERIES:
         return OutputType.FRAME
@@ -239,17 +242,15 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 new_op = make_reset_index_op(op)
             elif op.method_name == "sort_values":
                 new_op = make_sort_op(op)
-            elif op.method_name in ["rename"]:
-                new_op = MetadataOp(func=op.method_name, args=op.args, kwargs=op.kwargs, inputs=op.inputs,
-                                    outputs=op.outputs)
-                op.replace_output_of_inputs(new_op)
+            elif op.method_name == "rename":
+                new_op = make_rename_op(op)
             elif op.method_name == "drop":
                 # Columns are a projection, rows (the pandas default) a selection.
                 # An unknown axis, both axes at once, or a "column" drop on a
                 # series (a no-op in pandas) stays an opaque call.
                 drops_columns = drop_targets_columns(op.kwargs)
                 if drops_columns is False:
-                    new_op = make_selection_op(op, kind=SelectionKind.DROP)
+                    new_op = make_selection_op(op)
                 elif drops_columns and op.inputs[0].output_type is OutputType.FRAME:
                     new_op = make_drop_op(op)
             elif op.method_name == "apply":
@@ -286,7 +287,7 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
         elif isinstance(op, (BinOp, UnaryOp)):
             op.output_type = op.inputs[0].output_type
 
-        # GetItem: a mask selection df[bool_series] folds into a SelectionOp;
+        # GetItem: a mask selection df[bool_series] folds into a MaskSelectionOp;
         # otherwise it is a column projection (SERIES) / sub-frame / row selection.
         elif isinstance(op, GetItemOp):
             if is_mask_selection(op):

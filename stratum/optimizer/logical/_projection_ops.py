@@ -23,63 +23,6 @@ def resolve_selector_columns(frame, selector) -> list[str]:
     """
     return make_selector(selector).expand(frame)
 
-class MetadataOp(Op):
-    fields = ["func", "args", "kwargs"]
-
-    def __init__(self, func: str, args: tuple | list = None, kwargs: dict = None, inputs: list[Op] = None, outputs: list[Op] = None, is_X=False, is_y=False):
-        super().__init__(name=func.upper(), is_X=is_X, is_y=is_y, inputs=inputs, outputs=outputs)
-        if kwargs is not None:
-            self.check_kwargs(kwargs)
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-        self.output_type = OutputType.FRAME
-
-    def propagate_output_schema(self):
-        """Only ``rename`` is modelled.
-
-        A rename aimed at the columns (``columns=``, or a mapper with
-        ``axis=1``/``"columns"``) remaps them. One aimed at the index -- ``index=``,
-        or a positional mapper under pandas' default ``axis=0`` -- leaves the
-        column names untouched, so the schema passes straight through instead of
-        being given up. ``axis`` is keyword-only on ``DataFrame.rename``, so only
-        the mapper itself can arrive positionally.
-        """
-        if self.func != "rename":
-            self.output_schema = None
-            return
-        kwargs = self.kwargs or {}
-        args = self.args or ()
-        axis = kwargs.get("axis")
-        if "columns" in kwargs:
-            mapping = kwargs["columns"]
-        elif axis in (1, "columns"):
-            mapping = kwargs.get("mapper", args[0] if args else None)
-        elif axis is None or axis in (0, "index"):
-            mapping = {}  # renames the index (or nothing): columns unchanged
-        else:
-            mapping = None  # e.g. a graph-fed axis: can't tell which way it renames
-        self.output_schema = _schema.rename_columns(self.inputs[0].output_schema, mapping)
-
-
-def make_reset_index_op(op: MethodCallOp) -> MetadataOp | None:
-    """Fuse ``reset_index(drop=True)`` into a :class:`MetadataOp`.
-
-    Only the dropping form. ``drop=False`` promotes the index to a column and so
-    changes the schema, which we cannot describe until schema propagation exists,
-    and it is also pandas' default, so it is refused rather than guessed at.
-    """
-    kwargs = dict(op.kwargs or {})
-    if op.args or kwargs.pop("drop", False) is not True or kwargs:
-        return None
-    new_op = MetadataOp(func="reset_index", args=(), kwargs={"drop": True},
-                        inputs=op.inputs, outputs=op.outputs)
-    # reset_index keeps the container kind: a series stays a series.
-    new_op.output_type = op.inputs[0].output_type
-    op.replace_output_of_inputs(new_op)
-    return new_op
-
-
 class ProjectionOp(Op):
     """Base for projection operators: keeps rows and values, selects columns."""
     logical_family = "Projection"
@@ -120,7 +63,7 @@ class DropOp(ProjectionOp):
 
     Only the statically column-wise form becomes a ``DropOp`` (see
     :func:`drop_targets_columns`). The pandas default (``axis=0``) drops *rows*
-    by index label, which extraction turns into a ``SelectionOp(DROP)``.
+    by index label, which extraction turns into a ``DropLabelsSelectionOp``.
     """
     fields = ["args", "kwargs", "columns"]
     def __init__(self, args: tuple | list = (), kwargs: dict = {},

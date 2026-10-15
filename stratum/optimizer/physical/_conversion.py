@@ -88,15 +88,16 @@ def _is_default_index(data) -> bool:
 def _index_origin(op: IRNode, memo: dict):
     # Lazy imports: avoid import cycles.
     from stratum.optimizer.logical._aggregation_ops import AggregateOp
-    from stratum.optimizer.logical._join_ops import FILTERING_JOINS, JoinOp
+    from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
     from stratum.optimizer.logical._map_ops import MapOp
     from stratum.optimizer.logical._numeric_ops import NumericOp
     from stratum.optimizer.logical._ops import (BaseEstimatorOp, BinOp, ImplOp,
                                                 MethodCallOp, SplitXOp, UnaryOp,
                                                 ValueOp)
+    from stratum.optimizer.logical._metadata_ops import RenameOp, ResetIndexOp
     from stratum.optimizer.logical._projection_ops import (
-        ColumnProjectionOp, ColumnSelectorOp, DropOp, MetadataOp)
-    from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
+        ColumnProjectionOp, ColumnSelectorOp, DropOp)
+    from stratum.optimizer.logical._selection_ops import SelectionOp, SliceSelectionOp
     from stratum.optimizer.logical._sort_ops import SortOp
     from stratum.optimizer.physical._source_execs import FileReadOp, InMemoryFrame
 
@@ -113,22 +114,25 @@ def _index_origin(op: IRNode, memo: dict):
         return DEFAULT if _is_default_index(op.data) else new
     if isinstance(op, ValueOp):
         return DEFAULT if _is_default_index(op.value) else new
-    if isinstance(op, MetadataOp):
-        if op.func == "reset_index":
-            return DEFAULT if dict(op.kwargs or {}).get("drop") is True else new
-        return first_input()  # rename
+    if isinstance(op, ResetIndexOp):
+        return DEFAULT
+    if isinstance(op, RenameOp):
+        return first_input()
     if isinstance(op, SelectionOp):
         # Keeps row labels; only head() of a default index stays default.
-        if op.kind is SelectionKind.HEAD and first_input() == DEFAULT:
+        if (isinstance(op, SliceSelectionOp) and not op.from_end
+                and first_input() == DEFAULT):
             return DEFAULT
-        if dict(op.kwargs or {}).get("ignore_index") is True:
+        if getattr(op, "ignore_index", False) is True:
             return DEFAULT
         return new
     if isinstance(op, SortOp):
         return DEFAULT if op.ignore_index else new
+    if isinstance(op, FilteringJoinOp):
+        return new  # keeps the left rows' labels
     if isinstance(op, JoinOp):
-        # merge -> RangeIndex; index and semi/anti joins keep labels.
-        if op.left_index or op.right_index or op.how in FILTERING_JOINS:
+        # merge -> RangeIndex; index joins keep labels.
+        if op.left_index or op.right_index:
             return new
         return DEFAULT
     if isinstance(op, AggregateOp):
@@ -136,7 +140,7 @@ def _index_origin(op: IRNode, memo: dict):
     if isinstance(op, (MapOp, ColumnProjectionOp, ColumnSelectorOp, DropOp,
                        BaseEstimatorOp, ImplOp, SplitXOp)):
         # Row-preserving. A DropOp only drops columns; a row drop is a
-        # SelectionOp(DROP) and starts a new origin above.
+        # DropLabelsSelectionOp and starts a new origin above.
         return first_input()
     if isinstance(op, MethodCallOp) and op.method_name in _ROW_PRESERVING_METHODS:
         return _common_origin(op, memo)

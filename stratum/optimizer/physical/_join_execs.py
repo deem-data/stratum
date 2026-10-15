@@ -1,26 +1,21 @@
-"""Physical implementations of ``JoinOp`` (pandas merge / polars join).
+"""Physical implementations of the join family (pandas merge / polars join).
 
-Same-shape backend-variant family: the concrete impls subclass the logical
-``JoinOp`` (plus :class:`PhysicalOp`), so ``isinstance(op, JoinOp)`` still
-identifies a join anywhere in the plan. Selection swaps a logical ``JoinOp`` to
-one of these per the plan context.
+Same-shape backend-variant families: the concrete impls subclass the logical
+``JoinOp`` or ``FilteringJoinOp`` (plus :class:`PhysicalOp`), so ``isinstance``
+on the logical class still identifies the op anywhere in the plan. Selection
+swaps a logical op to one of these per the plan context.
 """
 from __future__ import annotations
 
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.logical._join_ops import FILTERING_JOINS, JoinOp
+from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 
 @physical_impl(of=JoinOp, backend="pandas")
 class PandasJoinOp(JoinOp, PhysicalOp):
-
-    @classmethod
-    def supports(cls, op: JoinOp, ctx) -> bool:
-        # `merge` has no semi/anti spelling; the filtering impls below handle it.
-        return op.how not in FILTERING_JOINS
 
     def process(self, mode: str, inputs: list):
         if len(inputs) != 2:
@@ -38,10 +33,6 @@ class PandasJoinOp(JoinOp, PhysicalOp):
 
 @physical_impl(of=JoinOp, backend="polars")
 class PolarsJoinOp(JoinOp, PhysicalOp):
-
-    @classmethod
-    def supports(cls, op: JoinOp, ctx) -> bool:
-        return op.how not in FILTERING_JOINS
 
     def process(self, mode: str, inputs: list):
         if len(inputs) != 2:
@@ -86,31 +77,30 @@ class PolarsJoinOp(JoinOp, PhysicalOp):
         return result.rename(mapping=mapping)
 
 
-# --- Filtering joins (semi / anti) --------------------------------------------
+# --- FilteringJoinOp (semi / anti) --------------------------------------------
 #
 # Single-key joins admit both implementations. Composite keys require merge;
 # de-duplicating the build keys preserves the multiplicity of each left row.
 
 
-class FilteringJoinExec(JoinOp, PhysicalOp):
-    """Physical base for ``how="semi"`` / ``how="anti"``."""
+class FilteringJoinExec(FilteringJoinOp, PhysicalOp):
+    """Physical base for the semi and anti joins."""
 
     @property
     def _keep_matches(self) -> bool:
-        return self.how == "semi"
+        return not self.anti
 
-@physical_impl(of=JoinOp, backend="pandas")
+@physical_impl(of=FilteringJoinOp, backend="pandas")
 class PandasIsInSemiJoinOp(FilteringJoinExec):
     """Single-key filtering join through ``Series.isin``."""
 
     @classmethod
-    def supports(cls, op: JoinOp, ctx) -> bool:
+    def supports(cls, op: FilteringJoinOp, ctx) -> bool:
         single_left = (isinstance(op.left_on, str)
                        or isinstance(op.left_on, (list, tuple)) and len(op.left_on) == 1)
         single_right = (op.right_on is None or isinstance(op.right_on, str)
                         or isinstance(op.right_on, (list, tuple)) and len(op.right_on) == 1)
-        return (op.how in FILTERING_JOINS and single_left and single_right
-                and not op.left_index and not op.right_index)
+        return single_left and single_right
 
     def process(self, mode: str, inputs: list):
         left, build = inputs
@@ -121,18 +111,17 @@ class PandasIsInSemiJoinOp(FilteringJoinExec):
         mask = left[key].isin(build)
         return left[mask if self._keep_matches else ~mask]
 
-@physical_impl(of=JoinOp, backend="pandas")
+@physical_impl(of=FilteringJoinOp, backend="pandas")
 class PandasMergeSemiJoinOp(FilteringJoinExec):
     """Filtering join through a merge on de-duplicated keys, at any arity."""
 
     @classmethod
-    def supports(cls, op: JoinOp, ctx) -> bool:
+    def supports(cls, op: FilteringJoinOp, ctx) -> bool:
         left_keys = [op.left_on] if isinstance(op.left_on, str) else op.left_on
         right_keys = [op.right_on] if isinstance(op.right_on, str) else op.right_on
-        return (op.how in FILTERING_JOINS and bool(left_keys)
+        return (bool(left_keys)
                 and (right_keys is None and len(left_keys) == 1
-                     or right_keys is not None and len(left_keys) == len(right_keys))
-                and not op.left_index and not op.right_index)
+                     or right_keys is not None and len(left_keys) == len(right_keys)))
 
     def process(self, mode: str, inputs: list):
         left, build = inputs
@@ -160,17 +149,15 @@ class PandasMergeSemiJoinOp(FilteringJoinExec):
         return left[matched if self._keep_matches else ~matched]
 
 
-@physical_impl(of=JoinOp, backend="polars")
+@physical_impl(of=FilteringJoinOp, backend="polars")
 class PolarsFilteringJoinOp(FilteringJoinExec):
     """polars runs semi/anti natively, whatever the key arity."""
 
     _BUILD_KEY = "_stratum_semi_key"
 
     @classmethod
-    def supports(cls, op: JoinOp, ctx) -> bool:
-        return (op.how in FILTERING_JOINS
-                and not op.left_index and not op.right_index
-                and op.left_on is not None)
+    def supports(cls, op: FilteringJoinOp, ctx) -> bool:
+        return op.left_on is not None
 
     def process(self, mode: str, inputs: list):
         left, build = inputs
@@ -183,5 +170,6 @@ class PolarsFilteringJoinOp(FilteringJoinExec):
         else:
             right_on = ([self.right_on] if isinstance(self.right_on, str)
                         else list(self.right_on))
-        return left.join(build, left_on=left_on, right_on=right_on, how=self.how,
+        return left.join(build, left_on=left_on, right_on=right_on,
+                         how="anti" if self.anti else "semi",
                          nulls_equal=True, maintain_order="left")

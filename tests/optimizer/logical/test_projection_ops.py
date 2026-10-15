@@ -6,8 +6,7 @@ import stratum as st
 from stratum.optimizer._optimize import OptConfig
 from skrub import selectors
 from stratum.optimizer.logical._projection_ops import (
-    ColumnProjectionOp, ColumnSelectorOp, DropOp, MetadataOp, ProjectionOp,
-    drop_targets_columns, make_reset_index_op)
+    ColumnProjectionOp, ColumnSelectorOp, DropOp, ProjectionOp, drop_targets_columns)
 from stratum.optimizer.logical._ops import (
     GetItemOp, MethodCallOp, OperandRef, OutputType, TransformerOp)
 from .test_dataframe_ops import (
@@ -95,67 +94,6 @@ class TestColumnProjectionOp(unittest.TestCase):
             result = run_op(ColumnProjectionOp(key=["x", "y"]), pl.from_pandas(self.df))
         self.assertIsInstance(result, pl.DataFrame)
         self.assertEqual(["x", "y"], result.columns)
-
-
-class TestMetadataOp(unittest.TestCase):
-    def test_kwargs_none_skips_check(self):
-        self.assertIsNone(MetadataOp(func="rename").kwargs)
-
-    def test_rename_polars_with_columns_kwarg(self):
-        with force_polars():
-            op = MetadataOp(func="rename", args=(), kwargs={"columns": {"a": "x"}})
-            result = run_op(op, pl.DataFrame({"a": [1, 2], "b": [3, 4]}))
-            self.assertIn("x", result.columns)
-
-    def test_rename_polars_without_columns_kwarg(self):
-        with force_polars():
-            op = MetadataOp(func="rename", args=({"a": "x"},), kwargs={})
-            result = run_op(op, pl.DataFrame({"a": [1], "b": [2]}))
-            self.assertIn("x", result.columns)
-
-
-class TestResetIndex(unittest.TestCase):
-    """Only the dropping form of `reset_index` is representable."""
-
-    def _call(self, **kwargs) -> MethodCallOp:
-        op = MethodCallOp("reset_index", args=(), kwargs=kwargs)
-        op.inputs = [_inp(None)]
-        op.inputs[0].outputs = [op]
-        return op
-
-    def test_drop_true_becomes_a_metadata_op(self):
-        new_op = make_reset_index_op(self._call(drop=True))
-        self.assertIsInstance(new_op, MetadataOp)
-        self.assertEqual("reset_index", new_op.func)
-
-    def test_drop_false_and_the_default_are_refused(self):
-        # drop=False promotes the index to a column, changing the schema, and it
-        # is also pandas' default, so it is refused rather than guessed at.
-        self.assertIsNone(make_reset_index_op(self._call(drop=False)))
-        self.assertIsNone(make_reset_index_op(self._call()))
-
-    def test_other_arguments_are_refused(self):
-        self.assertIsNone(make_reset_index_op(self._call(drop=True, level=0)))
-        positional = MethodCallOp("reset_index", args=(0,), kwargs={"drop": True})
-        positional.inputs = [_inp(None)]
-        self.assertIsNone(make_reset_index_op(positional))
-
-    def test_it_keeps_the_container_kind(self):
-        call = self._call(drop=True)
-        call.inputs[0].output_type = OutputType.SERIES
-        self.assertIs(OutputType.SERIES, make_reset_index_op(call).output_type)
-
-    def test_pandas_renumbers_the_rows(self):
-        df = pd.DataFrame({"a": [1, 2, 3]}).iloc[[2, 0]]
-        op = MetadataOp(func="reset_index", args=(), kwargs={"drop": True})
-        self.assertEqual([0, 1], list(run_op(op, df).index))
-
-    def test_polars_has_no_index_to_drop(self):
-        # polars rows carry no labels, so the dropping form is identity there.
-        with force_polars():
-            frame = pl.DataFrame({"a": [1, 2, 3]})
-            op = MetadataOp(func="reset_index", args=(), kwargs={"drop": True})
-            self.assertTrue(run_op(op, frame).equals(frame))
 
 
 class TestDropOpPolars(PolarsTestCase):

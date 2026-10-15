@@ -33,8 +33,7 @@ rule reads as intent rather than an oversight:
 
 A rule covers an *operation*, not an operation family, wherever the family is not
 uniformly column preserving: see ``StringMethodOp.ONE_TO_ONE_METHODS``,
-``AccessorMapOp.ELEMENTWISE_ACCESSORS``, ``SelectionOp._drops_rows`` and
-``DatetimeConversionOp``, each of which admits only the members that map one
+``AccessorMapOp.ELEMENTWISE_ACCESSORS`` and ``DatetimeConversionOp``, each of which admits only the members that map one
 input column to one output column.
 """
 from __future__ import annotations

@@ -9,7 +9,8 @@ import stratum as st
 from stratum.optimizer.logical._ops import remap_operand_refs
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._dataframe_ops import (
-    ColumnProjectionOp, SelectionKind, SelectionOp)
+    ColumnProjectionOp, DropDuplicatesSelectionOp, DropMissingSelectionOp, MaskSelectionOp,
+    SampleSelectionOp, SelectionOp, SliceSelectionOp)
 from stratum.optimizer.logical._ops import (
     BinOp, GetItemOp, UnaryOp, Op, OperandRef, OutputType, ValueOp)
 from stratum.optimizer.logical._column_expr import (
@@ -20,7 +21,7 @@ from .test_dataframe_ops import (
 
 
 class TestSelectionExtraction(unittest.TestCase):
-    """Row-selection method calls are rewritten to SelectionOp."""
+    """Row-selection method calls are parsed into their SelectionOp subclass."""
 
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 2, None], "y": [4, 5, 5, 6]})
@@ -33,112 +34,131 @@ class TestSelectionExtraction(unittest.TestCase):
     def test_dropna_converts_to_selection(self):
         sel = self._one_selection(
             optimize(st.as_data_op(self.df).dropna(), OptConfig(dataframe_ops=True)))
-        self.assertIs(SelectionKind.DROPNA, sel.kind)
+        self.assertIsInstance(sel, DropMissingSelectionOp)
         self.assertIs(OutputType.FRAME, sel.output_type)
 
     def test_drop_duplicates_converts_to_selection(self):
         sel = self._one_selection(
             optimize(st.as_data_op(self.df).drop_duplicates(), OptConfig(dataframe_ops=True)))
-        self.assertIs(SelectionKind.DROP_DUPLICATES, sel.kind)
+        self.assertIsInstance(sel, DropDuplicatesSelectionOp)
 
     def test_head_converts_to_selection_with_args(self):
         sel = self._one_selection(
             optimize(st.as_data_op(self.df).head(2), OptConfig(dataframe_ops=True)))
-        self.assertIs(SelectionKind.HEAD, sel.kind)
-        self.assertEqual((2,), tuple(sel.args))
+        self.assertIsInstance(sel, SliceSelectionOp)
+        self.assertEqual((2, False), (sel.n, sel.from_end))
 
     def test_tail_converts_to_selection(self):
         sel = self._one_selection(
             optimize(st.as_data_op(self.df).tail(1), OptConfig(dataframe_ops=True)))
-        self.assertIs(SelectionKind.TAIL, sel.kind)
+        self.assertIsInstance(sel, SliceSelectionOp)
+        self.assertEqual((1, True), (sel.n, sel.from_end))
 
     def test_sample_converts_to_selection(self):
         sel = self._one_selection(
             optimize(st.as_data_op(self.df).sample(n=1, random_state=0),
                      OptConfig(dataframe_ops=True)))
-        self.assertIs(SelectionKind.SAMPLE, sel.kind)
+        self.assertIsInstance(sel, SampleSelectionOp)
+        self.assertEqual((1, 0), (sel.n, sel.seed))
 
     def test_selection_on_column_is_series(self):
         # df["x"].dropna() selects rows of a column -> the selection stays a SERIES.
         sel = self._one_selection(
             optimize(st.as_data_op(self.df)["x"].dropna(), OptConfig(dataframe_ops=True)))
-        self.assertIs(SelectionKind.DROPNA, sel.kind)
+        self.assertIsInstance(sel, DropMissingSelectionOp)
         self.assertIs(OutputType.SERIES, sel.output_type)
+
+    def _parsed(self, build):
+        return self._one_selection(optimize(build(st.as_data_op(self.df)),
+                                            OptConfig(dataframe_ops=True)))
+
+    def _stays_opaque(self, build):
+        ops = optimize(build(st.as_data_op(self.df)), OptConfig(dataframe_ops=True))
+        self.assertFalse([o for o in ops if isinstance(o, SelectionOp)])
+
+    def test_dropna_how_and_thresh_become_a_present_count(self):
+        cases = [({}, None), ({"how": "any"}, None), ({"how": "all"}, 1), ({"thresh": 2}, 2)]
+        for kwargs, min_present in cases:
+            with self.subTest(kwargs=kwargs):
+                sel = self._parsed(lambda d: d.dropna(subset=["x"], **kwargs))
+                self.assertEqual((["x"], min_present), (sel.subset, sel.min_present))
+
+    def test_drop_duplicates_keep_false_means_keep_none(self):
+        sel = self._parsed(lambda d: d.drop_duplicates("x", keep=False))
+        self.assertEqual(("x", "none"), (sel.subset, sel.keep))
+
+    def test_sample_positional_arguments_follow_pandas_order(self):
+        sel = self._parsed(lambda d: d.sample(None, 0.5, True, None, 7))
+        self.assertEqual((None, 0.5, True, 7),
+                         (sel.n, sel.frac, sel.with_replacement, sel.seed))
+
+    def test_row_drop_parses_its_labels(self):
+        for build in (lambda d: d.drop([0, 1]), lambda d: d.drop(index=[0, 1])):
+            sel = self._parsed(build)
+            self.assertEqual(([0, 1], "raise"), (sel.labels, sel.errors))
+
+    def test_calls_that_are_not_row_selections_stay_opaque(self):
+        cases = {
+            "inplace dropna": lambda d: d.dropna(inplace=True),
+            "inplace drop_duplicates": lambda d: d.drop_duplicates(inplace=True),
+            "column-wise dropna": lambda d: d.dropna(axis=1),
+            "column sampling": lambda d: d.sample(n=1, axis=1),
+        }
+        for name, build in cases.items():
+            with self.subTest(name):
+                self._stays_opaque(build)
 
 
 class TestSelectionProcess(unittest.TestCase):
-    """SelectionOp.process executes the underlying frame method per backend."""
+    """Each selection subclass executes through its bound physical impl."""
 
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 2, None], "y": [4, 5, 5, 6]})
 
-    def test_dropna_pandas(self):
-        op = SelectionOp(kind=SelectionKind.DROPNA)
-        result = run_op(op, self.df)
-        self.assertEqual(3, len(result))
-
     def test_head_pandas(self):
-        op = SelectionOp(kind=SelectionKind.HEAD, args=(2,))
+        op = SliceSelectionOp(n=2)
         result = run_op(op, self.df)
         self.assertEqual(2, len(result))
 
     def test_drop_duplicates_pandas(self):
-        op = SelectionOp(kind=SelectionKind.DROP_DUPLICATES)
+        op = DropDuplicatesSelectionOp()
         result = run_op(op, self.df.dropna())
         self.assertEqual(2, len(result))
 
-    def test_dropna_polars_uses_drop_nulls(self):
-        with force_polars():
-            op = SelectionOp(kind=SelectionKind.DROPNA)
-            result = run_op(op, pl.DataFrame({"x": [1, None, 3]}))
-        self.assertEqual(2, len(result))
-
-    def test_query_kind_not_yet_executable(self):
-        # QUERY is produced by a later pass and has no method/predicate yet.
-        op = SelectionOp(kind=SelectionKind.QUERY)
-        with self.assertRaises(NotImplementedError):
-            run_op(op, self.df)
-
     def test_mask_predicate_pandas(self):
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
         result = run_op(op, pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}))
         self.assertEqual([2, 3], result["x"].tolist())
 
     def test_mask_predicate_boolop_pandas(self):
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.and_,
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.and_,
                                           BinOpExpr(operator.gt, Col("x"), Const(1)),
                                           BinOpExpr(operator.lt, Col("y"), Const(6))))
         result = run_op(op, pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}))
         self.assertEqual([2], result["x"].tolist())
 
     def test_mask_predicate_polars(self):
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
         with force_polars():
             result = run_op(op, pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}))
         self.assertEqual([2, 3], result["x"].to_list())
 
     def test_mask_predicate_with_operand_leaf_pandas(self):
         # OperandLeaf reads an external input (here input 1) at eval time.
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"),
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"),
                                              OperandLeaf(OperandRef(1))))
         result = run_op(op, pd.DataFrame({"x": [1, 2, 3]}), 1)
         self.assertEqual([2, 3], result["x"].tolist())
 
     def test_mask_str_predicate_pandas(self):
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt,
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt,
                                              StrExpr(Col("s"), "count", ("1",)), Const(0)))
         result = run_op(op, pd.DataFrame({"s": ["a1", "bb", "c1"]}))
         self.assertEqual(["a1", "c1"], result["s"].tolist())
 
     def test_mask_str_predicate_polars(self):
         # polars renames .str.count -> .str.count_matches (STR_POLARS_METHODS).
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt,
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt,
                                              StrExpr(Col("s"), "count", ("1",)), Const(0)))
         with force_polars():
             result = run_op(op, pl.DataFrame({"s": ["a1", "bb", "c1"]}))
@@ -146,15 +166,14 @@ class TestSelectionProcess(unittest.TestCase):
 
 
 class TestMaskFolding(unittest.TestCase):
-    """df[bool_series] folds into a single SelectionOp(MASK, predicate)."""
+    """df[bool_series] folds into a single MaskSelectionOp(predicate)."""
 
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6],
                                 "flag": [True, False, True]})
 
     def _mask(self, ops):
-        masks = [o for o in ops if isinstance(o, SelectionOp)
-                 and o.kind is SelectionKind.MASK]
+        masks = [o for o in ops if isinstance(o, MaskSelectionOp)]
         self.assertEqual(1, len(masks), "expected exactly one mask SelectionOp")
         return masks[0]
 
@@ -274,8 +293,7 @@ class TestMaskFolding(unittest.TestCase):
         data = st.as_data_op(self.df)
         root = data[data["x"] > 1].skb.concat([data[data["x"] > 1]], axis=0)
         ops = optimize(root, OptConfig(dataframe_ops=True))
-        masks = [o for o in ops if isinstance(o, SelectionOp)
-                 and o.kind is SelectionKind.MASK]
+        masks = [o for o in ops if isinstance(o, MaskSelectionOp)]
         self.assertEqual(1, len(masks))
 
     def test_shared_mask_folds_with_operand_leaf(self):
@@ -336,8 +354,7 @@ class TestSeriesMaskFolding(unittest.TestCase):
         self.df = pd.DataFrame({"v": [1, 5, 3, 2], "w": [9, 8, 7, 6]})
 
     def _mask(self, ops):
-        masks = [o for o in ops if isinstance(o, SelectionOp)
-                 and o.kind is SelectionKind.MASK]
+        masks = [o for o in ops if isinstance(o, MaskSelectionOp)]
         self.assertEqual(1, len(masks), "expected exactly one mask SelectionOp")
         return masks[0]
 
@@ -430,20 +447,26 @@ class TestSelectionStructureKey(unittest.TestCase):
 
     def test_equal_for_identical_selections(self):
         src = Op()
-        a = SelectionOp(kind=SelectionKind.HEAD, args=(2,), inputs=[src])
-        b = SelectionOp(kind=SelectionKind.HEAD, args=(2,), inputs=[src])
+        a = SliceSelectionOp(n=2, inputs=[src])
+        b = SliceSelectionOp(n=2, inputs=[src])
         self.assertEqual(a.structure_key(), b.structure_key())
 
-    def test_differs_on_args(self):
+    def test_differs_on_fields(self):
         src = Op()
-        a = SelectionOp(kind=SelectionKind.HEAD, args=(2,), inputs=[src])
-        b = SelectionOp(kind=SelectionKind.HEAD, args=(3,), inputs=[src])
+        a = SliceSelectionOp(n=2, inputs=[src])
+        b = SliceSelectionOp(n=3, inputs=[src])
         self.assertNotEqual(a.structure_key(), b.structure_key())
 
-    def test_differs_on_kind(self):
+    def test_differs_on_direction(self):
         src = Op()
-        a = SelectionOp(kind=SelectionKind.HEAD, args=(2,), inputs=[src])
-        b = SelectionOp(kind=SelectionKind.TAIL, args=(2,), inputs=[src])
+        a = SliceSelectionOp(n=2, inputs=[src])
+        b = SliceSelectionOp(n=2, from_end=True, inputs=[src])
+        self.assertNotEqual(a.structure_key(), b.structure_key())
+
+    def test_differs_on_variant(self):
+        src = Op()
+        a = SliceSelectionOp(n=2, inputs=[src])
+        b = SampleSelectionOp(n=2, inputs=[src])
         self.assertNotEqual(a.structure_key(), b.structure_key())
 
 
@@ -455,12 +478,12 @@ class TestUnaryPredicateProcess(unittest.TestCase):
                                      BinOpExpr(operator.gt, Col("x"), Const(1)))
 
     def test_unary_mask_pandas(self):
-        op = SelectionOp(kind=SelectionKind.MASK, predicate=self.predicate)
+        op = MaskSelectionOp(predicate=self.predicate)
         result = run_op(op, pd.DataFrame({"x": [1, 2, 3]}))
         self.assertEqual([1], result["x"].tolist())
 
     def test_unary_mask_polars(self):
-        op = SelectionOp(kind=SelectionKind.MASK, predicate=self.predicate)
+        op = MaskSelectionOp(predicate=self.predicate)
         with force_polars():
             result = run_op(op, pl.DataFrame({"x": [1, 2, 3]}))
         self.assertEqual([1], result["x"].to_list())
@@ -473,15 +496,13 @@ class TestPandasQuery(unittest.TestCase):
         self.df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
 
     def test_query_simple_comparison(self):
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
         with pandas_query():
             result = run_op(op, self.df)
         self.assertEqual([2, 3], result["x"].tolist())
 
     def test_query_boolop(self):
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.and_,
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.and_,
                                              BinOpExpr(operator.gt, Col("x"), Const(1)),
                                              BinOpExpr(operator.lt, Col("y"), Const(6))))
         with pandas_query():
@@ -489,8 +510,7 @@ class TestPandasQuery(unittest.TestCase):
         self.assertEqual([2], result["x"].tolist())
 
     def test_query_unaryop(self):
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=UnaryOpExpr(operator.invert,
+        op = MaskSelectionOp(predicate=UnaryOpExpr(operator.invert,
                                                BinOpExpr(operator.gt, Col("x"), Const(1))))
         with pandas_query():
             result = run_op(op, self.df)
@@ -499,8 +519,7 @@ class TestPandasQuery(unittest.TestCase):
     def test_query_falls_back_on_operand_leaf(self):
         # An OperandLeaf isn't query-expressible (to_pandas_query -> None), so the
         # predicate as a whole yields None and process falls back to boolean masking.
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"),
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"),
                                              OperandLeaf(OperandRef(1))))
         with pandas_query():
             result = run_op(op, self.df, 1)
@@ -517,30 +536,27 @@ class TestPandasQueryImplSelection(unittest.TestCase):
 
     def test_expressible_mask_binds_query_impl_under_flag(self):
         from stratum.optimizer.physical._selection_execs import PandasQuerySelectionOp
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
         with pandas_query():
             self.assertIsInstance(self._bind(op), PandasQuerySelectionOp)
 
     def test_expressible_mask_binds_index_impl_without_flag(self):
         from stratum.optimizer.physical._selection_execs import PandasIndexSelectionOp
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"), Const(1)))
         self.assertIsInstance(self._bind(op), PandasIndexSelectionOp)
 
     def test_non_expressible_mask_binds_index_impl_even_under_flag(self):
         from stratum.optimizer.physical._selection_execs import PandasIndexSelectionOp
-        op = SelectionOp(kind=SelectionKind.MASK,
-                         predicate=BinOpExpr(operator.gt, Col("x"),
+        op = MaskSelectionOp(predicate=BinOpExpr(operator.gt, Col("x"),
                                              OperandLeaf(OperandRef(1))))
         with pandas_query():
             self.assertIsInstance(self._bind(op), PandasIndexSelectionOp)
 
-    def test_method_kind_binds_index_impl_under_flag(self):
-        from stratum.optimizer.physical._selection_execs import PandasIndexSelectionOp
-        op = SelectionOp(kind=SelectionKind.HEAD, args=(2,))
+    def test_slice_binds_its_own_impl_under_flag(self):
+        from stratum.optimizer.physical._selection_execs import PandasSliceSelectionOp
+        op = SliceSelectionOp(n=2)
         with pandas_query():
-            self.assertIsInstance(self._bind(op), PandasIndexSelectionOp)
+            self.assertIsInstance(self._bind(op), PandasSliceSelectionOp)
 
 
 class TestColumnExprQueryStrings(unittest.TestCase):

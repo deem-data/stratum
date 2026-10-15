@@ -12,11 +12,12 @@ from stratum.optimizer._optimize import OptConfig, logical_optimize
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.logical._dataframe_ops import (
     AggregateOp, AssignMapOp, AssignOp, ColumnProjectionOp, ConcatOp, DataSourceOp,
-    DatetimeConversionOp, DropOp, AccessorMapOp, JoinOp, MetadataOp,
-    SelectionKind, SelectionOp, SplitOp, SplitOutput)
+    DatetimeConversionOp, DropOp, AccessorMapOp, JoinOp, RenameOp, ResetIndexOp,
+    DropLabelsSelectionOp, SelectionOp, SliceSelectionOp, SplitOp, SplitOutput)
 from stratum.optimizer.logical._ops import (
-    BinOp, ChoiceOp, GetItemOp, Op, OperandRef, OutputType, UnaryOp)
+    BinOp, ChoiceOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType, UnaryOp)
 from stratum.optimizer.logical._map_ops import StringMethodOp
+from stratum.optimizer.logical._metadata_ops import make_rename_op
 from stratum.optimizer._optimize import optimize as optimize_full
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._column_methods import ColumnMethodOp
@@ -184,7 +185,7 @@ class TestSchemaPropagation(unittest.TestCase):
         for (args, kwargs), drop_kwargs in cases:
             with self.subTest(drop_kwargs=drop_kwargs):
                 op = _schema_op(st.as_data_op(frame).drop(*args, **kwargs), SelectionOp)
-                self.assertIs(SelectionKind.DROP, op.kind)
+                self.assertIsInstance(op, DropLabelsSelectionOp)
                 self.assertEqual(list(frame.drop(**drop_kwargs).columns),
                                  list(op.output_schema.keys()))
 
@@ -209,22 +210,19 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertEqual(pl.Unknown, op.output_schema["w"])
 
     def test_rename_remaps_columns(self):
-        op = _schema_op(st.as_data_op(self.df).rename(columns={"x": "a"}), MetadataOp)
+        op = _schema_op(st.as_data_op(self.df).rename(columns={"x": "a"}), RenameOp)
         self.assertEqual(["a", "y", "z"], list(op.output_schema.keys()))
 
     def test_rename_via_axis1_mapper_remaps_columns(self):
         # rename(mapper, axis=1) is the positional equivalent of columns=mapper.
-        op = MetadataOp(func="rename", kwargs={"mapper": {"x": "a"}, "axis": 1})
-        op.inputs = [_stub(pl.Schema({"x": pl.Int64, "y": pl.Int64, "z": pl.Int64}))]
-        op.propagate_output_schema()
+        op = _schema_op(st.as_data_op(self.df).rename({"x": "a"}, axis=1), RenameOp)
+        self.assertEqual({"x": "a"}, op.columns)
         self.assertEqual(["a", "y", "z"], list(op.output_schema.keys()))
 
-    def test_non_rename_metadata_is_unknown(self):
-        # only `rename` is modelled; any other metadata op falls back to unknown.
-        op = MetadataOp(func="reset_index")
-        op.inputs = [_stub(pl.Schema({"x": pl.Int64, "y": pl.Int64}))]
-        op.propagate_output_schema()
-        self.assertIsNone(op.output_schema)
+    def test_reset_index_keeps_the_columns(self):
+        # only the dropping form is extracted: the old labels do not become a column.
+        op = _schema_op(st.as_data_op(self.df).reset_index(drop=True), ResetIndexOp)
+        self.assertEqual(["x", "y", "z"], list(op.output_schema.keys()))
 
     def test_single_column_selection_is_one_column_schema(self):
         op = _schema_op(st.as_data_op(self.df)["x"], ColumnProjectionOp)
@@ -261,19 +259,21 @@ class TestSchemaPropagation(unittest.TestCase):
                 op = _schema_op(st.as_data_op(frame).dropna(**kwargs), SelectionOp)
                 self.assertEqual(["a", "b"], list(op.output_schema.keys()))
 
-    def test_column_wise_dropna_is_unknown(self):
+    def test_column_wise_dropna_stays_an_opaque_call(self):
         # `dropna(axis=1)` drops the columns that contain nulls, so it is not a
         # relational selection at all, and which columns go is value-dependent.
         frame = pd.DataFrame({"a": [1.0, 2.0], "b": [None, 3.0]})
         self.assertEqual(["a"], list(frame.dropna(axis=1).columns))
         for kwargs in ({"axis": 1}, {"axis": "columns"}):
             with self.subTest(kwargs=kwargs):
-                op = _schema_op(st.as_data_op(frame).dropna(**kwargs), SelectionOp)
+                ops = _logical_ops(st.as_data_op(frame).dropna(**kwargs))
+                self.assertFalse([o for o in ops if isinstance(o, SelectionOp)])
+                op = _schema_op(st.as_data_op(frame).dropna(**kwargs), MethodCallOp)
                 self.assertIsNone(op.output_schema)
 
     def test_selection_without_a_source_edge_is_unknown(self):
         # a detached selection has no input to pass a schema through.
-        op = SelectionOp(kind=SelectionKind.HEAD)
+        op = SliceSelectionOp()
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
@@ -291,7 +291,7 @@ class TestSchemaPropagation(unittest.TestCase):
         # two columns renamed onto one label: pandas keeps both.
         self.assertEqual(["c", "c"], list(pd.DataFrame({"a": [1], "b": [2]})
                                           .rename(columns={"a": "c", "b": "c"}).columns))
-        op = MetadataOp(func="rename", kwargs={"columns": {"a": "c", "b": "c"}})
+        op = RenameOp(columns={"a": "c", "b": "c"})
         op.inputs = [_stub(pl.Schema({"a": pl.Int64, "b": pl.Float64}))]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
@@ -299,23 +299,18 @@ class TestSchemaPropagation(unittest.TestCase):
     def test_index_only_rename_keeps_the_columns(self):
         # a rename aimed at the index leaves the column names untouched.
         frame = pd.DataFrame({"x": [1, 2], "y": [3, 4]})
-        schema = pl.Schema({"x": pl.Int64, "y": pl.Int64})
-        for op_kwargs, rename_kwargs in [
-            (dict(kwargs={"index": {0: 9}}), dict(index={0: 9})),
-            (dict(args=[{0: 9}], kwargs={}), dict(mapper={0: 9})),
-        ]:
-            with self.subTest(rename_kwargs=rename_kwargs):
-                op = MetadataOp(func="rename", **op_kwargs)
-                op.inputs = [_stub(schema)]
-                op.propagate_output_schema()
-                self.assertEqual(list(frame.rename(**rename_kwargs).columns),
+        for args, kwargs in [((), {"index": {0: 9}}), (({0: 9},), {})]:
+            with self.subTest(args=args, kwargs=kwargs):
+                op = _schema_op(st.as_data_op(frame).rename(*args, **kwargs), RenameOp)
+                self.assertEqual(({0: 9}, None), (op.index, op.columns))
+                self.assertEqual(list(frame.rename(*args, **kwargs).columns),
                                  list(op.output_schema.keys()))
 
-    def test_rename_with_a_graph_fed_axis_is_unknown(self):
-        op = MetadataOp(func="rename", args=[{"x": "a"}], kwargs={"axis": OperandRef(1)})
-        op.inputs = [_stub(pl.Schema({"x": pl.Int64}))]
-        op.propagate_output_schema()
-        self.assertIsNone(op.output_schema)
+    def test_rename_with_a_graph_fed_axis_stays_an_opaque_call(self):
+        # which axis the mapper renames is unknown, so is the schema.
+        call = MethodCallOp("rename", args=[{"x": "a"}], kwargs={"axis": OperandRef(1)})
+        call.inputs = [_stub(pl.Schema({"x": pl.Int64}), OutputType.FRAME)]
+        self.assertIsNone(make_rename_op(call))
 
     def test_score_candidates_schema_matches_the_table_it_builds(self):
         # `process` builds pl.DataFrame({"id": names, "scores": metric values}),
@@ -512,7 +507,7 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertIsNone(op.output_schema)
 
     def test_rename_unknown_input_propagates(self):
-        op = MetadataOp(func="rename", kwargs={"columns": {"x": "a"}})
+        op = RenameOp(columns={"x": "a"})
         op.inputs = [_stub(None)]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)

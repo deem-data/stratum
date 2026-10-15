@@ -3,23 +3,13 @@ from stratum.optimizer.logical._ops import OperandRef, OutputType, MethodCallOp,
 from stratum.optimizer.logical import _schema
 
 
-#: Joins that filter the left side instead of combining both. They return the
-#: left relation's columns unchanged, so they carry no suffixes, and their right
-#: input is a build side whose values are only tested for membership.
-FILTERING_JOINS = ("semi", "anti")
-
-
 class JoinOp(Op):
-    """Logical join. Pure config -- execution is provided by the physical impls
-    in ``physical/_join_execs.py`` (Pandas/PolarsJoinOp), selected at plan time.
+    """Logical join that combines both sides. Pure config -- execution is
+    provided by the physical impls in ``physical/_join_execs.py``
+    (Pandas/PolarsJoinOp), selected at plan time.
 
-    ``how`` also covers the two *filtering* joins, ``semi`` and ``anti``, which
-    keep the left rows that do (or do not) have a match and add no columns. They
-    live here rather than in a separate operator so that join reordering and the
-    cost model treat every join uniformly. For those, ``right_on`` may be ``None``,
-    meaning the right input is itself the sequence of key values rather than a
-    relation with a named key column; that is what an ``isin`` against a column
-    produces.
+    The filtering joins (semi/anti) add no columns and so are a different
+    operator: :class:`FilteringJoinOp`, in the same ``Join`` family.
     """
     logical_family = "Join"
     fields = ["how", "left_on", "right_on", "left_index", "right_index", "suffixes"]
@@ -35,18 +25,10 @@ class JoinOp(Op):
         inputs: list[Op] | None = None,
         outputs: list[Op] | None = None,
     ):
-        # Regular joins render as the bare family label; a filtering join names its
-        # direction, since "Join" alone cannot tell a semi from an anti.
-        super().__init__(name=how if how in FILTERING_JOINS else "",
-                         inputs=inputs, outputs=outputs)
-        if how in FILTERING_JOINS:
-            # Nothing to disambiguate when no columns are added. Keeping a suffix
-            # pair would be a dead field, and a false difference under CSE.
-            if suffixes not in (None, ("_x", "_y")):
-                raise ValueError(
-                    f"suffixes is meaningless for how={how!r}: a filtering join "
-                    f"returns the left columns unchanged.")
-            suffixes = None
+        # Renders as the bare family label.
+        super().__init__(name="", inputs=inputs, outputs=outputs)
+        if how in ("semi", "anti"):
+            raise ValueError(f"how={how!r} is a filtering join: use FilteringJoinOp.")
         self.how = how
         self.left_on = left_on
         self.right_on = right_on
@@ -57,14 +39,8 @@ class JoinOp(Op):
 
     def propagate_output_schema(self):
         """Merge the two sides; `how` is part of the schema, since a null-padded
-        side loses its integer dtypes. See :func:`_schema.join_schema`.
-
-        A filtering join returns the left rows it keeps and adds no columns, so its
-        schema is the left one, whatever the build side holds."""
+        side loses its integer dtypes. See :func:`_schema.join_schema`."""
         left = self.inputs[0].output_schema
-        if self.how in FILTERING_JOINS:
-            self.output_schema = left
-            return
         right = self.inputs[1].output_schema
         if not _schema.is_known(left) or not _schema.is_known(right):
             self.output_schema = None
@@ -114,6 +90,39 @@ class JoinOp(Op):
         if left_on is None or right_on is None or len(left_on) != len(right_on):
             return None
         return {lhs for lhs, rhs in zip(left_on, right_on) if lhs == rhs}
+
+
+class FilteringJoinOp(Op):
+    """Semi or anti join: keeps the left rows that do (``anti=False``) or do not
+    (``anti=True``) have a key match on the right, and adds no columns.
+
+    ``left_on``/``right_on`` name the key columns (a name or a list of names,
+    paired positionally). ``right_on`` may be ``None``, meaning the right input is
+    itself the sequence of key values rather than a relation with a named key
+    column; that is what an ``isin`` against a column produces. Missing keys
+    match each other.
+    """
+    logical_family = "Join"
+    fields = ["anti", "left_on", "right_on"]
+
+    def __init__(
+        self,
+        anti: bool = False,
+        left_on: str | list[str] | None = None,
+        right_on: str | list[str] | None = None,
+        inputs: list[Op] | None = None,
+        outputs: list[Op] | None = None,
+    ):
+        # "Join" alone cannot tell a semi from an anti, so name the direction.
+        super().__init__(name="anti" if anti else "semi", inputs=inputs, outputs=outputs)
+        self.anti = anti
+        self.left_on = left_on
+        self.right_on = right_on
+        self.output_type = OutputType.FRAME
+
+    def propagate_output_schema(self):
+        """The left rows it keeps, with the left columns, whatever the build side holds."""
+        self.output_schema = self.inputs[0].output_schema
 
 
 _MERGE_POSITIONAL = ["how", "on", "left_on", "right_on",

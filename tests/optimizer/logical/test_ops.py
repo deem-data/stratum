@@ -18,7 +18,7 @@ from stratum.optimizer.logical._ops import (
     remap_operand_refs,
 )
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType
-from stratum.optimizer.logical._selection_ops import SelectionOp, SelectionKind
+from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.logical._column_expr import BinOpExpr, Col, OperandLeaf
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
 from stratum.optimizer._optimize import convert_to_ops, optimize as optimize_
@@ -491,11 +491,11 @@ class TestEdgeDedup(unittest.TestCase):
         self.assertEqual(op.kwargs, {"k": OperandRef(0)})
 
     def test_replace_input_remaps_column_expr_predicate(self):
-        # A ref buried in a ColumnExpr predicate (SelectionOp) must be renumbered
+        # A ref buried in a ColumnExpr predicate (MaskSelectionOp) must be renumbered
         # too, not just refs in plain tuple/list/dict fields.
         src, leaf = ValueOp(1), ValueOp(2)
         predicate = BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(1)))
-        sel = SelectionOp(kind=SelectionKind.MASK, predicate=predicate,
+        sel = MaskSelectionOp(predicate=predicate,
                           inputs=[src, leaf])
 
         sel.replace_input(leaf, src)  # src already at slot 0 -> collapse slot 1
@@ -509,7 +509,7 @@ class TestEdgeDedup(unittest.TestCase):
         predicate = BinOpExpr(operator.gt,
                               OperandLeaf(OperandRef(1)),   # leaf_a -> merged into src
                               OperandLeaf(OperandRef(2)))   # leaf_b -> shifts to slot 1
-        sel = SelectionOp(kind=SelectionKind.MASK, predicate=predicate,
+        sel = MaskSelectionOp(predicate=predicate,
                           inputs=[src, leaf_a, leaf_b])
 
         sel.replace_input(leaf_a, src)

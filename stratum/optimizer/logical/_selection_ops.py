@@ -1,113 +1,273 @@
-from enum import Enum, auto
+"""Relational row selections (SelectionOp family).
+
+A selection restricts rows and keeps columns. Each variant is its own subclass
+with backend-neutral fields; the physical impls in
+``physical/_selection_execs.py`` translate those fields into each library's call.
+
+Extraction is the only place that reads the recorded pandas call: the factories
+below bind it against pandas' own signature and parse it into the variant's
+fields. A call they cannot model (``inplace=True``, a column-wise ``axis``, a
+graph-fed structural option, arguments pandas would reject) returns ``None``,
+which leaves it an opaque method call that runs on pandas exactly as recorded.
+"""
+from __future__ import annotations
+
+import inspect
+
+import pandas as pd
+
 from stratum.optimizer.logical._ops import (
     FRAME_TYPES, OperandRef, OutputType, GetItemOp, MethodCallOp, Op)
 from stratum.optimizer.logical._column_expr import ColumnExpr, fold_column_expr
 
 
-class SelectionKind(Enum):
-    """The kind of selection a :class:`SelectionOp` represents.
-
-    ``MASK``/``QUERY`` carry a predicate; the rest map 1:1 to a frame method.
-    """
-    MASK = auto()
-    QUERY = auto()
-    DROPNA = auto()
-    DROP_DUPLICATES = auto()
-    HEAD = auto()
-    TAIL = auto()
-    SAMPLE = auto()
-    DROP = auto()  # ``drop`` of rows by index label; no polars counterpart
-
-
-# Frame methods that are relational selections (restrict rows, keep columns).
-_SELECTION_METHODS = {
-    "dropna": SelectionKind.DROPNA,
-    "drop_duplicates": SelectionKind.DROP_DUPLICATES,
-    "head": SelectionKind.HEAD,
-    "tail": SelectionKind.TAIL,
-    "sample": SelectionKind.SAMPLE,
-}
-# Method name to call per backend for each method-based kind. ``drop`` is not in
-# ``_SELECTION_METHODS``: only its row form is a selection, which extraction
-# decides from the axis.
-_SELECTION_PANDAS_METHOD = {v: k for k, v in _SELECTION_METHODS.items()}
-_SELECTION_PANDAS_METHOD[SelectionKind.DROP] = "drop"
-_SELECTION_POLARS_METHOD = {
-    SelectionKind.DROPNA: "drop_nulls",
-    SelectionKind.DROP_DUPLICATES: "unique",
-    SelectionKind.HEAD: "head",
-    SelectionKind.TAIL: "tail",
-    SelectionKind.SAMPLE: "sample",
-}
-
-
 class SelectionOp(Op):
-    """A relational selection: restricts rows, keeps columns.
+    """Abstract base of the selection family: restricts rows, keeps columns.
 
-    Method-based kinds use ``args``/``kwargs``; ``MASK``/``QUERY`` use ``predicate``.
+    Never instantiated directly. Impls register on the concrete subclasses.
     """
     logical_family = "Selection"
-    fields = ["kind", "args", "kwargs", "predicate"]
 
-    def __init__(self, kind: SelectionKind, args: tuple | list = None, kwargs: dict = None,
-                 predicate: ColumnExpr = None, inputs: list[Op] = None, outputs: list[Op] = None):
-        super().__init__(name=kind.name.lower(), inputs=inputs, outputs=outputs)
-        if kwargs is not None:
-            self.check_kwargs(kwargs)
-        self.kind = kind
-        self.args = args
-        self.kwargs = kwargs
-        self.predicate = predicate
+    def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name=name, inputs=inputs, outputs=outputs)
         # A selection preserves its input's kind (a frame stays a frame, a series
         # stays a series); extraction overrides this with the propagated type.
         self.output_type = OutputType.FRAME
 
     def propagate_output_schema(self):
-        """A selection restricts rows and keeps columns, so the source schema
-        passes through unchanged, for a MASK/QUERY predicate and the method-based
-        kinds alike.
-
-        The one exception is ``dropna(axis=1)``, which drops the *columns* that
-        contain nulls. Which ones those are is value-dependent, so it is unknown
-        rather than a different set of names.
-        """
-        if self.kind is SelectionKind.DROPNA and not self._drops_rows():
-            self.output_schema = None
-            return
+        """Rows go, columns stay: the source schema passes through unchanged."""
         # A selection with no source edge has nothing to pass through.
         self.output_schema = self.inputs[0].output_schema if self.inputs else None
 
-    def _drops_rows(self) -> bool:
-        """Whether a DROPNA works down the rows (``axis=0``), pandas' default.
-
-        ``dropna`` takes keyword arguments only, so ``args`` cannot carry the axis.
-        A graph-fed axis has no static value and is treated as column-wise, the
-        conservative side.
-        """
-        axis = (self.kwargs or {}).get("axis", 0)
-        return axis in (0, "index")
-
-    # No custom __str__: the base IRNode renders ``<class>(<name>) [df]`` from
-    # ``self.name`` (== the kind). While logical, it shows the ``Selection``
-    # family; once lowered, ``_is_physical`` flips the class-name component to the
-    # bound impl (PandasQuerySelectionOp, ...), so the plan reflects the selected
-    # backend instead of a hardcoded name.
+    # No custom __str__: the base IRNode renders ``<class>(<name>) [df]``. While
+    # logical it shows the ``Selection`` family; once lowered, the bound impl
+    # (PandasQuerySelectionOp, ...) replaces the class-name component.
 
 
-def make_selection_op(op: MethodCallOp, kind: SelectionKind = None) -> SelectionOp:
-    """Convert a row-selection method call to a ``SelectionOp``.
+class MaskSelectionOp(SelectionOp):
+    """Keeps the rows where a boolean ``ColumnExpr`` predicate holds."""
+    fields = ["predicate"]
 
-    ``kind`` defaults to the one ``_SELECTION_METHODS`` lists for the method.
+    def __init__(self, predicate: ColumnExpr = None, inputs: list[Op] = None,
+                 outputs: list[Op] = None):
+        super().__init__(name="mask", inputs=inputs, outputs=outputs)
+        self.predicate = predicate
+
+
+class DropMissingSelectionOp(SelectionOp):
+    """Drops rows with missing values (null, and NaN in float columns).
+
+    ``subset``: the columns to inspect, ``None`` for all of them.
+    ``min_present``: how many inspected values a row needs to be kept; ``None``
+    means all of them. A series has a single value per row, so it is always
+    ``None`` there.
+    ``ignore_index``: renumber the surviving rows (meaningful only where rows
+    carry index labels).
     """
-    new_op = SelectionOp(kind=kind or _SELECTION_METHODS[op.method_name],
-                         args=op.args, kwargs=op.kwargs,
-                         inputs=op.inputs, outputs=op.outputs)
+    fields = ["subset", "min_present", "ignore_index"]
+
+    def __init__(self, subset=None, min_present=None, ignore_index=False,
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="drop_missing", inputs=inputs, outputs=outputs)
+        self.subset = subset
+        self.min_present = min_present
+        self.ignore_index = ignore_index
+
+
+class DropDuplicatesSelectionOp(SelectionOp):
+    """Drops repeated rows, comparing ``subset`` columns (``None``: all).
+
+    ``keep``: which copy of a repeated row survives: ``"first"``, ``"last"``,
+    or ``"none"`` to drop every copy.
+    """
+    fields = ["subset", "keep", "ignore_index"]
+
+    KEEP = ("first", "last", "none")
+
+    def __init__(self, subset=None, keep: str = "first", ignore_index=False,
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="drop_duplicates", inputs=inputs, outputs=outputs)
+        if keep not in self.KEEP:
+            raise ValueError(f"keep must be one of {self.KEEP}, got {keep!r}")
+        self.subset = subset
+        self.keep = keep
+        self.ignore_index = ignore_index
+
+
+class SliceSelectionOp(SelectionOp):
+    """Keeps the first ``n`` rows, or the last ``n`` when ``from_end``.
+
+    A negative ``n`` keeps all rows except ``|n|`` from the other end.
+    """
+    fields = ["n", "from_end"]
+
+    def __init__(self, n=5, from_end: bool = False,
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="tail" if from_end else "head", inputs=inputs, outputs=outputs)
+        self.n = n
+        self.from_end = from_end
+
+
+class SampleSelectionOp(SelectionOp):
+    """Keeps a random sample of rows, in random order.
+
+    ``n`` rows, or ``frac`` of them; one row when neither is given, and an error
+    when both are. ``weights`` (a column name or a sequence) skews the draw;
+    ``seed`` is an integer or a numpy random generator.
+    """
+    fields = ["n", "frac", "with_replacement", "weights", "seed", "ignore_index"]
+
+    def __init__(self, n=None, frac=None, with_replacement=False, weights=None,
+                 seed=None, ignore_index=False,
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="sample", inputs=inputs, outputs=outputs)
+        self.n = n
+        self.frac = frac
+        self.with_replacement = with_replacement
+        self.weights = weights
+        self.seed = seed
+        self.ignore_index = ignore_index
+
+
+class DropLabelsSelectionOp(SelectionOp):
+    """Drops the rows whose index label is in ``labels``.
+
+    Only a library whose rows carry index labels can run this. ``level`` picks a
+    level of a MultiIndex; ``errors="ignore"`` skips labels that are absent.
+    """
+    fields = ["labels", "level", "errors"]
+
+    def __init__(self, labels=None, level=None, errors="raise",
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="drop_labels", inputs=inputs, outputs=outputs)
+        self.labels = labels
+        self.level = level
+        self.errors = errors
+
+
+# --- Extraction: recorded pandas call -> selection fields ----------------------
+
+_ROW_AXES = (0, "index", "rows")
+
+
+def _bind_call(op: MethodCallOp) -> dict | None:
+    """The recorded call's arguments by parameter name, or ``None`` when pandas
+    would reject them (unknown keyword, too many positionals, ...).
+
+    Binds against the signature of the receiver's own class, since a Series and
+    a DataFrame method can take different parameters. Only the arguments actually
+    passed are returned; pandas defaults stay implicit.
+    """
+    owner = pd.Series if op.inputs[0].output_type is OutputType.SERIES else pd.DataFrame
+    try:
+        bound = inspect.signature(getattr(owner, op.method_name)).bind(
+            None, *(op.args or ()), **(op.kwargs or {}))
+    except TypeError:
+        return None
+    arguments = dict(bound.arguments)
+    arguments.pop("self")
+    return arguments
+
+
+def _is_static(value) -> bool:
+    return not isinstance(value, OperandRef)
+
+
+def _not_inplace(call: dict) -> bool:
+    """``inplace=True`` mutates the source and returns ``None``: not a selection."""
+    return call.get("inplace", False) is False
+
+
+def _drop_missing_fields(call: dict, series: bool) -> dict | None:
+    if not _not_inplace(call) or call.get("axis", 0) not in _ROW_AXES:
+        return None
+    min_present = None
+    if not series:
+        how, thresh = call.get("how"), call.get("thresh")
+        if "how" in call and "thresh" in call:
+            return None  # pandas rejects both together
+        if thresh is not None:
+            min_present = thresh
+        elif "how" in call:
+            if how == "all":
+                min_present = 1  # dropped only when nothing is present
+            elif how != "any":
+                return None  # graph-fed or invalid
+    return dict(subset=call.get("subset"), min_present=min_present,
+                ignore_index=call.get("ignore_index", False))
+
+
+def _drop_duplicates_fields(call: dict, series: bool) -> dict | None:
+    keep = call.get("keep", "first")
+    if not _not_inplace(call) or not _is_static(keep):
+        return None
+    keep = {False: "none", "first": "first", "last": "last"}.get(keep)
+    if keep is None:
+        return None
+    return dict(subset=call.get("subset"), keep=keep,
+                ignore_index=call.get("ignore_index", False))
+
+
+def _slice_fields(call: dict, from_end: bool) -> dict:
+    return dict(n=call.get("n", 5), from_end=from_end)
+
+
+def _sample_fields(call: dict, series: bool) -> dict | None:
+    if call.get("axis") not in (None, *_ROW_AXES):
+        return None  # column sampling, or a graph-fed axis
+    return dict(n=call.get("n"), frac=call.get("frac"),
+                with_replacement=call.get("replace", False),
+                weights=call.get("weights"), seed=call.get("random_state"),
+                ignore_index=call.get("ignore_index", False))
+
+
+def _drop_labels_fields(call: dict, series: bool) -> dict | None:
+    """Row form of ``drop``; extraction already decided the axis."""
+    if not _not_inplace(call) or call.get("columns") is not None:
+        return None
+    if call.get("labels") is not None and call.get("index") is not None:
+        return None  # pandas rejects both
+    labels = call["index"] if call.get("index") is not None else call.get("labels")
+    if labels is None:
+        return None  # pandas requires something to drop
+    return dict(labels=labels, level=call.get("level"),
+                errors=call.get("errors", "raise"))
+
+
+# pandas method -> (selection subclass, parser of the bound call)
+_SELECTION_PARSERS = {
+    "dropna": (DropMissingSelectionOp, _drop_missing_fields),
+    "drop_duplicates": (DropDuplicatesSelectionOp, _drop_duplicates_fields),
+    "head": (SliceSelectionOp, lambda call, series: _slice_fields(call, from_end=False)),
+    "tail": (SliceSelectionOp, lambda call, series: _slice_fields(call, from_end=True)),
+    "sample": (SampleSelectionOp, _sample_fields),
+    "drop": (DropLabelsSelectionOp, _drop_labels_fields),
+}
+# Frame methods that are always row selections. ``drop`` is one only in its row
+# form, which extraction decides from the axis.
+_SELECTION_METHODS = frozenset(_SELECTION_PARSERS) - {"drop"}
+
+
+def make_selection_op(op: MethodCallOp) -> SelectionOp | None:
+    """Parse a row-selection method call into its ``SelectionOp`` subclass.
+
+    Returns ``None`` (the call stays opaque) when the call is not a row
+    selection we can model; see the module docstring.
+    """
+    cls, parse = _SELECTION_PARSERS[op.method_name]
+    call = _bind_call(op)
+    if call is None:
+        return None
+    fields = parse(call, op.inputs[0].output_type is OutputType.SERIES)
+    if fields is None:
+        return None
+    new_op = cls(**fields, inputs=op.inputs, outputs=op.outputs)
     new_op.output_type = op.inputs[0].output_type
     op.replace_output_of_inputs(new_op)
     return new_op
 
 
-# --- Mask selection: df[bool_series] -> SelectionOp(MASK, predicate) ----------
+# --- Mask selection: df[bool_series] -> MaskSelectionOp(predicate) -------------
 
 def is_mask_selection(op: GetItemOp) -> bool:
     """Return whether ``op`` is ``container[series]`` (e.g. a boolean mask).
@@ -132,8 +292,8 @@ def is_mask_selection(op: GetItemOp) -> bool:
             and key_op.output_type is OutputType.SERIES)
 
 
-def make_mask_selection_op(op: GetItemOp) -> SelectionOp:
-    """Fold ``df[mask]`` into a single ``SelectionOp(MASK, predicate)``.
+def make_mask_selection_op(op: GetItemOp) -> MaskSelectionOp:
+    """Fold ``df[mask]`` into a single ``MaskSelectionOp(predicate)``.
 
     Nodes consumed only by the mask are absorbed into the predicate and detached; the
     rest stay in the graph as ``OperandLeaf`` inputs (``inputs = [src, *leaf_ops]``).
@@ -143,8 +303,8 @@ def make_mask_selection_op(op: GetItemOp) -> SelectionOp:
 
     predicate, absorbed, leaf_ops = fold_column_expr(key_op, src, root_consumer=op)
 
-    sel = SelectionOp(kind=SelectionKind.MASK, predicate=predicate,
-                      inputs=[src, *leaf_ops], outputs=list(op.outputs))
+    sel = MaskSelectionOp(predicate=predicate, inputs=[src, *leaf_ops],
+                          outputs=list(op.outputs))
     # Filtering rows keeps the container's kind: a masked series is still a series.
     sel.output_type = src.output_type
 

@@ -13,7 +13,7 @@ from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._map_ops import polars_string_method
 from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._map_execs import PolarsAssignMapOp, PolarsStringMethodOp
-from stratum.optimizer.physical._selection_execs import PolarsSelectionOp
+from stratum.optimizer.physical._selection_execs import PolarsMaskSelectionOp
 
 FRAME = pd.DataFrame({"s": ["1000010001.0", "aaa", "a.a", "AaA", "", None]})
 
@@ -53,7 +53,7 @@ def _plan(path, args, kwargs):
             return replaced, PolarsStringMethodOp
         if path == "assign":
             return source.assign(replaced=replaced), PolarsAssignMapOp
-        return source[replaced == "xxx"], PolarsSelectionOp
+        return source[replaced == "xxx"], PolarsMaskSelectionOp
 
 
 @pytest.mark.parametrize("path", ["standalone", "assign", "selection"])

@@ -7,7 +7,7 @@ introduced into one default-selector pipeline:
 
 * a source **read** ``pd.read_csv`` lowered to a source op;
 * a **mask selection** ``df[predicate]`` that folds a boolean expression tree
-  into one :class:`SelectionOp` (``stratum.optimizer.logical._selection_ops``);
+  into one :class:`MaskSelectionOp` (``stratum.optimizer.logical._selection_ops``);
 * a folded **column map** ``df.assign(...)`` -- arithmetic, a ``.dt`` accessor
   over a parsed date -- collapsing into one :class:`AssignMapOp`
   (``stratum.optimizer.logical._map_ops``);
@@ -35,7 +35,7 @@ from sklearn.metrics import make_scorer, r2_score
 
 import stratum as st
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
-from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
+from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp)
@@ -78,7 +78,7 @@ def build_pipeline(file_path, model=None):
     src = st.as_data_op(file_path).skb.apply_func(pd.read_csv)
 
     # (1) FILTER: keep completed orders that actually shipped units. The whole
-    # boolean tree folds into a single SelectionOp(MASK) predicate.
+    # boolean tree folds into a single MaskSelectionOp predicate.
     active = src[(src["status"] == "completed") & (src["quantity"] > 0)]
     y = active["satisfaction"].skb.mark_as_y()
 
@@ -144,7 +144,7 @@ def test_frame_ops_pipeline_plan(backend):
 
     # The filter folded into a mask predicate (not a method selection).
     sel = next(o for o in ops if isinstance(o, SelectionOp))
-    assert sel.kind is SelectionKind.MASK
+    assert isinstance(sel, MaskSelectionOp)
 
     # The learning ops (transformer, estimator) and the concat are present.
     assert any(isinstance(o, TransformerOp) for o in ops)
@@ -177,7 +177,7 @@ def test_transformer_binds_default_selector():
 
 
 def test_selection_binds_query_impl_under_flag():
-    """The *same* logical MASK ``SelectionOp`` binds to different pandas impls
+    """The *same* logical ``MaskSelectionOp`` binds to different pandas impls
     depending on the plan context: boolean-mask indexing by default, the
     ``DataFrame.query()`` fast path when ``OptConfig.pandas_query`` is on. The
     choice is a plan-time bind, so no ``pandas_query`` branch survives into
@@ -195,7 +195,7 @@ def test_selection_binds_query_impl_under_flag():
         assert len(sels) == 1
         # The predicate (`status == "completed" & quantity > 0`) is fully
         # query-expressible, so the flag alone decides which impl binds.
-        assert sels[0].kind is SelectionKind.MASK
+        assert isinstance(sels[0], MaskSelectionOp)
         return sels[0]
 
     # Default: boolean-mask indexing.

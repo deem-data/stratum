@@ -118,7 +118,8 @@ class TestMultiLevelChoiceGraph(unittest.TestCase):
         scorer = make_scorer(r2_score)
         with csv_file(make_data()) as path:
             preds = define_pipeline(path)
-            with st.config(DEBUG=True, debug_graph=False, scheduler=True, rust_backend=False):
+            with st.config(DEBUG=True, debug_graph=False, scheduler=True, rust_backend=False,
+                           explain=["logical", "physical_impl"]):
                 search = preds.skb.make_grid_search(fitted=True, cv = 2, scoring=scorer)
                 self.assertIsNotNone(search.results_)
                 self.assertGreater(len(search.results_), 0)

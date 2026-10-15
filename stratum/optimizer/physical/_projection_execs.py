@@ -1,6 +1,6 @@
 """Physical implementations of the projection operators.
 
-Each logical projection op (``MetadataOp``, ``DropOp``, ``ColumnSelectorOp``,
+Each logical projection op (``DropOp``, ``ColumnSelectorOp``,
 ``ColumnProjectionOp``) is a same-shape backend-variant family: the concrete
 ``Pandas*`` / ``Polars*`` impls subclass the logical op (+ :class:`PhysicalOp`)
 and carry only the backend-specific ``process``. Selection swaps the logical op
@@ -9,38 +9,10 @@ across the plan.
 """
 from __future__ import annotations
 
-from stratum.optimizer.logical._base import _resolve_args, _resolve_kwargs
 from stratum.optimizer.logical._projection_ops import (
-    ColumnProjectionOp, ColumnSelectorOp, DropOp, MetadataOp,
-    resolve_selector_columns)
+    ColumnProjectionOp, ColumnSelectorOp, DropOp, resolve_selector_columns)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
-
-
-# --- MetadataOp (e.g. rename) -------------------------------------------------
-
-@physical_impl(of=MetadataOp, backend="pandas")
-class PandasMetadataOp(MetadataOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
-        _obj = inputs[0]
-        _args = _resolve_args(self.args, inputs)
-        _kwargs = _resolve_kwargs(self.kwargs, inputs)
-        return getattr(_obj, self.func)(*_args, **_kwargs)
-
-
-@physical_impl(of=MetadataOp, backend="polars")
-class PolarsMetadataOp(MetadataOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
-        _obj = inputs[0]
-        if self.func == "reset_index":
-            # Extraction only admits the dropping form, and polars rows carry no
-            # labels to drop, so there is nothing to do.
-            return _obj
-        _args = _resolve_args(self.args, inputs)
-        _kwargs = _resolve_kwargs(self.kwargs, inputs)
-        if "columns" in _kwargs:
-            _args.append(_kwargs["columns"])
-        return getattr(_obj, self.func)(*_args)
 
 
 # --- DropOp -------------------------------------------------------------------
@@ -57,7 +29,7 @@ class PolarsDropOp(DropOp, PhysicalOp):
     @classmethod
     def supports(cls, op: DropOp, ctx) -> bool:
         # Extraction only builds a DropOp for a column drop on a frame; row drops
-        # are SelectionOp(DROP).
+        # are DropLabelsSelectionOp.
         unsupported = set(op.kwargs or {}) - {"columns", "labels", "axis", "errors"}
         if unsupported:
             op._unsupported_reason = f"drop options {sorted(unsupported)}"

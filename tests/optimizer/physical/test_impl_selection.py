@@ -17,7 +17,7 @@ from stratum.adapters.string_encoder import (RustyStringEncoder,
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._join_ops import JoinOp
 from stratum.optimizer.logical._ops import TransformerOp
-from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
+from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SliceSelectionOp
 from stratum.optimizer.physical._impl_selection import (
     DefaultImplementationSelector,
     FlagBasedSelector,
@@ -38,8 +38,8 @@ from stratum.optimizer.physical._source_execs import (InMemoryFrame,
                                                        PandasInMemoryFrame,
                                                        PolarsInMemoryFrame)
 from stratum.optimizer.physical._selection_execs import (
-    PandasIndexSelectionOp,
-    PolarsSelectionOp,
+    PandasSliceSelectionOp,
+    PolarsSliceSelectionOp,
 )
 from stratum.optimizer.physical._transform_execs import StringEncoderOp
 from stratum.optimizer.logical._ops import Op, ValueOp
@@ -265,11 +265,11 @@ class TestRelationalImplementationSelection(unittest.TestCase):
                 left_on="low_category_0",
                 right_on="low_category_0",
             ),
-            SelectionOp(kind=SelectionKind.HEAD, args=(5,)),
+            SliceSelectionOp(n=5),
         )
 
     def test_default_binds_pandas_join_and_selection(self):
-        expected_impls = (PandasJoinOp, PandasIndexSelectionOp)
+        expected_impls = (PandasJoinOp, PandasSliceSelectionOp)
 
         for op, expected_impl in zip(self._relational_ops(), expected_impls):
             with self.subTest(op=type(op).__name__):
@@ -281,7 +281,7 @@ class TestRelationalImplementationSelection(unittest.TestCase):
                 self.assertIsInstance(op, expected_impl)
 
     def test_greedy_binds_polars_join_and_selection(self):
-        expected_impls = (PolarsJoinOp, PolarsSelectionOp)
+        expected_impls = (PolarsJoinOp, PolarsSliceSelectionOp)
 
         for op, expected_impl in zip(self._relational_ops(), expected_impls):
             with self.subTest(op=type(op).__name__):
@@ -305,19 +305,19 @@ class TestUnrunnableOpsFailAtPlanTime(unittest.TestCase):
         return PhysicalRegistry(impls)
 
     def test_every_backend_refusing_is_a_plan_time_error(self):
-        registry = self._registry(_impl(SelectionOp, "pandas",
+        registry = self._registry(_impl(MaskSelectionOp, "pandas",
                                         supports=lambda op, ctx: False))
         with self.assertRaises(NotImplementedError) as cm:
-            bind_op(SelectionOp(kind=SelectionKind.MASK), _ctx(),
+            bind_op(MaskSelectionOp(), _ctx(),
                     registry=registry, selector=DefaultImplementationSelector())
         self.assertIn("refused", str(cm.exception))
 
     def test_a_backend_mismatch_is_a_plan_time_error(self):
         # Nothing refused, but the selector is pinned to a backend none of the
         # supported impls provide.
-        registry = self._registry(_impl(SelectionOp, "pandas"))
+        registry = self._registry(_impl(MaskSelectionOp, "pandas"))
         with self.assertRaises(NotImplementedError) as cm:
-            bind_op(SelectionOp(kind=SelectionKind.MASK), _ctx(),
+            bind_op(MaskSelectionOp(), _ctx(),
                     registry=registry, selector=FlagBasedSelector(backend="polars"))
         self.assertIn("polars", str(cm.exception))
 
@@ -331,7 +331,7 @@ class TestUnrunnableOpsFailAtPlanTime(unittest.TestCase):
                                   selector=DefaultImplementationSelector()))
 
     def test_an_op_with_no_registered_impl_is_left_alone(self):
-        op = SelectionOp(kind=SelectionKind.MASK)
+        op = MaskSelectionOp()
         self.assertIs(op, bind_op(op, _ctx(), registry=PhysicalRegistry(),
                                   selector=DefaultImplementationSelector()))
 

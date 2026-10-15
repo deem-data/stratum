@@ -21,10 +21,10 @@ from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._column_expr import BinOpExpr, Col, Const
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._ops import ValueOp
-from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
+from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._conversion import ConversionOp
-from stratum.optimizer.physical._selection_execs import PolarsSelectionOp
+from stratum.optimizer.physical._selection_execs import PolarsMaskSelectionOp
 from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
 from stratum.frontend._skrub_graph import get_data
 
@@ -191,7 +191,7 @@ def test_q1_plan_folds_filter_and_map(polars):
     sel = _one(ops, SelectionOp)
     amo = _one(ops, AssignMapOp)
 
-    assert sel.kind is SelectionKind.MASK
+    assert isinstance(sel, MaskSelectionOp)
 
     disc_price = BinOpExpr(operator.mul,
                            Col("l_extendedprice"),
@@ -207,7 +207,7 @@ def test_q1_plan_folds_filter_and_map(polars):
         assert isinstance(op, PhysicalOp), \
             f"{type(op).__name__} was not bound to a physical implementation"
     if polars:
-        assert isinstance(sel, PolarsSelectionOp)
+        assert isinstance(sel, PolarsMaskSelectionOp)
         assert isinstance(amo, PolarsAssignMapOp)
 
 
@@ -232,7 +232,7 @@ def test_q1_runs_under_greedy_behind_a_conversion():
     polars could not restore, so the filter runs on pandas too and the plan
     converts the source instead (#227)."""
     df = make_lineitem()
-    with st.config(implementation_selector="greedy"):
+    with st.config(implementation_selector="greedy", explain=["logical", "physical_impl"]):
         ops = _plan(build_q1(df))
         result = st._api.evaluate(build_q1(df))
     conversions = [op for op in ops if isinstance(op, ConversionOp)]
