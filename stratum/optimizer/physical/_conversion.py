@@ -88,7 +88,6 @@ def _is_default_index(data) -> bool:
 def _index_origin(op: IRNode, memo: dict):
     # Lazy imports: avoid import cycles.
     from stratum.optimizer.logical._aggregation_ops import AggregateOp
-    from stratum.optimizer.logical._column_methods import ColumnMethodOp
     from stratum.optimizer.logical._join_ops import FILTERING_JOINS, JoinOp
     from stratum.optimizer.logical._map_ops import MapOp
     from stratum.optimizer.logical._numeric_ops import NumericOp
@@ -96,9 +95,7 @@ def _index_origin(op: IRNode, memo: dict):
                                                 MethodCallOp, SplitXOp, UnaryOp,
                                                 ValueOp)
     from stratum.optimizer.logical._projection_ops import (
-        ApplyUDFOp, AssignOp, ColumnProjectionOp, ColumnSelectorOp,
-        DatetimeConversionOp, DropOp, GetAttrProjectionOp, MetadataOp,
-        StringMethodOp)
+        ColumnProjectionOp, ColumnSelectorOp, DropOp, MetadataOp)
     from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
     from stratum.optimizer.logical._sort_ops import SortOp
     from stratum.optimizer.physical._source_execs import FileReadOp, InMemoryFrame
@@ -136,11 +133,10 @@ def _index_origin(op: IRNode, memo: dict):
         return DEFAULT
     if isinstance(op, AggregateOp):
         return DEFAULT if op.grouped and op.options.get("as_index", True) is False else new
-    if isinstance(op, (MapOp, AssignOp, ColumnProjectionOp, ColumnSelectorOp, DropOp,
-                       ColumnMethodOp, StringMethodOp, DatetimeConversionOp,
-                       GetAttrProjectionOp, ApplyUDFOp, BaseEstimatorOp, ImplOp,
-                       SplitXOp)):
-        # Row-preserving.
+    if isinstance(op, (MapOp, ColumnProjectionOp, ColumnSelectorOp, DropOp,
+                       BaseEstimatorOp, ImplOp, SplitXOp)):
+        # Row-preserving. A DropOp only drops columns; a row drop is a
+        # SelectionOp(DROP) and starts a new origin above.
         return first_input()
     if isinstance(op, MethodCallOp) and op.method_name in _ROW_PRESERVING_METHODS:
         return _common_origin(op, memo)

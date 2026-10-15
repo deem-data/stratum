@@ -10,10 +10,9 @@ import stratum
 from stratum._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
-from stratum.optimizer.logical._projection_ops import polars_string_method
+from stratum.optimizer.logical._map_ops import polars_string_method
 from stratum.optimizer.physical._conversion import ConversionOp
-from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
-from stratum.optimizer.physical._projection_execs import PolarsStringMethodOp
+from stratum.optimizer.physical._map_execs import PolarsAssignMapOp, PolarsStringMethodOp
 from stratum.optimizer.physical._selection_execs import PolarsSelectionOp
 
 FRAME = pd.DataFrame({"s": ["1000010001.0", "aaa", "a.a", "AaA", "", None]})

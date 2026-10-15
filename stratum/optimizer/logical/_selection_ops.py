@@ -16,6 +16,7 @@ class SelectionKind(Enum):
     HEAD = auto()
     TAIL = auto()
     SAMPLE = auto()
+    DROP = auto()  # ``drop`` of rows by index label; no polars counterpart
 
 
 # Frame methods that are relational selections (restrict rows, keep columns).
@@ -26,8 +27,11 @@ _SELECTION_METHODS = {
     "tail": SelectionKind.TAIL,
     "sample": SelectionKind.SAMPLE,
 }
-# Method name to call per backend for each method-based kind.
+# Method name to call per backend for each method-based kind. ``drop`` is not in
+# ``_SELECTION_METHODS``: only its row form is a selection, which extraction
+# decides from the axis.
 _SELECTION_PANDAS_METHOD = {v: k for k, v in _SELECTION_METHODS.items()}
+_SELECTION_PANDAS_METHOD[SelectionKind.DROP] = "drop"
 _SELECTION_POLARS_METHOD = {
     SelectionKind.DROPNA: "drop_nulls",
     SelectionKind.DROP_DUPLICATES: "unique",
@@ -90,9 +94,12 @@ class SelectionOp(Op):
     # backend instead of a hardcoded name.
 
 
-def make_selection_op(op: MethodCallOp) -> SelectionOp:
-    """Convert a row-selection method call to a ``SelectionOp``."""
-    new_op = SelectionOp(kind=_SELECTION_METHODS[op.method_name],
+def make_selection_op(op: MethodCallOp, kind: SelectionKind = None) -> SelectionOp:
+    """Convert a row-selection method call to a ``SelectionOp``.
+
+    ``kind`` defaults to the one ``_SELECTION_METHODS`` lists for the method.
+    """
+    new_op = SelectionOp(kind=kind or _SELECTION_METHODS[op.method_name],
                          args=op.args, kwargs=op.kwargs,
                          inputs=op.inputs, outputs=op.outputs)
     new_op.output_type = op.inputs[0].output_type

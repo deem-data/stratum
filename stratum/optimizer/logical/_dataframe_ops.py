@@ -23,11 +23,12 @@ from stratum.optimizer.logical._aggregation_ops import (
 from stratum.optimizer.logical._sort_ops import SortOp, make_sort_op
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, MetadataOp, ProjectionOp, DropOp,
-    ApplyUDFOp, AssignOp, DatetimeConversionOp, GetAttrProjectionOp,
-    StringMethodOp, make_column_projection_op, make_column_selector_op,
-    make_datetime_conversion_op, make_frame_get_attr, make_reset_index_op,
-    make_string_method_op, resolve_selector_columns)
-from stratum.optimizer.logical._map_ops import MapOp, AssignMapOp, make_assign_map_op
+    drop_targets_columns, make_column_projection_op, make_column_selector_op,
+    make_drop_op, make_reset_index_op, resolve_selector_columns)
+from stratum.optimizer.logical._map_ops import (
+    MapOp, AccessorMapOp, ApplyUDFOp, AssignMapOp, AssignOp, DatetimeConversionOp,
+    StringMethodOp, make_assign_map_op, make_datetime_conversion_op,
+    make_frame_get_attr, make_string_method_op)
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, is_supported_column_method, make_column_method_op)
 from stratum.optimizer.logical._join_ops import (
@@ -122,7 +123,7 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
     """
     source = op.inputs[0].output_type
     if op.method_name in {"where", "map", "sort_values", "dropna", "fillna",
-                          "set_axis"}:
+                          "set_axis", "drop"}:
         return source
     if op.method_name == "to_frame" and source is OutputType.SERIES:
         return OutputType.FRAME
@@ -136,13 +137,13 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
 def _is_row_col_indexer(op: GetItemOp) -> bool:
     """Whether ``op`` indexes through ``.loc``/``.iloc``, i.e. one axis per key element.
 
-    The accessor survives extraction as the ``GetAttrProjectionOp`` feeding this
+    The accessor survives extraction as the ``AccessorMapOp`` feeding this
     GetItem, so the container tells the two tuple-key meanings apart: ``df.loc[a, b]``
     indexes rows by ``a`` and columns by ``b``, while a bare ``df[("a", "b")]`` is one
     MultiIndex column label.
     """
     container = op.inputs[0]
-    return (isinstance(container, GetAttrProjectionOp) and bool(container.attr_name)
+    return (isinstance(container, AccessorMapOp) and bool(container.attr_name)
             and container.attr_name[-1] in _ROW_COL_ACCESSORS)
 
 
@@ -214,7 +215,7 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 new_op = make_datetime_conversion_op(op)
 
         elif isinstance(op, MethodCallOp):
-            if isinstance(op.inputs[0], GetAttrProjectionOp) and op.inputs[0].attr_name == ["str"]:
+            if isinstance(op.inputs[0], AccessorMapOp) and op.inputs[0].attr_name == ["str"]:
                 # `col.str.<method>(...)` -> fuse the .str accessor and the method
                 # call into a single StringMethodOp (a SERIES-typed projection). An
                 # enclosing `df[...]` then sees a mask and folds the chain into a
@@ -243,12 +244,18 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                                     outputs=op.outputs)
                 op.replace_output_of_inputs(new_op)
             elif op.method_name == "drop":
-                new_op = DropOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-                op.replace_output_of_inputs(new_op)
+                # Columns are a projection, rows (the pandas default) a selection.
+                # An unknown axis, both axes at once, or a "column" drop on a
+                # series (a no-op in pandas) stays an opaque call.
+                drops_columns = drop_targets_columns(op.kwargs)
+                if drops_columns is False:
+                    new_op = make_selection_op(op, kind=SelectionKind.DROP)
+                elif drops_columns and op.inputs[0].output_type is OutputType.FRAME:
+                    new_op = make_drop_op(op)
             elif op.method_name == "apply":
                 new_op = ApplyUDFOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
                 # apply on a column yields a column, on a frame yields a frame:
-                # keep the input's kind (ProjectionOp defaults to FRAME).
+                # keep the input's kind (MapOp defaults to FRAME).
                 new_op.output_type = op.inputs[0].output_type
                 op.replace_output_of_inputs(new_op)
             elif op.method_name in ["assign"]:

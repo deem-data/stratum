@@ -94,6 +94,10 @@ class PolarsSelectionOp(SelectionOp, PhysicalOp):
         # pandas, which this impl does not accept (#226).
         if op.kind is SelectionKind.MASK and op.predicate is not None:
             return refuse_unsupported_exprs(op, [op.predicate])
+        if op.kind is SelectionKind.DROP:
+            # polars rows carry no index labels to drop by.
+            op._unsupported_reason = "drops by index label"
+            return False
         return True
 
     def process(self, mode: str, inputs: list):

@@ -22,7 +22,7 @@ from stratum.optimizer.logical._selection_ops import SelectionOp, SelectionKind
 from stratum.optimizer.logical._column_expr import BinOpExpr, Col, OperandLeaf
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
 from stratum.optimizer._optimize import convert_to_ops, optimize as optimize_
-from stratum.optimizer.logical._projection_ops import ApplyUDFOp
+from stratum.optimizer.logical._map_ops import ApplyUDFOp
 from stratum.optimizer.physical._impl_selection import bind_op
 from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._physical_ops import PhysicalOp

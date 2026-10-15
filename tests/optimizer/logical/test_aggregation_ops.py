@@ -11,8 +11,7 @@ from stratum.optimizer.logical._aggregation_ops import (
     _is_value_counts, make_aggregate_op, make_value_counts_ops)
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, BinOpExpr, Col, DtExpr, OperandLeaf)
-from stratum.optimizer.logical._projection_ops import (
-    ColumnProjectionOp, GetAttrProjectionOp, MetadataOp)
+from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, MetadataOp
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._selection_ops import SelectionKind, SelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp

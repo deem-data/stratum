@@ -224,7 +224,7 @@ def _kept_columns(projection: Op) -> list[str] | None:
         if isinstance(projection.key, str) or names is None or len(set(names)) != len(names):
             return None
         return names
-    if isinstance(projection, DropOp) and projection._drops_columns():
+    if isinstance(projection, DropOp):
         source = projection.inputs[0].output_schema
         dropped = _schema.as_column_list(projection._dropped_columns())
         kwargs = projection.kwargs or {}

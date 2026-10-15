@@ -136,3 +136,29 @@ def test_columns_of_the_same_frame_stay_on_polars(source):
     assert frame_lib(assign) is FrameLib.POLARS
     pd.testing.assert_frame_equal(_as_pandas(result).reset_index(drop=True),
                                   _pandas(plan).reset_index(drop=True), check_dtype=False)
+
+
+def test_a_row_drop_starts_a_new_index_origin():
+    # `drop` of rows by label leaves gaps in a RangeIndex, so the dropped frame's
+    # labels no longer match its source's positions.
+    from stratum.optimizer.physical._conversion import has_default_index
+    frame = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]})
+    with skrub.config_context(eager_data_ops=False):
+        plan = skrub.var("frame", frame).drop([1])
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        ops = optimize(plan, env=get_data(plan))[0]
+    drop = next(op for op in ops if type(op).__name__.endswith(("DropOp", "SelectionOp")))
+    assert not has_default_index(drop)
+
+
+def test_a_row_dropped_column_is_aligned_by_label():
+    # pandas aligns the shorter column on the frame's labels (NaN for the dropped
+    # row); pairing by position fails on the length mismatch.
+    frame = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]})
+    with skrub.config_context(eager_data_ops=False):
+        var = skrub.var("frame", frame)
+        plan = var.assign(p=var.drop([1])["x"])
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = evaluate(plan)
+    expected = frame.assign(p=frame.drop([1])["x"])
+    pd.testing.assert_frame_equal(_as_pandas(result), expected, check_dtype=False)

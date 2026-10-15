@@ -33,7 +33,7 @@ rule reads as intent rather than an oversight:
 
 A rule covers an *operation*, not an operation family, wherever the family is not
 uniformly column preserving: see ``StringMethodOp.ONE_TO_ONE_METHODS``,
-``GetAttrProjectionOp.ELEMENTWISE_ACCESSORS``, ``SelectionOp._drops_rows`` and
+``AccessorMapOp.ELEMENTWISE_ACCESSORS``, ``SelectionOp._drops_rows`` and
 ``DatetimeConversionOp``, each of which admits only the members that map one
 input column to one output column.
 """

@@ -26,10 +26,10 @@ from stratum.optimizer.logical._ops import (OperandRef, BinOp, UnaryOp, GetItemO
 from stratum.optimizer.logical._base import config_key
 from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, get_column_method_spec, polars_dtype)
-from stratum.optimizer.logical._projection_ops import (
-    ColumnProjectionOp, DatetimeConversionOp, GetAttrProjectionOp, StringMethodOp,
-    STR_POLARS_METHODS, polars_datetime_kwargs, polars_str_method_unsupported,
-    polars_string_method)
+from stratum.optimizer.logical._map_ops import (
+    AccessorMapOp, DatetimeConversionOp, StringMethodOp, STR_POLARS_METHODS,
+    polars_datetime_kwargs, polars_str_method_unsupported, polars_string_method)
+from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
 # corresponding map is not foldable into a column expression.
@@ -405,7 +405,7 @@ class DtExpr(ColumnExpr):
     """Datetime accessor attribute (``.dt.<attr>``).
 
     pandas reads the attribute off ``.dt``; polars calls a method, remapping a
-    few names via ``GetAttrProjectionOp.POLARS_ATTR_NAME_MAP``.
+    few names via ``AccessorMapOp.POLARS_ATTR_NAME_MAP``.
     """
     __slots__ = ("operand", "attr")
 
@@ -427,11 +427,11 @@ class DtExpr(ColumnExpr):
         obj = self.operand.to_polars(ctx)
         if self.attr == "is_month_end":
             return obj.dt.month_end() == obj
-        name = GetAttrProjectionOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
+        name = AccessorMapOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
         return getattr(obj.dt, name)()
 
     def _polars_unsupported_here(self):
-        name = GetAttrProjectionOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
+        name = AccessorMapOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
         if self.attr != "is_month_end" and not hasattr(pl.col("_").dt, name):
             return f"polars has no .dt.{name}"
         return None
@@ -841,7 +841,7 @@ class _Folder:
                     and polars_datetime_kwargs(node.args, node.kwargs) is not None)
         if isinstance(node, ColumnMethodOp):
             return True
-        if isinstance(node, GetAttrProjectionOp):
+        if isinstance(node, AccessorMapOp):
             # Only the fused datetime accessor (.dt.<attr>); .str is already fused
             # into StringMethodOp during frame extraction.
             return len(node.attr_name) == 2 and node.attr_name[0] == "dt"
@@ -863,7 +863,7 @@ class _Folder:
                 return [node.inputs[node.operand.k]]
             return []
         if isinstance(node, (StringMethodOp, DatetimeConversionOp,
-                             GetAttrProjectionOp)):
+                             AccessorMapOp)):
             return [node.inputs[0]]
         if isinstance(node, ColumnMethodOp):
             # Every remaining input is referenced by args/kwargs. Returning all
@@ -974,7 +974,7 @@ class _Folder:
             args = self._method_value(node.args or (), node, absorbable, memo)
             kwargs = self._method_value(node.kwargs or {}, node, absorbable, memo)
             return ColumnMethodExpr(operand, node.method, args, kwargs)
-        if isinstance(node, GetAttrProjectionOp):
+        if isinstance(node, AccessorMapOp):
             operand = self._resolve(node.inputs[0], absorbable, memo)
             return DtExpr(operand, node.attr_name[1])
         raise AssertionError(f"unfoldable node reached _make_expr: {node!r}")

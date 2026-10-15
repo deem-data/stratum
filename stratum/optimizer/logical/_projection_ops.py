@@ -1,11 +1,14 @@
-import re
-from typing import Callable
+"""Projection operators: select columns, never modify them.
+
+A projection keeps the rows and the values of its input and only restricts (or
+reorders) the column set: ``df[["a", "b"]]``, ``skb.select(...)``,
+``df.drop(columns=...)``. Anything that changes column values or adds columns is
+a map (:mod:`stratum.optimizer.logical._map_ops`).
+"""
 from skrub.selectors._base import make_selector
-from stratum.optimizer.logical._ops import (OutputType, CallOp, GetAttrOp,
-                                       MethodCallOp, Op, TransformerOp, _resolve_args, _resolve_kwargs)
+from stratum.optimizer.logical._ops import (OutputType, MethodCallOp, Op, TransformerOp,
+                                            _resolve_args, _resolve_kwargs)
 from stratum.optimizer.logical import _schema
-from stratum.optimizer.logical._index_ops import IndexAccessOp
-import polars as pl
 
 
 def resolve_selector_columns(frame, selector) -> list[str]:
@@ -19,122 +22,6 @@ def resolve_selector_columns(frame, selector) -> list[str]:
     # TODO with schema propagation we can resolute the column name list at compile time
     """
     return make_selector(selector).expand(frame)
-
-# pandas ``.str.<method>`` name -> polars ``.str.<method>`` name, for the methods
-# whose names differ between backends. Methods that match (contains, ...) need no
-# entry; methods whose *arguments* differ are translated in
-# :func:`polars_string_method`. A method absent from a backend's str namespace
-# simply won't run there. Shared by :class:`StringMethodOp` and the
-# column-expression ``StrExpr``.
-STR_POLARS_METHODS = {
-    "count": "count_matches",
-    "lower": "to_lowercase",
-    "upper": "to_uppercase",
-    "startswith": "starts_with",
-    "endswith": "ends_with",
-    "len": "len_chars",
-    "strip": "strip_chars",
-    "lstrip": "strip_chars_start",
-    "rstrip": "strip_chars_end",
-}
-
-
-def polars_string_method(obj, method: str, args=(), kwargs=None):
-    """Run a pandas-spelled ``.str.<method>`` call on a polars Series or expression."""
-    kwargs = kwargs or {}
-    if method == "replace":
-        return _polars_str_replace(obj, *args, **kwargs)
-    name = STR_POLARS_METHODS.get(method, method)
-    return getattr(obj.str, name)(*args, **kwargs)
-
-
-# A regex construct the Rust regex engine lacks (lookaround, inline groups and
-# flags) or that means something else there (a numbered backreference).
-_UNPORTABLE_REGEX = re.compile(r"\(\?|\\[1-9]")
-
-
-def polars_str_replace_unsupported(pat, repl=None, n=-1, case=None, flags=0,
-                                   regex=False) -> str | None:
-    """Why a pandas ``str.replace`` call has no exact polars translation, or None.
-
-    Only literal string patterns and replacements translate. Refused:
-    compiled patterns and callable replacements (pandas-only), ``case``/``flags``,
-    an empty pattern, lookarounds and backreferences (unsupported by Rust regex),
-    and a regex replacement containing ``\\`` or ``$`` (the two engines spell
-    group references differently).
-
-    Accepted divergence: on an *object*-dtype column, Python's ``$`` also
-    matches before a trailing newline, Rust's does not. pandas 3's default
-    ``str`` dtype already uses pyarrow's RE2, whose ``$`` is end-of-text like
-    Rust's, so a pipeline reading strings from files sees no difference.
-    """
-    if not isinstance(pat, str) or not isinstance(repl, str):
-        return "only string patterns and replacements translate"
-    if case not in (None, True) or flags:
-        return "case=/flags= are not translated"
-    if not isinstance(n, int) or isinstance(n, bool):
-        return f"n={n!r} is not an integer"
-    if regex:
-        if pat == "":
-            return "an empty regex pattern is not translated"
-        try:
-            re.compile(pat)
-        except re.error as exc:
-            return f"invalid regex: {exc}"
-        if _UNPORTABLE_REGEX.search(pat):
-            return "lookarounds, inline groups/flags and backreferences are not portable"
-        if "\\" in repl or "$" in repl:
-            return "group references in the replacement are not portable"
-    return None
-
-
-def polars_str_method_unsupported(method: str, args=(), kwargs=None) -> str | None:
-    """Why a pandas ``.str.<method>`` call has no exact polars translation, or None."""
-    if method == "replace":
-        return polars_str_replace_unsupported(*args, **(kwargs or {}))
-    name = STR_POLARS_METHODS.get(method, method)
-    if not hasattr(pl.col("_").str, name):
-        return f"polars has no .str.{name}"
-    return None
-
-
-def _polars_str_replace(obj, pat, repl=None, n=-1, case=None, flags=0, regex=False):
-    reason = polars_str_replace_unsupported(pat, repl, n, case, flags, regex)
-    if reason is not None:
-        # FIXME(#227): fall back to the recorded pandas call instead of failing.
-        raise NotImplementedError(
-            f"str.replace({pat!r}, {repl!r}, n={n}, case={case}, flags={flags}, "
-            f"regex={regex}) has no exact polars translation: {reason}.")
-    if n == 0:  # pandas makes no replacement for n=0
-        return obj
-    if n < 0:  # pandas replaces every match for any negative n
-        return obj.str.replace_all(pat, repl, literal=not regex)
-    return obj.str.replace(pat, repl, literal=not regex, n=n)
-
-
-_POLARS_DATETIME_KWARGS = frozenset({"format", "errors", "exact", "cache"})
-
-
-def polars_datetime_kwargs(args, kwargs) -> dict | None:
-    """Translate the pandas datetime options supported by Polars string parsing.
-
-    ``None`` means the call must stay unfused and use the pandas compatibility
-    path. Positional options are deliberately kept there because their ordering
-    differs between ``pd.to_datetime`` and ``Expr.str.to_datetime``.
-    """
-    if args:
-        return None
-    kwargs = dict(kwargs or {})
-    if not kwargs.keys() <= _POLARS_DATETIME_KWARGS:
-        return None
-    errors = kwargs.pop("errors", "raise")
-    if errors not in ("raise", "coerce"):
-        return None
-    translated = {key: kwargs[key] for key in ("format", "exact", "cache")
-                  if key in kwargs}
-    translated["strict"] = errors == "raise"
-    return translated
-
 
 class MetadataOp(Op):
     fields = ["func", "args", "kwargs"]
@@ -194,105 +81,94 @@ def make_reset_index_op(op: MethodCallOp) -> MetadataOp | None:
 
 
 class ProjectionOp(Op):
+    """Base for projection operators: keeps rows and values, selects columns."""
     logical_family = "Projection"
-    fields = ["func", "method", "args", "kwargs", "columns"]
 
-    def __init__(self, func: Callable | None = None, method: str | None = None,
-        args: tuple | list = None, kwargs: dict = None,
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        if func is not None and method is not None:
-            raise ValueError("`func` and `method` are mutually exclusive; set exactly one (or neither for subclasses that override `process`).")
-        if method is not None:
-            name = method.upper()
-        elif func is not None:
-            name = func.__name__.upper()
-        else:
-            name = ""
+    def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)
-        if kwargs is not None:
-            self.check_kwargs(kwargs)
-        self.func = func
-        self.method = method
-        self.args = args
-        self.columns = columns
-        self.kwargs = kwargs
         self.output_type = OutputType.FRAME
 
-    def _extract_args_and_kwargs(self, inputs: list):
-        """Extract and process arguments and kwargs from inputs."""
-        # The object is the implicit primary operand (index 0). For func-based ops
-        # the first positional arg is that object slot, so skip it here.
-        _obj = inputs[0]
-        args = self.args[1:] if self.func is not None else self.args
-        _args = _resolve_args(args, inputs)
-        _kwargs = _resolve_kwargs(self.kwargs, inputs)
-        return _obj, _args, _kwargs
 
-    # Execution lives in the physical impls (physical/_projection_execs.py);
-    # the logical op only carries config + the backend-agnostic operand plumbing
-    # (`_extract_args_and_kwargs`).
+def drop_targets_columns(kwargs: dict | None) -> bool | None:
+    """Which axis a ``drop(...)`` call removes labels from: True for columns,
+    False for rows (index labels), None when that isn't statically known.
+
+    pandas defaults to ``axis=0``, i.e. dropping *rows* by index label.
+    ``index=`` / ``columns=`` name the axis themselves; naming both drops along
+    both axes, which is neither a projection nor a selection, and pandas rejects
+    either one next to an ``axis``, so those calls are left to raise as written.
+    ``axis`` is keyword-only on ``DataFrame.drop``, so it can never arrive
+    positionally.
+    """
+    kwargs = kwargs or {}
+    by_index = kwargs.get("index") is not None
+    by_columns = kwargs.get("columns") is not None
+    if by_index or by_columns:
+        if (by_index and by_columns) or "axis" in kwargs:
+            return None
+        return by_columns
+    axis = kwargs.get("axis", 0)
+    if axis in (0, "index"):
+        return False
+    if axis in (1, "columns"):
+        return True
+    return None  # e.g. a graph-fed axis
 
 
 class DropOp(ProjectionOp):
+    """``df.drop(...)`` of columns.
+
+    Only the statically column-wise form becomes a ``DropOp`` (see
+    :func:`drop_targets_columns`). The pandas default (``axis=0``) drops *rows*
+    by index label, which extraction turns into a ``SelectionOp(DROP)``.
+    """
     fields = ["args", "kwargs", "columns"]
     def __init__(self, args: tuple | list = (), kwargs: dict = {},
         inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+        super().__init__(inputs=inputs, outputs=outputs)
+        if kwargs is not None:
+            self.check_kwargs(kwargs)
+        self.args = args
+        self.kwargs = kwargs
+        self.columns = columns
 
-    def _drops_columns(self):
-        """Whether this drop works across the columns: True, False for a row drop,
-        or None when the axis isn't statically known.
-
-        pandas defaults to ``axis=0``, i.e. dropping *rows* by index label, which
-        leaves the column set untouched. ``axis`` is keyword-only on
-        ``DataFrame.drop``, so it can never arrive positionally in ``args``.
-        """
-        kwargs = self.kwargs or {}
-        if "columns" in kwargs:
-            return True
-        if "index" in kwargs and "axis" not in kwargs:
-            return False
-        axis = kwargs.get("axis", 0)
-        if axis in (0, "index"):
-            return False
-        if axis in (1, "columns"):
-            return True
-        return None  # e.g. a graph-fed axis
+    def _extract_args_and_kwargs(self, inputs: list):
+        """The frame (operand 0) and the drop's resolved arguments."""
+        return inputs[0], _resolve_args(self.args, inputs), _resolve_kwargs(self.kwargs, inputs)
 
     def _dropped_columns(self):
         """Column labels being dropped, or ``None`` if not statically known."""
         kwargs = self.kwargs or {}
-        if "columns" in kwargs:
-            return kwargs["columns"]
+        for key in ("columns", "labels"):
+            if kwargs.get(key) is not None:
+                return kwargs[key]
         return self.args[0] if self.args else None
 
     def propagate_output_schema(self):
-        """``drop(columns=...)`` / ``axis=1`` removes the named columns; a row drop
-        (the default ``axis=0``, or ``index=``) leaves every column in place."""
-        drops_columns = self._drops_columns()
-        schema = self.inputs[0].output_schema
-        if drops_columns is None:
-            self.output_schema = None
-        elif drops_columns:
-            self.output_schema = _schema.drop_columns(schema, self._dropped_columns())
-        else:
-            self.output_schema = schema
+        """Removes the named columns from the input schema."""
+        self.output_schema = _schema.drop_columns(self.inputs[0].output_schema,
+                                                  self._dropped_columns())
 
 
-class ColumnSelectorOp(Op):
+def make_drop_op(op: MethodCallOp) -> DropOp:
+    """Rewrite a column-wise ``df.drop(...)`` call into a :class:`DropOp`."""
+    new_op = DropOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+
+class ColumnSelectorOp(ProjectionOp):
     """A column selection by (deferred) skrub selector: keeps rows, restricts columns.
 
     Produced from ``skb.select(cols)``. Matches ``SelectCols`` semantics: the selector resolves against the schema at
     fit time and the *stored* column list is reused at predict time.
     """
-    logical_family = "Projection"
     fields = ["selector"]
 
     def __init__(self, selector, inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=f"select[{selector!r}]", inputs=inputs, outputs=outputs)
         self.selector = selector
         self.selected_columns = None
-        self.output_type = OutputType.FRAME
 
 
 def make_column_selector_op(op: TransformerOp) -> ColumnSelectorOp:
@@ -304,7 +180,7 @@ def make_column_selector_op(op: TransformerOp) -> ColumnSelectorOp:
     return new_op
 
 
-class ColumnProjectionOp(Op):
+class ColumnProjectionOp(ProjectionOp):
     """Column selection by literal name(s): ``df[key]`` where ``key`` is a
     column label or list of labels.
 
@@ -317,7 +193,6 @@ class ColumnProjectionOp(Op):
     ``GetItemOp`` stays the fallback for masks, graph-fed keys, slices and
     positional indexing.
     """
-    logical_family = "Projection"
     fields = ["key"]
 
     def __init__(self, key, inputs: list[Op] = None, outputs: list[Op] = None):
@@ -337,250 +212,4 @@ def make_column_projection_op(op) -> ColumnProjectionOp:
     ``str`` / ``list[str]`` key on a frame) into a :class:`ColumnProjectionOp`."""
     new_op = ColumnProjectionOp(key=op.key, inputs=op.inputs, outputs=op.outputs)
     op.replace_output_of_inputs(new_op)
-    return new_op
-
-
-class ApplyUDFOp(ProjectionOp):
-    fields = ["args", "kwargs", "columns"]
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
-
-
-class AssignOp(ProjectionOp):
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
-
-    def propagate_output_schema(self):
-        """``df.assign(a=..., b=...)`` adds/overwrites the kwargs-named columns,
-        Unknown-typed since the dtype follows the assigned expression."""
-        new_columns = list(self.kwargs.keys()) if self.kwargs else []
-        self.output_schema = _schema.add_columns(self.inputs[0].output_schema, new_columns)
-
-
-class DatetimeConversionOp(ProjectionOp):
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=dict(kwargs or {}), inputs=inputs,
-                         outputs=outputs, columns=columns)
-
-    def propagate_output_schema(self):
-        """Converting a column keeps its name and leaves the dtype Unknown.
-
-        The Unknown dtype is not just imprecision: the result is a Datetime whose
-        *unit* is the backend's (pandas gives ``datetime64[ns]``, polars
-        microseconds), the backend is only fixed during physical planning, and
-        ``pl.Schema`` rejects a unit-less ``pl.Datetime``, so "Datetime of unknown
-        unit" has no representation here.
-
-        Only a column operand is column-preserving. Given a *frame*,
-        ``pd.to_datetime`` is the assembly form: it reads year/month/day columns
-        and fans them in to one unnamed Series (any other frame raises), so the
-        input's names are not the output's.
-        """
-        if self.inputs[0].output_type is not OutputType.SERIES:
-            self.output_schema = None
-            return
-        self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
-
-
-class StringMethodOp(ProjectionOp):
-    """A ``col.str.<method>(...)`` accessor call on a (string) column expression.
-
-    Produced by fusing ``GetAttrProjectionOp(["str"]) + MethodCallOp`` during frame
-    extraction (see :func:`make_string_method_op`), so the ``.str`` accessor never
-    survives as its own op. Making the str call a first-class projection lets
-    selection folding match it directly -- lifting it into a
-    :class:`~stratum.optimizer.logical._column_expr.StrExpr` predicate -- instead of
-    re-discovering the accessor+call shape inside the mask folder.
-
-    polars exposes the same call on its ``.str`` namespace, with a few methods
-    renamed (see :data:`STR_POLARS_METHODS`).
-    """
-    fields = ["method", "args", "kwargs", "columns"]
-
-    def __init__(self, method: str, args: tuple | list = (), kwargs: dict = None,
-                 inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(method=method, args=args, kwargs=kwargs or {},
-                         inputs=inputs, outputs=outputs, columns=columns)
-
-    # `.str` methods that map one input element to one output element, so the call
-    # keeps its operand's columns and only changes their dtype. Extraction fuses
-    # *any* `.str.<method>` into this op, so this must be an allow-list: `extract`,
-    # `extractall`, `get_dummies`, `partition` and `rpartition` return a frame of
-    # new columns, `split`/`rsplit` do the same under `expand=True`, and `cat()`
-    # collapses the column to a single string. Every member below was checked to
-    # return a Series.
-    ONE_TO_ONE_METHODS = frozenset({
-        # fused into polars expressions, see STR_POLARS_METHODS
-        "count", "lower", "upper", "startswith", "endswith", "len",
-        "strip", "lstrip", "rstrip",
-        # scalar on the pandas compatibility path
-        "capitalize", "casefold", "contains", "find", "fullmatch", "match",
-        "pad", "removeprefix", "removesuffix", "repeat", "replace", "rfind",
-        "slice", "swapcase", "title", "zfill",
-        "isalnum", "isalpha", "isdecimal", "isdigit", "islower", "isnumeric",
-        "isspace", "istitle", "isupper",
-    })
-
-    def propagate_output_schema(self):
-        """A one-to-one method keeps the column names, dtype Unknown (per-method,
-        and the backends disagree on some). A method that fans the column out into
-        several is unknown; see :data:`ONE_TO_ONE_METHODS`."""
-        if self.method in self.ONE_TO_ONE_METHODS:
-            self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
-        else:
-            self.output_schema = None
-
-
-class GetAttrProjectionOp(Op):
-    logical_family = "Projection"
-    fields = ["attr_name"]
-
-    # NOTE: Polars and Pandas differ in semantics for some datetime attributes:
-    #   - dayofweek: Pandas uses Monday=0, Polars weekday() uses Monday=1 (ISO 8601)
-    #   - dayofyear: Pandas is 1-indexed, Polars ordinal_day() is also 1-indexed (same)
-    POLARS_ATTR_NAME_MAP = {"dayofweek": "weekday","dayofyear": "ordinal_day"}
-
-    def __init__(self, attr_name: list[str] | str = None, inputs: list[Op] = None, outputs: list[Op] = None):
-        if attr_name is None:
-            self.attr_name = []
-        elif isinstance(attr_name, str):
-            self.attr_name = [attr_name]
-        else:
-            self.attr_name = attr_name
-        attr_name_str = ".".join(self.attr_name) if self.attr_name else '?'
-        super().__init__(name=attr_name_str)
-        self.inputs = inputs
-        self.outputs = outputs
-        self.output_type = OutputType.FRAME
-
-    # Accessor attributes whose `<ns>.<attr>` projection keeps the input's columns
-    # and only changes their dtype, keyed by namespace. `make_frame_get_attr` wraps
-    # *any* attribute of a frame-like input, so this must be an allow-list: `.T`
-    # transposes, `.values` is an ndarray, `.shape` a tuple, and
-    # `.iloc`/`.loc`/`.index`/`.columns` are not column-preserving either. Only
-    # `.dt` reaches here (`.str` is fused into a `StringMethodOp` during
-    # extraction), and the mask folder gates on the same set (see
-    # `_column_expr._is_foldable`).
-    #
-    # The gate is per *attribute*, not per namespace: `.dt.components` and
-    # `.dt.isocalendar` fan one column out into several (7 and 3 respectively), so
-    # a namespace-level allow-list would report the input's single column for them.
-    # Listed below are the `.dt` properties that yield a Series; a `.dt` *method*
-    # is deliberately absent, since the schema of a bound method is meaningless
-    # (the enclosing call has no rule and stays unknown).
-    ELEMENTWISE_ACCESSORS = {
-        "dt": frozenset({
-            "date", "day", "day_of_week", "day_of_year", "dayofweek", "dayofyear",
-            "days", "days_in_month", "daysinmonth", "hour", "is_leap_year",
-            "is_month_end", "is_month_start", "is_quarter_end", "is_quarter_start",
-            "is_year_end", "is_year_start", "microsecond", "microseconds",
-            "minute", "month", "nanosecond", "nanoseconds", "quarter", "second",
-            "seconds", "time", "timetz", "weekday", "year",
-        }),
-    }
-
-    def propagate_output_schema(self):
-        """An accessor projection (``.dt.year``) keeps the column names, dtype
-        Unknown. Anything else, including a ``.dt`` attribute that fans out into
-        several columns, is unknown; see :data:`ELEMENTWISE_ACCESSORS`."""
-        allowed = (self.ELEMENTWISE_ACCESSORS.get(self.attr_name[0], ())
-                   if len(self.attr_name) == 2 else ())
-        if self.attr_name and self.attr_name[-1] in allowed:
-            self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
-        else:
-            self.output_schema = None
-
-
-def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp:
-    # arg[0] is the input
-    if len(op.args) > 1:
-        args = op.args[1:]
-    else:
-        args = ()
-
-    new_op = DatetimeConversionOp(args=args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-    # Converting a column yields a column and a frame yields a frame: keep the
-    # input's kind (ProjectionOp defaults to FRAME).
-    if op.inputs:
-        new_op.output_type = op.inputs[0].output_type
-    op.replace_output_of_inputs(new_op)
-    return new_op
-
-
-def _get_attr_output_type(attr_name: list, container: Op) -> OutputType:
-    """The kind an attribute access produces.
-
-    ``.index`` is a sequence of labels whatever it is read off, so it is a SERIES
-    even when the container is a frame. There is no ``Index`` member in the
-    lattice and it would have no readers: every consumer we have treats an index
-    as a sequence of values. Every other accessor (``.dt.year``, ``.str``, ...)
-    keeps the container's own kind.
-    """
-    if attr_name == ["index"]:
-        return OutputType.SERIES
-    return container.output_type
-
-
-def make_frame_get_attr(new_op: GetAttrProjectionOp, op: GetAttrOp) -> Op:
-    input_ = op.inputs[0]
-    if op.attr_name == "index" or op.attr_name == ["index"]:
-        index_op = IndexAccessOp(inputs=op.inputs, outputs=op.outputs)
-        op.replace_output_of_inputs(index_op)
-        return index_op
-    if isinstance(input_, GetAttrProjectionOp):
-        # Fuse chained GetAttr operations
-        concat_attr_name = input_.attr_name.copy()
-        attr_to_add = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
-        concat_attr_name.extend(attr_to_add)
-
-        new_input = input_.inputs[0]
-        new_op = GetAttrProjectionOp(attr_name=concat_attr_name, inputs=[new_input], outputs=op.outputs)
-        new_op.output_type = _get_attr_output_type(concat_attr_name, new_input)
-
-        if len(input_.outputs) > 1:
-            input_.outputs.remove(op)
-            new_input.add_output(new_op)
-        else:
-            new_input.replace_output(input_, new_op)
-
-    else:
-        # Convert single GetAttrOp to GetAttrDataframeOp
-        attr_name = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
-        new_op = GetAttrProjectionOp(attr_name=attr_name, inputs=op.inputs, outputs=op.outputs)
-        new_op.output_type = _get_attr_output_type(attr_name, input_)
-        op.replace_output_of_inputs(new_op)
-    return new_op
-
-
-def make_string_method_op(op: MethodCallOp) -> StringMethodOp:
-    """Fuse ``col.str.<method>(...)`` into a single :class:`StringMethodOp`.
-
-    ``op.inputs[0]`` is the ``GetAttrProjectionOp(["str"])`` accessor; the new op
-    takes the *column* (the accessor's source) as its primary operand instead, so
-    the accessor drops out of the graph. The method's ``args``/``kwargs`` (which may
-    carry ``OperandRef``s into the remaining inputs) and those inputs are unchanged,
-    so operand indices stay valid without renumbering.
-
-    The accessor is only detached when this was its last consumer -- a ``.str``
-    accessor shared by several method calls (not the common case) stays in the graph
-    until the final call is fused.
-    """
-    accessor = op.inputs[0]
-    column = accessor.inputs[0]
-    new_op = StringMethodOp(method=op.method_name, args=op.args, kwargs=op.kwargs,
-                            inputs=[column, *op.inputs[1:]], outputs=list(op.outputs))
-    # `.str.<method>` keeps the column's tabular kind (a series stays a series).
-    new_op.output_type = accessor.output_type
-
-    # Rewire every operand except the accessor: the args feed the new op, and the
-    # column now feeds it directly (in place of feeding the accessor).
-    for in_ in op.inputs[1:]:
-        in_.replace_output(op, new_op)
-    column.add_output(new_op)
-    accessor.outputs = [o for o in accessor.outputs if o is not op]
-    if not accessor.outputs:
-        accessor.detach_and_prune()
     return new_op

@@ -17,7 +17,8 @@ import polars as pl
 from stratum.optimizer.logical._base import (
     OutputType, _resolve_args, _resolve_kwargs)
 from stratum.optimizer.logical import _schema
-from stratum.optimizer.logical._ops import MethodCallOp, Op, OperandRef
+from stratum.optimizer.logical._map_ops import MapOp
+from stratum.optimizer.logical._ops import MethodCallOp, OperandRef
 
 
 CallValidator = Callable[[tuple, dict], bool]
@@ -330,10 +331,9 @@ def is_supported_column_method(op: MethodCallOp) -> bool:
     return validate is not None and validate(tuple(op.args or ()), dict(op.kwargs or {}))
 
 
-class ColumnMethodOp(Op):
+class ColumnMethodOp(MapOp):
     """A supported shape-preserving method on a Series or DataFrame."""
 
-    logical_family = "ColumnMethod"
     fields = ["method", "args", "kwargs"]
 
     def __init__(self, method: str, args=(), kwargs=None,
