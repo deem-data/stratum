@@ -186,7 +186,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
             {"ignore_index": True}, {"ignore_index": OperandRef(1)},
         ]
         for fields in cases:
-            with self.subTest(fields=fields):
+            with self.subTest(fields=repr(fields)):
                 self.assertTrue(PolarsSampleSelectionOp.supports(SampleSelectionOp(**fields), None))
 
     def test_unsupported_fields(self):
@@ -195,7 +195,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
             {"seed": np.random.default_rng(7)}, {"seed": OperandRef(1)},
         ]
         for fields in cases:
-            with self.subTest(fields=fields):
+            with self.subTest(fields=repr(fields)):
                 self.assertFalse(PolarsSampleSelectionOp.supports(SampleSelectionOp(**fields), None))
 
     def test_supported_call_is_selected_by_greedy_planner(self):

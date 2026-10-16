@@ -378,7 +378,7 @@ class NestedChoiceSearchTest(unittest.TestCase):
         X, y = self._X_y()
         col = st.choose_from(["a", "b"], name="col")
         for other in (X[[col]], X[[st.as_data_op(col)]]):
-            with self.subTest(other=other):
+            with self.subTest(other=repr(other)):
                 feature = X[[col]].skb.concat(
                     [other.rename(columns=lambda c: c + "_2")], axis=1)
                 self._assert_matches_skrub(feature.skb.apply(LogisticRegression(), y=y), 2)

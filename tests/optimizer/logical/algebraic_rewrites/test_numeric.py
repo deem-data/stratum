@@ -1063,7 +1063,7 @@ class TestPowByOne(unittest.TestCase):
             (lambda v: v ** v, NumericOpType.POW),
         ]
         for build, expected in cases:
-            with self.subTest(op=expected):
+            with self.subTest(op=repr(expected)):
                 out, *_ = optimize(build(st.as_data_op(5)))
                 self.assertIs(out[1].type, expected)
 

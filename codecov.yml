@@ -9,4 +9,8 @@ coverage:
         threshold: 1%
     patch:
       default:
-        target: 85% 
+        target: 85%
+
+# Inspection-only profiler
+ignore:
+  - "stratum/_profiler/**"

@@ -101,6 +101,37 @@ class _Flags:
 
 FLAGS = _Flags()
 
+
+@dataclass
+class _DevFlags:
+    """Developer-only switches, not part of set_config/get_config.
+
+    Set them directly (``DEV_FLAGS.diagnostics_dir = ...``) or scoped with
+    ``with stratum.dev_config(diagnostics_dir=...):``.
+    """
+    # Export plan snapshots and per-node timings for profiling
+    diagnostics_dir: str | os.PathLike | None = None
+    # Sample CPU/RSS in a separate process (needs the hardware extra).
+    hardware_utilization: bool = False
+    # Seconds between hardware samples.
+    hardware_sampling_interval: float = 0.1
+
+DEV_FLAGS = _DevFlags()
+
+
+@contextmanager
+def dev_config(**kwargs):
+    """Temporarily override DEV_FLAGS inside a context."""
+    unknown = set(kwargs) - set(vars(DEV_FLAGS))
+    if unknown:
+        raise TypeError(f"Unknown dev flag(s): {sorted(unknown)}")
+    original = vars(DEV_FLAGS).copy()
+    vars(DEV_FLAGS).update(kwargs)
+    try:
+        yield DEV_FLAGS
+    finally:
+        vars(DEV_FLAGS).update(original)
+
 def set_config(rust_backend: bool | None = None,
     num_threads: int | None = None,
     debug_timing: bool | None = None,

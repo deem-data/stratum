@@ -827,7 +827,7 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertEqual("bool", str((bool_frame & bool_frame).dtypes["a"]))
 
         for dtype, expected in [(pl.Int64, pl.Unknown), (pl.Boolean, pl.Boolean)]:
-            with self.subTest(dtype=dtype):
+            with self.subTest(dtype=repr(dtype)):
                 op = BinOp(op=operator.and_, left=OperandRef(0), right=OperandRef(1))
                 op.output_type = OutputType.FRAME
                 op.inputs = [_stub(pl.Schema({"a": dtype}), OutputType.FRAME),
@@ -1012,7 +1012,7 @@ class TestSchemaPropagation(unittest.TestCase):
             pd.to_datetime(pd.DataFrame({"d1": ["2024-01-01"], "d2": ["2025-02-02"]}))
 
         for output_type in (OutputType.FRAME, OutputType.UNKNOWN):
-            with self.subTest(output_type=output_type):
+            with self.subTest(output_type=repr(output_type)):
                 op = DatetimeConversionOp()
                 op.inputs = [_stub(pl.Schema({"year": pl.Int64, "month": pl.Int64,
                                               "day": pl.Int64}), output_type)]

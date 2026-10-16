@@ -313,7 +313,7 @@ class TestNestedChoice(unittest.TestCase):
                     self.data[[choice.match({"a": "a", "b": "b"})]],
                     a.skb.apply_func(lambda df, m: df, Ridge(alpha=st.choose_from([0.1, 1.0]))),
                     st.deferred(st.choose_from([abs, round]))(a)):
-            with self.subTest(dag=dag), self.assertRaises(NotImplementedError):
+            with self.subTest(dag=repr(dag)), self.assertRaises(NotImplementedError):
                 convert_to_ops(dag)
 
 

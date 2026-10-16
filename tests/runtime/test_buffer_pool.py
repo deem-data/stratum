@@ -13,6 +13,7 @@ from stratum._api import grid_search
 from stratum._config import config, get_config, set_config
 from stratum.runtime import _buffer_pool as _bp
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._eviction_policy import EvictionPolicy, LRUPolicy
 from stratum.runtime._object_size import UNKNOWN_SIZE, get_size
 from tests.runtime.runtime_test_utils import RuntimeTest, _arr, _make_op, simple_pipeline
 import skrub
@@ -325,6 +326,76 @@ class TestLRUEviction(unittest.TestCase):
         self.pool.put(a, _arr(100))  # overwrite spilled entry
         self.assertFalse(self.pool.live_variable_map[a].is_spilled)
         self.assertEqual(self.pool.live_variable_map[a].size, 800)
+
+
+class TestEvictionPolicy(unittest.TestCase):
+    """The pool asks its policy what to spill, and frees what it is asked to."""
+
+    def setUp(self):
+        self.spill_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.spill_root, ignore_errors=True)
+
+    def test_lru_order(self):
+        policy = LRUPolicy()
+        for key in "abc":
+            policy.on_insert(key, size=1)
+        policy.on_access("a")
+        policy.on_remove("b")
+        policy.on_access("missing")  # never inserted: ignored
+        self.assertEqual(list(policy.victims()), ["c", "a"])
+
+    def test_pool_spills_in_policy_order(self):
+        class MRUPolicy(LRUPolicy):
+            def victims(self):
+                return reversed(list(super().victims()))
+
+        pool = BufferPool(spill_root=self.spill_root, eviction_policy=MRUPolicy())
+        pool.memory_budget = 10_000
+        a, b, c = _make_op("a"), _make_op("b"), _make_op("c")
+        pool.put(a, _arr(500))
+        pool.put(b, _arr(500))
+        pool.put(c, _arr(500))  # over budget: the policy names c, the newest, first
+        self.assertTrue(pool.live_variable_map[c].is_spilled)
+        self.assertFalse(pool.live_variable_map[a].is_spilled)
+
+    def test_policy_sees_the_entry_lifecycle(self):
+        events = []
+
+        class Recording(EvictionPolicy):
+            def on_insert(self, key, size, cost=0.0):
+                events.append(("insert", key.name, size))
+
+            def on_access(self, key):
+                events.append(("access", key.name))
+
+            def on_remove(self, key):
+                events.append(("remove", key.name))
+
+            def victims(self):
+                return iter(())
+
+        pool = BufferPool(spill_root=self.spill_root, eviction_policy=Recording())
+        a = _make_op("a")
+        pool.put(a, _arr(10))
+        pool.pin(a)
+        pool.unpin(a)
+        pool.remove(a)
+        self.assertEqual(events, [("insert", "a", 80), ("access", "a"), ("remove", "a")])
+
+    def test_evict_frees_requested_bytes(self):
+        pool = BufferPool(spill_root=self.spill_root)
+        pool.memory_budget = 0  # no budget-driven eviction: only explicit requests
+        a, b, c = _make_op("a"), _make_op("b"), _make_op("c")
+        for op in (a, b, c):
+            pool.put(op, _arr(500))  # 4_000 B each
+        pool.pin(a)
+        freed = pool.evict(5_000)
+        # a is pinned, so b and c go, which is the first point past 5_000 B.
+        self.assertEqual(freed, 8_000)
+        self.assertEqual(pool.memory_usage, 4_000)
+        self.assertFalse(pool.live_variable_map[a].is_spilled)
+        # Nothing left to spill: the shortfall is reported, not raised.
+        self.assertEqual(pool.evict(1), 0)
 
 
 if __name__ == "__main__":

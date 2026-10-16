@@ -35,6 +35,11 @@ _STRUCTURED_FORMAT: list[tuple[type, str]] = [
 ]
 
 
+# Column name a nameless pandas Series is written under. `to_frame()` would name
+# the column 0, and the series would come back named 0 instead of None.
+_UNNAMED_SERIES = "__stratum_unnamed_series__"
+
+
 # Non-structured leaves we know how to pickle. Mirrors the types `get_size`
 # accepts, so anything the buffer pool admits can also be spilled (and we reject
 # the same unsupported types here, rather than silently pickling them).
@@ -177,7 +182,7 @@ def _write_native(obj: Any, stem: Path, fmt: str) -> Path:
     if fmt == "pandas_dataframe":
         obj.to_parquet(tmp)
     elif fmt == "pandas_series":
-        obj.to_frame().to_parquet(tmp)
+        obj.to_frame(name=_UNNAMED_SERIES if obj.name is None else obj.name).to_parquet(tmp)
     elif fmt == "polars_dataframe":
         obj.write_parquet(tmp)
     elif fmt == "polars_series":
@@ -204,7 +209,10 @@ def _read_native(path: Path, fmt: str) -> Any:
     if fmt == "pandas_dataframe":
         return read_parquet(path)
     if fmt == "pandas_series":
-        return read_parquet(path).iloc[:, 0]
+        series = read_parquet(path).iloc[:, 0]
+        if series.name == _UNNAMED_SERIES:
+            series.name = None
+        return series
     if fmt == "polars_dataframe":
         return pl_read_parquet(path)
     if fmt == "polars_series":

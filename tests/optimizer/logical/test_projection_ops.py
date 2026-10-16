@@ -208,5 +208,5 @@ class TestDropTargetsColumns(unittest.TestCase):
             ({"axis": OperandRef(1)}, None),           # graph-fed axis
         ]
         for kwargs, expected in cases:
-            with self.subTest(kwargs=kwargs):
+            with self.subTest(kwargs=repr(kwargs)):
                 self.assertIs(expected, drop_targets_columns(kwargs))

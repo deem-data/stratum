@@ -43,6 +43,13 @@ class TestBareObjects(unittest.TestCase):
         h = serialize_object(ser, self._stem())
         pd.testing.assert_series_equal(deserialize_object(h), ser)
 
+    def test_unnamed_pandas_series(self):
+        ser = pd.Series([1, 2, 3])
+        h = serialize_object(ser, self._stem())
+        out = deserialize_object(h)
+        self.assertIsNone(out.name)
+        pd.testing.assert_series_equal(out, ser)
+
     def test_polars_dataframe(self):
         df = pl.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]})
         h = serialize_object(df, self._stem())

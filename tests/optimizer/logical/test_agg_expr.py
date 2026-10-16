@@ -87,7 +87,7 @@ class TestHasAggregate(unittest.TestCase):
 
     def test_leaves_are_row_wise(self):
         for leaf in (Col("v"), Const(3), OperandLeaf(OperandRef(1))):
-            with self.subTest(leaf=leaf):
+            with self.subTest(leaf=repr(leaf)):
                 self.assertFalse(leaf.has_aggregate())
 
     def test_aggregate_marks_itself(self):

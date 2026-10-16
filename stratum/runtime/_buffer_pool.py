@@ -3,13 +3,13 @@ import logging
 import os
 import sys
 import uuid
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Hashable
 
 from stratum._config import FLAGS
+from stratum.runtime._eviction_policy import EvictionPolicy, LRUPolicy
 from stratum.runtime._object_serialization import (
     SpilledObject,
     UnsupportedSpillType,
@@ -130,12 +130,12 @@ class BufferPoolStats:
 
 
 class BufferPool:
-    """Cache for intermediates with LRU spill-to-disk eviction.
+    """Cache for intermediates with spill-to-disk eviction.
 
-    When `memory_usage` exceeds `memory_budget`, the least-recently-pinned
-    unpinned entries are spilled to disk under `spill_root`. A spilled entry
-    stays in `live_variable_map` so subsequent `pin` calls can transparently
-    re-load it; only the in-memory bytes are released.
+    When `memory_usage` exceeds `memory_budget`, unpinned entries are spilled to
+    disk under `spill_root`, in the order the eviction policy ranks them (LRU by
+    default). A spilled entry stays in `live_variable_map` so subsequent `pin`
+    calls can transparently re-load it; only the in-memory bytes are released.
 
     `memory_budget` defaults to `FLAGS.buffer_pool_memory_fraction` (0.7) of the
     host's total RAM, with a fixed 2 GiB fallback when memory cannot be detected.
@@ -143,11 +143,13 @@ class BufferPool:
     does.
     """
 
-    def __init__(self, spill_root: Path | str = _DEFAULT_SPILL_ROOT):
+    def __init__(self, spill_root: Path | str = _DEFAULT_SPILL_ROOT,
+                 eviction_policy: EvictionPolicy | None = None):
         # TODO:
         # right now our buffer pool is basically a symbol table and (main memory) puffer pool in one thing
         # once we have multiple backends, we will have to separate both
-        self.live_variable_map: OrderedDict[Hashable, _Entry] = OrderedDict()
+        self.live_variable_map: dict[Hashable, _Entry] = {}
+        self.eviction_policy = eviction_policy if eviction_policy is not None else LRUPolicy()
         self._removed_count: int = 0
         self.memory_usage = 0
         # The spill root is created lazily on the first eviction. Each spill
@@ -166,6 +168,7 @@ class BufferPool:
         size = get_size(data)
         self.live_variable_map[key] = _Entry(size=size, data=data)
         self.memory_usage += size
+        self.eviction_policy.on_insert(key, size)
         self.check_for_eviction()
 
     def pin(self, key: Hashable) -> Any:
@@ -195,7 +198,7 @@ class BufferPool:
         else:
             self.stats.hits += 1
         entry.pin_count += 1
-        self.live_variable_map.move_to_end(key)
+        self.eviction_policy.on_access(key)
         return entry.data
 
     def unpin(self, key: Hashable) -> None:
@@ -219,6 +222,7 @@ class BufferPool:
     def _drop(self, key: Hashable) -> None:
         """Internal: free in-memory bytes and any spilled file, then unlink the entry."""
         entry = self.live_variable_map.pop(key)
+        self.eviction_policy.on_remove(key)
         if entry.is_spilled:
             delete_object(entry.handle)
         else:
@@ -248,30 +252,10 @@ class BufferPool:
         return prettify_bytes(self.memory_usage)
 
     def check_for_eviction(self) -> bool:
-        """Spill LRU unpinned entries until under budget. Returns True if any evicted."""
+        """Spill unpinned entries until under budget. Returns True if any evicted."""
         if self.memory_budget <= 0 or self.memory_usage <= self.memory_budget:
             return False
-        evicted = False
-        # OrderedDict iterates oldest → newest; oldest = LRU.
-        # FIXME(perf): `list(...)` snapshots every key up front, allocating O(n)
-        # even when only a few LRU entries need spilling. With thousands of live
-        # entries this is wasteful. Iterate in bounded chunks (e.g. 64 keys) and
-        # stop once back under budget, re-snapshotting only if more are needed.
-        for key in list(self.live_variable_map.keys()):
-            if self.memory_usage <= self.memory_budget:
-                break
-            entry = self.live_variable_map[key]
-            if entry.pin_count > 0 or entry.is_spilled or not entry.spillable:
-                continue
-            try:
-                self._evict(key, entry)
-            except UnsupportedSpillType as exc:
-                # Admitted but not spillable (e.g. a CV splitter object): keep it
-                # resident and try the next LRU entry instead of failing the plan.
-                entry.spillable = False
-                logger.debug(f"Keeping {key} in memory, it cannot be spilled: {exc}")
-                continue
-            evicted = True
+        evicted = self.evict(self.memory_usage - self.memory_budget) > 0
         if self.memory_usage > self.memory_budget:
             logger.warning(
                 f"Budget {prettify_bytes(self.memory_budget)} still exceeded after eviction "
@@ -279,6 +263,32 @@ class BufferPool:
                 f"pinned or cannot be spilled."
             )
         return evicted
+
+    def evict(self, nbytes: int) -> int:
+        """Spill entries, in the policy's order, until ``nbytes`` are freed.
+
+        Pinned, already spilled and unspillable entries are skipped. Returns the
+        bytes actually freed, which falls short of ``nbytes`` when nothing else
+        can be spilled. This is the hook a memory manager calls; the budget check
+        in ``check_for_eviction`` is the pool's own caller for now.
+        """
+        freed = 0
+        for key in self.eviction_policy.victims():
+            if freed >= nbytes:
+                break
+            entry = self.live_variable_map.get(key)
+            if entry is None or entry.pin_count > 0 or entry.is_spilled or not entry.spillable:
+                continue
+            try:
+                self._evict(key, entry)
+            except UnsupportedSpillType as exc:
+                # Admitted but not spillable (e.g. a CV splitter object): keep it
+                # resident and try the next candidate instead of failing the plan.
+                entry.spillable = False
+                logger.debug(f"Keeping {key} in memory, it cannot be spilled: {exc}")
+                continue
+            freed += entry.size
+        return freed
 
     def _evict(self, key: Hashable, entry: _Entry) -> None:
         self._spill_root.mkdir(parents=True, exist_ok=True)
