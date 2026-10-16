@@ -8,7 +8,8 @@ from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, _aggregation_entries, _aggregation_params,
     _extract_aggregations, _extract_grouping, _is_aggregation, _is_groupby_op,
-    _is_value_counts, make_aggregate_op, make_value_counts_ops)
+    _is_value_counts, _named_aggregation_entries, make_aggregate_op,
+    make_value_counts_ops)
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, BinOpExpr, Col, DtExpr, OperandLeaf)
 from stratum.optimizer.logical._metadata_ops import MetadataOp
@@ -212,6 +213,63 @@ class TestAggregateOutputType(unittest.TestCase):
         self.assertIn(agg.output_type, (OutputType.FRAME, OutputType.SERIES))
 
 
+_GROUP_SIZE_SPELLINGS = {
+    "size()": lambda d: d.groupby("k").size(),
+    "agg('size')": lambda d: d.groupby("k").agg("size"),
+    "frame selection": lambda d: d.groupby("k")[["v", "w"]].size(),
+    "column selection": lambda d: d.groupby("k")["v"].size(),
+    "as_index=False": lambda d: d.groupby("k", as_index=False).size(),
+    "per-column size": lambda d: d.groupby("k").agg({"v": "size"}),
+    "named size": lambda d: d.groupby("k").agg(n=("v", "size")),
+}
+
+
+class TestGroupedSize(unittest.TestCase):
+    """A grouped `size()` counts rows per group: a series, unlike other reductions."""
+
+    def setUp(self):
+        self.df = pd.DataFrame({"k": [1, 1, 2], "v": [1, 2, None], "w": [4, 5, 6]})
+
+    def test_the_static_kind_matches_pandas(self):
+        for name, build in _GROUP_SIZE_SPELLINGS.items():
+            with self.subTest(name):
+                ops = optimize(build(st.as_data_op(self.df)), OptConfig(dataframe_ops=True))
+                agg = next(o for o in ops if isinstance(o, AggregateOp))
+                expected = build(self.df)
+                kind = (OutputType.SERIES if isinstance(expected, pd.Series)
+                        else OutputType.FRAME)
+                self.assertIs(kind, agg.output_type)
+
+    def test_both_backends_match_pandas(self):
+        # A keyed series exists only on pandas, so polars plans fall back there.
+        from stratum._config import config
+        for name, build in _GROUP_SIZE_SPELLINGS.items():
+            expected = build(self.df)
+            for selector in ("default", "greedy"):
+                with self.subTest(name, selector=selector), \
+                        config(implementation_selector=selector):
+                    got = st._api.evaluate(build(st.as_data_op(self.df)))
+                if isinstance(expected, pd.Series):
+                    pd.testing.assert_series_equal(got, expected)
+                    continue
+                got = got.to_pandas() if isinstance(got, pl.DataFrame) else got
+                if "k" not in got.columns:
+                    got = got.reset_index()
+                if "k" not in expected.columns:
+                    expected = expected.reset_index()
+                pd.testing.assert_frame_equal(got.reset_index(drop=True),
+                                              expected.reset_index(drop=True),
+                                              check_dtype=False)
+
+    def test_counting_group_rows_is_a_single_unnamed_wildcard_size(self):
+        def agg(*entries):
+            return AggregateOp(grouped=True, grouping=(Col("k"),), aggregations=entries)
+        self.assertTrue(agg((None, AggExpr("size", AllCols()))).counts_group_rows())
+        self.assertFalse(agg((None, AggExpr("size", Col("v")))).counts_group_rows())
+        self.assertFalse(agg(("n", AggExpr("size", AllCols()))).counts_group_rows())
+        self.assertFalse(agg((None, AggExpr("count", AllCols()))).counts_group_rows())
+
+
 class TestAggregateHelpers(unittest.TestCase):
     """Unit tests for the groupby/aggregation fusion predicates and extractors."""
 
@@ -241,6 +299,21 @@ class TestAggregateHelpers(unittest.TestCase):
         _, multi_output = _groupby_agg_pair(
             agg_method="agg", agg_kwargs={"total": ["sum", "mean"]})
         self.assertFalse(_is_aggregation(multi_output))
+
+    def test_named_aggregation_accepts_named_agg(self):
+        # pandas 3 made NamedAgg a dataclass, no longer a (column, aggfunc) tuple.
+        _, named = _groupby_agg_pair(agg_method="agg", agg_kwargs={
+            "total": pd.NamedAgg(column="v", aggfunc="sum"),
+            "spread": pd.NamedAgg("v", "std", ddof=0)})
+        self.assertTrue(_is_aggregation(named))
+        self.assertEqual((("total", AggExpr("sum", Col("v"))),
+                          ("spread", AggExpr("std", Col("v"), {"ddof": 0}))),
+                         _named_aggregation_entries(named))
+
+    def test_named_agg_with_positional_reduction_arguments_is_not_fused(self):
+        _, named = _groupby_agg_pair(agg_method="agg", agg_kwargs={
+            "q": pd.NamedAgg("v", "quantile", 0.5)})
+        self.assertIsNone(_named_aggregation_entries(named))
 
     def test_is_aggregation_agg_without_spec_is_false(self):
         _, agg = _groupby_agg_pair(agg_method="agg", agg_args=())

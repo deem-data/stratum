@@ -1,3 +1,5 @@
+import pandas as pd
+
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, Col, OperandLeaf, _Folder)
 from stratum.optimizer.logical._ops import (
@@ -77,6 +79,10 @@ class AggregateOp(Op):
             src = self.inputs[0].output_type if self.inputs else OutputType.UNKNOWN
         if self.grouped and self.options.get("as_index") is False:
             return OutputType.FRAME
+        if self.grouped and self.counts_group_rows():
+            # One count per group, whatever columns the source has: pandas'
+            # grouped `size()` is a series keyed by the groups.
+            return OutputType.SERIES
         if src is OutputType.UNKNOWN:
             return OutputType.FRAME
         if not self.grouped:
@@ -88,6 +94,17 @@ class AggregateOp(Op):
         if src is OutputType.SERIES and len(self.aggregations) > 1:
             return OutputType.FRAME
         return src
+
+    def counts_group_rows(self) -> bool:
+        """A single unnamed ``size`` over every column: the rows per group.
+
+        Unlike other wildcard reductions it does not produce one value per
+        column, so a grouped one is a series even over a frame.
+        """
+        if len(self.aggregations) != 1:
+            return False
+        name, agg = self.aggregations[0]
+        return name is None and agg.func == "size" and isinstance(agg.child, AllCols)
 
     def entry_name(self, index: int):
         """Backend-independent name for a scalar aggregation output."""
@@ -229,7 +246,9 @@ def _named_aggregation_entries(op: MethodCallOp) -> tuple | None:
     """Recognise pandas ``agg(name=(column, reduction), ...)`` syntax.
 
     A positional dict whose values are tuples has different pandas semantics,
-    so this path is deliberately limited to keyword named aggregation.
+    so this path is deliberately limited to keyword named aggregation. Each value
+    is a ``(column, reduction)`` pair or a ``pd.NamedAgg``, which pandas 3 made a
+    dataclass rather than a tuple.
     """
     if op.method_name not in _AGG_FUNCS or op.args or "func" in (op.kwargs or {}):
         return None
@@ -240,14 +259,29 @@ def _named_aggregation_entries(op: MethodCallOp) -> tuple | None:
     entries = []
     try:
         for name, value in named.items():
-            if (not isinstance(name, str) or not isinstance(value, tuple)
-                    or len(value) != 2 or not all(isinstance(v, str) for v in value)):
+            spec = _named_aggregation_spec(value)
+            if not isinstance(name, str) or spec is None:
                 return None
-            column, reduction = value
-            entries.append((name, AggExpr(reduction, Col(column))))
+            column, reduction, params = spec
+            entries.append((name, AggExpr(reduction, Col(column), params)))
     except NotImplementedError:
         return None
     return tuple(entries)
+
+
+def _named_aggregation_spec(value) -> tuple | None:
+    """``(column, reduction, params)`` for one named-aggregation value, if representable."""
+    if isinstance(value, pd.NamedAgg) and not isinstance(value, tuple):
+        # Positional reduction arguments have no place in an AggExpr.
+        if value.args:
+            return None
+        value, params = (value.column, value.aggfunc), dict(value.kwargs)
+    else:
+        params = {}
+    if (not isinstance(value, tuple) or len(value) != 2
+            or not all(isinstance(v, str) for v in value)):
+        return None
+    return value[0], value[1], params
 
 
 def _extract_grouping(groupby_op: MethodCallOp) -> str | list[str] | OperandRef:
@@ -402,6 +436,12 @@ def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
     columns = _selected_columns(selection)
     if selection is not None and columns is None:
         return None
+    if (_extract_aggregations(op) == "size" and selection is not None
+            and not isinstance(selection.key, str)):
+        # A frame-shaped selection does not change a row count: pandas'
+        # `groupby(k)[["v"]].size()` is `groupby(k).size()`. A single-column
+        # selection is kept, since it names the resulting series.
+        columns = None
     named_entries = _named_aggregation_entries(op)
     if named_entries is not None and selection is not None:
         return None

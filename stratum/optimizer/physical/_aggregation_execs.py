@@ -127,14 +127,12 @@ class PolarsAggregateOp(AggregateExec):
         # pandas treats floating NaN as missing for grouping and reductions.
         frame = inputs[0].with_columns(pl.col(pl.Float32, pl.Float64).fill_nan(None))
         ctx = self._ctx([frame, *inputs[1:]], mode)
-        exprs = []
-        for index, (name, agg) in enumerate(self.aggregations):
-            expr = agg.to_polars(ctx)
-            # A wildcard keeps one output per source column, so it must not be
-            # collapsed under a single alias.
-            if not isinstance(agg.child, AllCols):
-                expr = expr.alias(self.entry_name(index))
-            exprs.append(expr)
+        if self.grouped and self.counts_group_rows():
+            # The rows per group, not a count per column; pandas names it "size".
+            exprs = [pl.len().alias("size")]
+        else:
+            exprs = [self._entry_expr(index, agg, ctx)
+                     for index, (_, agg) in enumerate(self.aggregations)]
         if not self.grouped:
             return ctx.frame.select(exprs)
         keys = [expr.to_polars(ctx) for expr in self.grouping]
@@ -148,3 +146,11 @@ class PolarsAggregateOp(AggregateExec):
         if sort:
             result = result.sort(result.columns[:len(keys)], nulls_last=True)
         return result
+
+    def _entry_expr(self, index: int, agg, ctx: EvalContext):
+        expr = agg.to_polars(ctx)
+        # A wildcard keeps one output per source column, so it must not be
+        # collapsed under a single alias.
+        if not isinstance(agg.child, AllCols):
+            expr = expr.alias(self.entry_name(index))
+        return expr

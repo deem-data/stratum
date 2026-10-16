@@ -18,14 +18,16 @@ import polars as pl
 
 import stratum as st
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
-from stratum.optimizer.logical._column_expr import BinOpExpr, Col, Const
+from stratum.optimizer.logical._aggregation_ops import AggregateOp
+from stratum.optimizer.logical._column_expr import AggExpr, BinOpExpr, Col, Const
 from stratum.optimizer.logical._map_ops import AssignMapOp
-from stratum.optimizer.logical._ops import ValueOp
+from stratum.optimizer.logical._ops import MethodCallOp, ValueOp
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._selection_execs import PolarsMaskSelectionOp
 from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
+from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
 from stratum.frontend._skrub_graph import get_data
 
 # The Q1 cutoff: `var1` in the upstream query.
@@ -226,20 +228,26 @@ def test_q1_filter_inlines_the_date_constant(polars):
     assert [] == [o for o in ops if isinstance(o, ValueOp)]
 
 
-def test_q1_runs_under_greedy_behind_a_conversion():
-    """The NamedAgg groupby is not fused, so it stays the recorded pandas call.
-    It reads the filtered frame, whose pandas index labels a conversion from
-    polars could not restore, so the filter runs on pandas too and the plan
-    converts the source instead (#227)."""
+def test_q1_folds_the_named_aggregation(polars):
+    """The ``pd.NamedAgg`` groupby folds into one aggregate, so the whole query is
+    frame operators and the greedy plan runs end to end on polars, with no
+    conversion. pandas 3 made ``NamedAgg`` a dataclass rather than a tuple, which
+    used to leave the groupby an opaque pandas call."""
     df = make_lineitem()
-    with st.config(implementation_selector="greedy", explain=["logical", "physical_impl"]):
-        ops = _plan(build_q1(df))
-        result = st._api.evaluate(build_q1(df))
-    conversions = [op for op in ops if isinstance(op, ConversionOp)]
-    assert len(conversions) == 1 and conversions[0].inputs[0] is ops[0]
+    ops = _plan(build_q1(df))
+    agg = _one(ops, AggregateOp)
+
+    assert ["sum_qty", "sum_base_price", "sum_disc_price", "sum_charge", "avg_qty",
+            "avg_price", "avg_disc", "count_order"] == [n for n, _ in agg.aggregations]
+    assert AggExpr("size", Col("l_orderkey")) == dict(agg.aggregations)["count_order"]
+    assert [] == [o for o in ops if isinstance(o, (MethodCallOp, ConversionOp))]
+    if polars:
+        assert isinstance(agg, PolarsAggregateOp)
+
+    result = st._api.evaluate(build_q1(df))
+    result = result.to_pandas() if isinstance(result, pl.DataFrame) else result
     pd.testing.assert_frame_equal(q1_reference(df).reset_index(drop=True),
-                                  pd.DataFrame(result).reset_index(drop=True),
-                                  check_dtype=False)
+                                  result.reset_index(drop=True), check_dtype=False)
 
 
 def test_q1_filter_binds_query_impl_under_flag():
