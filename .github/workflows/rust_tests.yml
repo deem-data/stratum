@@ -40,7 +40,7 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-14
+          - macos-26
           - windows-latest
 
     steps:
@@ -48,10 +48,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install OS specific dependencies
-        if: matrix.os == 'macos-14'
-        run: |
-          brew update
-          brew install libomp
+        if: matrix.os == 'macos-26'
+        # Skip `brew update` and dependent upgrades: they pull formula versions
+        # newer than the runner image ships, which then build from source.
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        run: brew install libomp
 
       - name: Cache Cargo build
         uses: actions/cache@v4
