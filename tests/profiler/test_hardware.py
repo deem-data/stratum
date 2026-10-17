@@ -145,9 +145,14 @@ def test_sampler_excludes_its_own_process_and_handles_pid_reuse():
     assert len(previous) == 2
 
 
+# Polls straddling an operator boundary are discarded, and a poll can take tens
+# of milliseconds on loaded CI runners, so each window spans many intervals.
+OP_SECONDS = .5
+
+
 class BusyOp(SameLabelOp):
     def process(self, mode, inputs):
-        end = perf_counter() + .12
+        end = perf_counter() + OP_SECONDS
         while perf_counter() < end:
             sum(range(1000))
         return 1
@@ -155,7 +160,7 @@ class BusyOp(SameLabelOp):
 
 class IdleOp(SameLabelOp):
     def process(self, mode, inputs):
-        sleep(.12)
+        sleep(OP_SECONDS)
         return 1
 
 
