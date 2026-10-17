@@ -8,6 +8,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+#: fsspec protocols served by gcsfs.
+_GCS_PROTOCOLS = ("gs://", "gcs://")
+
+
+def _is_gcs_path(file_path) -> bool:
+    return isinstance(file_path, str) and file_path.lower().startswith(_GCS_PROTOCOLS)
+
 
 class DataSourceOp(Op):
     """Logical data source: an already-materialised frame or a file read.
@@ -37,10 +44,13 @@ class DataSourceOp(Op):
 
     def propagate_output_schema(self):
         """Read from the in-memory frame, or the file header; unknown when the
-        names can't be read statically (graph-fed path, non-csv format)."""
+        names can't be read statically (graph-fed path, non-csv format) or only
+        at a cost the optimizer shouldn't pay (a GCS path: the header probe is a
+        network round-trip at plan time)."""
         if self.data is not None:
             self.output_schema = _schema.schema_of_frame(self.data)
-        elif isinstance(self.file_path, OperandRef) or self.format != "csv":
+        elif (isinstance(self.file_path, OperandRef) or self.format != "csv"
+              or _is_gcs_path(self.file_path)):
             self.output_schema = None
         else:
             self.output_schema = self._csv_header_schema()

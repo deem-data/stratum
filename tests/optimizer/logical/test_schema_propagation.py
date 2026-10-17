@@ -146,6 +146,16 @@ class TestSchemaPropagation(unittest.TestCase):
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
+    def test_csv_source_on_gcs_is_unknown_without_probing(self):
+        # reading the header from GCS is a network round-trip at plan time, too
+        # costly for the optimizer: the schema is left unknown, unprobed.
+        for path in ("gs://bucket/data.csv", "gcs://bucket/data.csv", "GS://bucket/data.csv"):
+            with self.subTest(path=path), mock.patch("pandas.read_csv") as read_csv:
+                op = DataSourceOp(file_path=path, _format="csv")
+                op.propagate_output_schema()
+                self.assertIsNone(op.output_schema)
+                read_csv.assert_not_called()
+
     def test_graph_fed_path_is_unknown(self):
         op = DataSourceOp(file_path=OperandRef(0), _format="csv")
         op.propagate_output_schema()
