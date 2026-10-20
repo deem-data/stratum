@@ -425,8 +425,8 @@ class TestAggregateRewrites(unittest.TestCase):
             "w": [4, 5, 6],
         })
 
-    def _agg_ops(self, data, **kwargs):
-        ops = optimize(data, OptConfig(dataframe_ops=True), **kwargs)
+    def _agg_ops(self, data, literal_inlining=False, **kwargs):
+        ops = optimize(data, OptConfig(dataframe_ops=True, literal_inlining=literal_inlining), **kwargs)
         return ops, [o for o in ops if isinstance(o, AggregateOp)]
 
     def test_agg_with_spec_fuses_and_executes(self):

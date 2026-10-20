@@ -5,8 +5,10 @@ from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque, defaultdict
 from dataclasses import dataclass
 from typing import Any
+
 from .logical._op_cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
+from .logical._literal_inlining import literal_inlining
 from .logical._numeric_ops import extract_numeric_op
 from .logical._candidate_ops import CollectCandidatesOp, DeclaredScoringOp, ScoreCandidatesOp
 from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared, remap_operand_refs
@@ -85,6 +87,7 @@ class OptConfig():
         projection_pushup: bool = True,
         selector: ImplementationSelector | None = None,
         pandas_query: bool = False,
+        literal_inlining: bool = True,
     ):
         """``selector`` overrides the implementation-selection policy for this
         plan. Left ``None``, the policy named by ``FLAGS.implementation_selector``
@@ -112,6 +115,7 @@ class OptConfig():
         self.propagate_schema = propagate_schema
         self.selector = selector
         self.pandas_query = pandas_query
+        self.literal_inlining = literal_inlining
 
 def _debug_show_graph(root: Op, name: str):
     if diagnostics_enabled():
@@ -197,6 +201,8 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 
     # Convert to logical operator DAG
     root = convert_to_ops(dag_root, env)
+    if config.literal_inlining:
+        root = literal_inlining(root)
 
     # Add splitting op
     root = add_splitting_op(root)

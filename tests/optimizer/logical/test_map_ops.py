@@ -788,7 +788,7 @@ class TestMapRewrites(unittest.TestCase):
         sub_dag1 = data.apply(lambda x, a: x + a, a=st.as_data_op(1))
         sub_dag2 = data
         root = st.choose_from([sub_dag1, sub_dag2]).as_data_op()
-        ops = optimize(root)
+        ops = optimize(root, OptConfig(literal_inlining=False))
         self.assertEqual(5, len(ops))
         self.assertIsInstance(ops[1], ColumnProjectionOp)
         self.assertIsInstance(ops[3], ApplyUDFOp)

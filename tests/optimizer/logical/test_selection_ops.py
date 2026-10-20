@@ -279,7 +279,7 @@ class TestMaskFolding(unittest.TestCase):
         data = st.as_data_op(self.df)
         thr = st.as_data_op(1)
         ops = optimize(data[data["x"] > thr].assign(base=thr),
-                       OptConfig(dataframe_ops=True))
+                       OptConfig(dataframe_ops=True, literal_inlining=False))
         sel = self._mask(ops)
         self.assertEqual(
             BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(1))),

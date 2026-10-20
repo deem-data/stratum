@@ -38,8 +38,9 @@ class TestColumnProjectionOp(unittest.TestCase):
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
 
-    def _ops(self, data_op):
-        return optimize(data_op, OptConfig(dataframe_ops=True))
+    def _ops(self, data_op, **config_kwargs):
+        config_kwargs.setdefault("literal_inlining", False)
+        return optimize(data_op, OptConfig(dataframe_ops=True, **config_kwargs))
 
     def test_single_column_parses_to_series_projection(self):
         ops = self._ops(st.as_data_op(self.df)["x"])

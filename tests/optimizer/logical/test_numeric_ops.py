@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.dummy import DummyRegressor
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType, make_binary_numeric_op
 from stratum.optimizer.logical._ops import CallOp, OperandRef, ValueOp
-from stratum.optimizer._optimize import optimize
+from stratum.optimizer._optimize import OptConfig, optimize
 
 class TestNumericOps(unittest.TestCase):
     def setUp(self):
@@ -274,28 +274,28 @@ class TestNumericOps(unittest.TestCase):
     def test_extract_callop_add_var_var(self):
         df1 = st.as_data_op(2)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1.skb.apply_func(np.add, df2))
+        out, *_ = optimize(df1.skb.apply_func(np.add, df2), OptConfig(literal_inlining=False))
         op = self._assert_var_var_extracted(out, NumericOpType.ADD)
         self.assertEqual(op.process("fit", [2, 3]), 5)
 
     def test_extract_callop_subtract_var_var(self):
         df1 = st.as_data_op(5)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1.skb.apply_func(np.subtract, df2))
+        out, *_ = optimize(df1.skb.apply_func(np.subtract, df2), OptConfig(literal_inlining=False))
         op = self._assert_var_var_extracted(out, NumericOpType.SUBTRACT)
         self.assertEqual(op.process("fit", [5, 3]), 2)
 
     def test_extract_callop_multiply_var_var(self):
         df1 = st.as_data_op(2)
         df2 = st.as_data_op(3)
-        out, *_ = optimize(df1.skb.apply_func(np.multiply, df2))
+        out, *_ = optimize(df1.skb.apply_func(np.multiply, df2), OptConfig(literal_inlining=False))
         op = self._assert_var_var_extracted(out, NumericOpType.MULTIPLY)
         self.assertEqual(op.process("fit", [2, 3]), 6)
 
     def test_extract_callop_divide_var_var(self):
         df1 = st.as_data_op(6)
         df2 = st.as_data_op(2)
-        out, *_ = optimize(df1.skb.apply_func(np.divide, df2))
+        out, *_ = optimize(df1.skb.apply_func(np.divide, df2), OptConfig(literal_inlining=False))
         op = self._assert_var_var_extracted(out, NumericOpType.DIVIDE)
         self.assertEqual(op.process("fit", [6, 2]), 3.0)
 
