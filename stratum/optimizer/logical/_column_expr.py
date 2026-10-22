@@ -28,8 +28,8 @@ from stratum.optimizer.logical._column_methods import (
     ColumnMethodOp, get_column_method_spec, polars_dtype)
 from stratum.optimizer.logical._map_ops import (
     AccessorMapOp, DatetimeConversionOp, StringMethodOp, STR_POLARS_METHODS,
-    polars_datetime_kwargs, polars_dt_attribute, polars_str_method_unsupported,
-    polars_string_method)
+    polars_datetime_kwargs, polars_dt_attribute, polars_dt_attribute_unsupported,
+    polars_str_method_unsupported, polars_string_method)
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
@@ -428,10 +428,7 @@ class DtExpr(ColumnExpr):
         return polars_dt_attribute(self.operand.to_polars(ctx), self.attr)
 
     def _polars_unsupported_here(self):
-        name = AccessorMapOp.POLARS_ATTR_NAME_MAP.get(self.attr, self.attr)
-        if self.attr != "is_month_end" and not hasattr(pl.col("_").dt, name):
-            return f"polars has no .dt.{name}"
-        return None
+        return polars_dt_attribute_unsupported(self.attr)
 
     def iter_operand_refs(self):
         yield from self.operand.iter_operand_refs()

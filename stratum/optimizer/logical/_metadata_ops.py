@@ -1,8 +1,11 @@
-"""Metadata operators: change row or column *labels*, never values.
+"""Metadata operators: describe or relabel a frame's structure, never its values.
 
 Set apart from projections (which select columns) and maps (which compute
 column values): ``df.rename(...)`` and ``df.reset_index(drop=True)`` keep every
-row and every value and only relabel them.
+row and every value and only relabel them, while ``df.shape`` and
+``df.columns`` read the structure without touching a value. The output kind is
+per op: a relabelling returns the relabelled frame, a read returns the
+structure it describes.
 
 Extraction parses the recorded pandas call into backend-neutral fields; the
 physical impls in ``physical/_metadata_execs.py`` translate them per library. A
@@ -20,12 +23,11 @@ from stratum.optimizer.logical import _schema
 
 
 class MetadataOp(Op):
-    """Abstract base of the metadata family. Impls register on the subclasses."""
-    logical_family = "Metadata"
+    """Abstract base of the metadata family. Impls register on the subclasses.
 
-    def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
-        super().__init__(name=name, inputs=inputs, outputs=outputs)
-        self.output_type = OutputType.FRAME
+    Each subclass sets its own ``output_type``.
+    """
+    logical_family = "Metadata"
 
 
 class RenameOp(MetadataOp):
@@ -40,6 +42,7 @@ class RenameOp(MetadataOp):
     def __init__(self, columns=None, index=None, errors="ignore",
                  inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name="rename", inputs=inputs, outputs=outputs)
+        self.output_type = OutputType.FRAME
         self.columns = columns
         self.index = index
         self.errors = errors
@@ -60,10 +63,33 @@ class ResetIndexOp(MetadataOp):
 
     def __init__(self, inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name="reset_index", inputs=inputs, outputs=outputs)
+        self.output_type = OutputType.FRAME
 
     def propagate_output_schema(self):
         """The old labels are dropped, not promoted to a column."""
         self.output_schema = self.inputs[0].output_schema if self.inputs else None
+
+
+class ShapeOp(MetadataOp):
+    """Reads ``.shape``: ``(n_rows, n_cols)`` of a frame, ``(n,)`` of a series.
+
+    A tuple, not a frame, so it carries no frame library and puts no library
+    constraint on its producer.
+    """
+    fields = []
+
+    def __init__(self, inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="shape", inputs=inputs, outputs=outputs)
+        self.output_type = OutputType.SCALAR
+
+
+class ColumnNamesOp(MetadataOp):
+    """Reads a frame's ``.columns`` as a pandas ``Index`` on every backend."""
+    fields = []
+
+    def __init__(self, inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="columns", inputs=inputs, outputs=outputs)
+        self.output_type = OutputType.UNKNOWN
 
 
 # --- Extraction: recorded pandas call -> metadata fields -----------------------
@@ -132,5 +158,23 @@ def make_reset_index_op(op: MethodCallOp) -> ResetIndexOp | None:
     new_op = ResetIndexOp(inputs=op.inputs, outputs=op.outputs)
     # reset_index keeps the container kind: a series stays a series.
     new_op.output_type = op.inputs[0].output_type
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+
+def make_structure_read_op(op) -> MetadataOp | None:
+    """Parse a ``.shape`` or ``.columns`` read into its :class:`MetadataOp`.
+
+    ``op`` is the recorded attribute read. ``.columns`` is only a frame's: a
+    series has none, so that read stays an opaque attribute.
+    """
+    kind = op.inputs[0].output_type
+    if op.attr_name in ("shape", ["shape"]):
+        cls = ShapeOp
+    elif op.attr_name in ("columns", ["columns"]) and kind is OutputType.FRAME:
+        cls = ColumnNamesOp
+    else:
+        return None
+    new_op = cls(inputs=op.inputs, outputs=op.outputs)
     op.replace_output_of_inputs(new_op)
     return new_op

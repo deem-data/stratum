@@ -24,7 +24,8 @@ from stratum.optimizer.logical._column_methods import (
 from stratum.optimizer.logical._map_ops import (
     AccessorMapOp, ApplyUDFOp, AssignMapOp, AssignOp, CallMapOp,
     DatetimeConversionOp, StringMethodOp, polars_datetime_kwargs,
-    polars_dt_attribute, polars_string_method, polars_str_method_unsupported)
+    polars_dt_attribute, polars_dt_attribute_unsupported, polars_string_method,
+    polars_str_method_unsupported)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._representation import refuse_unsupported_exprs
 from stratum.optimizer.physical._registry import physical_impl
@@ -252,23 +253,35 @@ class PolarsAccessorMapOp(AccessorMapOp, PhysicalOp):
 
     @classmethod
     def supports(cls, op: AccessorMapOp, ctx) -> bool:
-        """Refuse ``.index``: polars frames have no index.
+        """Allow only a ``.dt`` field polars can read, e.g. ``col.dt.year``.
 
-        There is no per-op translation either. What ``.index`` means depends on
-        what produced the value, e.g. on a grouped count it is the grouping key,
-        which polars keeps as an ordinary column instead. The shape only becomes
-        backend-neutral once the surrounding cone is rewritten into a semi-join,
-        so until then a plan containing one is pandas-only.
+        Extraction wraps *any* pandas attribute read on frame-like data (see
+        :func:`make_frame_get_attr`), so this is an allow-list: ``.iloc``,
+        ``.loc``, ``.T``, ``.values``, ``.cat`` and ``.str[...]`` have no
+        polars translation, and polars frames have no ``.index``. A refusal
+        binds the pandas impl.
+
+        That includes the bare ``.dt`` namespace. Only a ``.dt`` method call
+        reads it, and that call runs pandas' method and arguments verbatim,
+        which a polars namespace mostly lacks (``floor``, ``normalize``) or
+        reads differently (``round("h")`` wants ``"1h"``, ``strftime`` formats
+        ``%f`` as nanoseconds).
+
+        A listed field is still refused when polars has no method for it (see
+        :func:`polars_dt_attribute_unsupported`).
         """
-        return op.attr_name != ["index"]
+        attr_name = op.attr_name
+        if (len(attr_name) != 2 or attr_name[0] != "dt"
+                or attr_name[1] not in AccessorMapOp.ELEMENTWISE_ACCESSORS["dt"]):
+            op._unsupported_reason = (f"pandas attribute `.{'.'.join(attr_name)}` "
+                                      "has no polars translation")
+            return False
+        reason = polars_dt_attribute_unsupported(attr_name[1])
+        if reason is not None:
+            op._unsupported_reason = f"dt.{attr_name[1]}: {reason}"
+            return False
+        return True
 
     def process(self, mode: str, inputs: list):
-        if len(self.attr_name) == 2 and self.attr_name[0] == "dt":
-            return polars_dt_attribute(inputs[0], self.attr_name[1])
-        tmp = inputs[0]
-        for attr in self.attr_name:
-            tmp = getattr(tmp, attr)
-        if len(self.attr_name) == 2:
-            # polars implements accessor attributes as methods.
-            return tmp()
-        return tmp
+        # `supports` admits only `["dt", <field>]`.
+        return polars_dt_attribute(inputs[0], self.attr_name[1])

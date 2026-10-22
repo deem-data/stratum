@@ -12,6 +12,8 @@ nested inside it.
 """
 from __future__ import annotations
 
+import pandas as pd
+
 from stratum.optimizer.logical._base import _resolve_operand
 from stratum.optimizer.logical._ops import GetItemOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
@@ -31,4 +33,8 @@ class PolarsGetItemOp(GetItemOp, PhysicalOp):
         key = _resolve_operand(self.key, inputs)
         if self.is_filter:
             return inputs[0].filter(key)
+        if isinstance(key, pd.Index):
+            # Column labels read off a frame (`df[df.columns[:2]]`): polars
+            # indexes by a list of names, not by a pandas Index.
+            key = key.tolist()
         return inputs[0][key]

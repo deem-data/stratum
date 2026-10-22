@@ -2,12 +2,20 @@ import unittest
 
 import pandas as pd
 import polars as pl
+import pytest
+import skrub
 
 import stratum as st
-from stratum.optimizer._optimize import OptConfig
+from stratum.optimizer._optimize import OptConfig, optimize as optimize_plan
 from stratum.optimizer.logical._metadata_ops import (
-    MetadataOp, RenameOp, ResetIndexOp, make_rename_op, make_reset_index_op)
-from stratum.optimizer.logical._ops import MethodCallOp, OperandRef, OutputType
+    ColumnNamesOp, MetadataOp, RenameOp, ResetIndexOp, ShapeOp, make_rename_op,
+    make_reset_index_op, make_structure_read_op)
+from stratum.optimizer.logical._ops import (
+    GetAttrOp, MethodCallOp, OperandRef, OutputType)
+from stratum.optimizer.physical import FlagBasedSelector
+from stratum.optimizer.physical._conversion import ConversionOp
+from stratum.optimizer.physical._impl_selection import get_implementation_selector
+from stratum.runtime._scheduler import SequentialScheduler
 from .test_dataframe_ops import _inp, force_polars, optimize, run_op
 
 
@@ -126,6 +134,100 @@ class TestResetIndex(unittest.TestCase):
         with force_polars():
             frame = pl.DataFrame({"a": [1, 2, 3]})
             self.assertTrue(run_op(ResetIndexOp(), frame).equals(frame))
+
+
+class TestStructureReadExtraction(unittest.TestCase):
+    """`.shape` and `.columns` read a frame's structure into a metadata op."""
+
+    def _read(self, read):
+        frame = st.as_data_op(pd.DataFrame({"a": [1, 2]}))
+        return optimize(read(frame), OptConfig(dataframe_ops=True))[-1]
+
+    def test_shape_of_a_frame_or_series_is_a_scalar_read(self):
+        # A tuple, not a frame: before, the read copied the container's kind.
+        for kind, read in (("frame", lambda x: x.shape), ("series", lambda x: x["a"].shape)):
+            with self.subTest(kind=kind):
+                op = self._read(read)
+                self.assertIsInstance(op, ShapeOp)
+                self.assertIsInstance(op, MetadataOp)
+                self.assertIs(OutputType.SCALAR, op.output_type)
+
+    def test_columns_of_a_frame_is_a_column_names_read(self):
+        # Not a SERIES: `df[df.columns[:2]]` would then read as a row mask.
+        op = self._read(lambda x: x.columns)
+        self.assertIsInstance(op, ColumnNamesOp)
+        self.assertIs(OutputType.UNKNOWN, op.output_type)
+
+    def test_a_series_has_no_columns(self):
+        series = _inp(None)
+        series.output_type = OutputType.SERIES
+        read = GetAttrOp(attr_name="columns")
+        read.inputs = [series]
+        series.outputs = [read]
+        self.assertIsNone(make_structure_read_op(read))
+
+    def test_structure_reads_clone(self):
+        for cls, kind in ((ShapeOp, OutputType.SCALAR), (ColumnNamesOp, OutputType.UNKNOWN)):
+            with self.subTest(cls=cls.__name__):
+                clone = cls().clone()
+                self.assertIs(cls, type(clone))
+                self.assertIs(kind, clone.output_type)
+
+
+_FRAME = pd.DataFrame({"c": ["a", "b", "a"], "s": ["xy", "zw", "uv"], "n": [1, 2, 3]})
+_STRUCTURE_READS = {
+    "frame.shape": lambda x: x.shape,
+    "series.shape": lambda x: x["n"].shape,
+    "shape[0]": lambda x: x.shape[0],
+    "columns": lambda x: x.columns,
+    "columns.tolist()": lambda x: x.columns.tolist(),
+    "x[columns[:2]]": lambda x: x[x.columns[:2]],
+    "drop(columns[0])": lambda x: x.drop(columns=x.columns[0]),
+}
+_SELECTORS = {
+    "pandas": lambda: FlagBasedSelector(backend="pandas"),
+    "polars": lambda: FlagBasedSelector(backend="polars"),
+    "greedy": lambda: get_implementation_selector("greedy"),
+}
+
+
+def _evaluate(dag, source, selector):
+    plan, split, flagged = optimize_plan(dag, OptConfig(selector=_SELECTORS[selector]()),
+                                         env={"x": source})
+    return plan, SequentialScheduler(plan, split, flagged).evaluate()
+
+
+@pytest.mark.parametrize("selector", _SELECTORS)
+@pytest.mark.parametrize("name", _STRUCTURE_READS)
+def test_structure_read_matches_pandas(name, selector):
+    read = _STRUCTURE_READS[name]
+    expected = read(_FRAME)
+    with skrub.config_context(eager_data_ops=False):
+        dag = read(skrub.var("x", _FRAME))
+    _, result = _evaluate(dag, _FRAME, selector)
+    if isinstance(result, pl.DataFrame):
+        result = result.to_pandas()
+    assert type(expected) is type(result)
+    if isinstance(expected, pd.DataFrame):
+        pd.testing.assert_frame_equal(expected, result, check_dtype=False)
+    elif isinstance(expected, pd.Index):
+        pd.testing.assert_index_equal(expected, result)
+    else:
+        assert expected == result
+
+
+def test_column_names_of_a_polars_source_need_no_conversion():
+    # `.tolist()` is a pandas-only call; the names it reads must not pin the
+    # polars source to pandas and convert the whole frame.
+    source = pl.from_pandas(_FRAME)
+    with skrub.config_context(eager_data_ops=False):
+        dag = skrub.var("x", source).columns.tolist()
+    plan, result = _evaluate(dag, source, "greedy")
+    assert ["c", "s", "n"] == result
+    assert [] == [op for op in plan if isinstance(op, ConversionOp)]
+    names = [op for op in plan if isinstance(op, ColumnNamesOp)]
+    assert ["PolarsColumnNamesOp"] == [type(op).__name__ for op in names]
+    assert "polars" == str(names[0].inputs[0]._frame_lib)
 
 
 if __name__ == "__main__":

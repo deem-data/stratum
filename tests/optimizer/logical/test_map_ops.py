@@ -1233,9 +1233,35 @@ class TestAccessorMapOp(unittest.TestCase):
                                   ["dt", "is_month_end"])
         self.assertEqual([True, False], result.to_list())
 
-    def test_polars_single_accessor_returns_namespace(self):
-        result = self._run_polars(["2025-01-15"], ["dt"])
-        self.assertEqual([2025], result.year().to_list())
+    def test_polars_refuses_untranslated_dt_attribute(self):
+        from stratum.optimizer.physical._map_execs import PolarsAccessorMapOp
+        for _, attr in _DT_ATTRS_PANDAS_ONLY:
+            with self.subTest(attr=attr):
+                op = AccessorMapOp(attr_name=["dt", attr])
+                self.assertFalse(PolarsAccessorMapOp.supports(op, None))
+                self.assertIn(f"dt.{attr}", op._unsupported_reason)
+        for attr in ("dayofweek", "is_month_end"):
+            with self.subTest(attr=attr):
+                self.assertTrue(PolarsAccessorMapOp.supports(
+                    AccessorMapOp(attr_name=["dt", attr]), None))
+
+    def test_polars_refuses_bare_dt_namespace(self):
+        from stratum.optimizer.physical._map_execs import PolarsAccessorMapOp
+        op = AccessorMapOp(attr_name=["dt"])
+        self.assertFalse(PolarsAccessorMapOp.supports(op, None))
+        self.assertIn("dt", op._unsupported_reason)
+
+    def test_polars_supports_only_dt_fields(self):
+        # Extraction wraps any attribute read, so anything but a `.dt` field
+        # (including a `.dt` method read without its call) binds pandas.
+        from stratum.optimizer.physical._map_execs import PolarsAccessorMapOp
+        for attr_name in (["iloc"], ["T"], ["values"], ["str"], ["cat", "codes"],
+                          ["dt", "round"], ["dt", "year", "values"]):
+            with self.subTest(attr_name=attr_name):
+                op = AccessorMapOp(attr_name=attr_name)
+                self.assertFalse(PolarsAccessorMapOp.supports(op, None))
+                self.assertEqual(f"pandas attribute `.{'.'.join(attr_name)}` "
+                                 "has no polars translation", op._unsupported_reason)
 
     def test_shared_accessor_keeps_original_edge_when_fused(self):
         source = Op()
@@ -1303,6 +1329,162 @@ def test_dt_attribute_matches_pandas(attr, path, polars):
         pd.testing.assert_frame_equal(expected.reset_index(drop=True),
                                       result.reset_index(drop=True),
                                       check_dtype=False)
+
+
+# The `.dt` attributes polars has no method for: the period boundary flags
+# (bar is_month_end), timetz, and the timedelta components, whose polars
+# `total_*` counterparts are totals rather than components.
+_PANDAS_ONLY_DT = pd.DataFrame({
+    "d": pd.to_datetime(["2025-01-01 00:00", "2025-03-31 12:00", "2025-06-15 00:00",
+                         "2025-12-31 00:00"]),
+    "td": pd.to_timedelta(["1 days 02:03:04.000005006", "00:00:01",
+                           "-1 days +00:00:01", "3 days"])})
+_DT_ATTRS_PANDAS_ONLY = (
+    *(("d", attr) for attr in ("is_month_start", "is_quarter_start",
+                               "is_quarter_end", "is_year_start", "is_year_end",
+                               "timetz")),
+    *(("td", attr) for attr in ("days", "seconds", "microseconds", "nanoseconds")))
+
+
+def _pandas_only_dt_plan(column, attr, path):
+    """A plan reading ``.dt.<attr>`` off ``column``, and its eager pandas result."""
+    values = getattr(_PANDAS_ONLY_DT[column].dt, attr)
+    expected = {"accessor": values, "assign": _PANDAS_ONLY_DT.assign(v=values),
+                "selection": _PANDAS_ONLY_DT[values == values.iloc[-1]]}[path]
+    with skrub.config_context(eager_data_ops=False):
+        src = skrub.var("x", _PANDAS_ONLY_DT)
+        read = getattr(src[column].dt, attr)
+        dag = {"accessor": read, "assign": src.assign(v=read),
+               "selection": src[read == values.iloc[-1]]}[path]
+    return dag, expected
+
+
+@pytest.mark.parametrize("path", ["accessor", "assign", "selection"])
+@pytest.mark.parametrize("column,attr", _DT_ATTRS_PANDAS_ONLY)
+def test_untranslated_dt_attribute_falls_back_to_pandas(column, attr, path):
+    # Greedy prefers polars wherever it is supported, so the read only runs if
+    # polars refuses it at plan time.
+    dag, expected = _pandas_only_dt_plan(column, attr, path)
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = st._api.evaluate(dag)
+    if isinstance(result, (pl.Series, pl.DataFrame)):
+        result = result.to_pandas()
+    if path == "accessor":
+        assert expected.tolist() == result.tolist()
+    else:
+        pd.testing.assert_frame_equal(expected.reset_index(drop=True),
+                                      result.reset_index(drop=True),
+                                      check_dtype=False)
+
+
+@pytest.mark.parametrize("path", ["accessor", "assign", "selection"])
+@pytest.mark.parametrize("column,attr", _DT_ATTRS_PANDAS_ONLY)
+def test_untranslated_dt_attribute_fails_plan_pinned_to_polars(column, attr, path):
+    # A strict polars pin has no pandas to fall back to, so planning fails
+    # instead of the read raising AttributeError at run time.
+    dag, _ = _pandas_only_dt_plan(column, attr, path)
+    with force_polars(), pytest.raises(NotImplementedError):
+        optimize(dag, env={"x": _PANDAS_ONLY_DT})
+
+
+# `.dt` method calls, which run pandas' method on the namespace verbatim. polars
+# lacks most of them or reads the arguments differently: `round` wants "1h"
+# where pandas takes the offset alias "h", and `strftime` formats `%f` as
+# nanoseconds.
+_DT_METHOD_CALLS = (
+    ("round", ("h",)), ("floor", ("D",)), ("ceil", ("15min",)),
+    ("strftime", ("%Y-%m-%d %H:%M:%S.%f",)), ("normalize", ()),
+    ("month_name", ()), ("day_name", ()), ("tz_localize", ("UTC",)))
+
+
+def _dt_method_plan(method, args):
+    """A plan calling ``.dt.<method>(*args)``, and its eager pandas result."""
+    expected = getattr(_DATES["d"].dt, method)(*args)
+    with skrub.config_context(eager_data_ops=False):
+        dag = getattr(skrub.var("x", _DATES)["d"].dt, method)(*args)
+    return dag, expected
+
+
+@pytest.mark.parametrize("method,args", _DT_METHOD_CALLS)
+def test_dt_method_call_falls_back_to_pandas(method, args):
+    # Greedy prefers polars wherever it is supported, so the call only matches
+    # pandas if polars refuses the bare `.dt` namespace at plan time.
+    dag, expected = _dt_method_plan(method, args)
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = st._api.evaluate(dag)
+    if isinstance(result, pl.Series):
+        result = result.to_pandas()
+    assert expected.tolist() == result.tolist()
+
+
+@pytest.mark.parametrize("method,args", _DT_METHOD_CALLS)
+def test_dt_method_call_fails_plan_pinned_to_polars(method, args):
+    dag, _ = _dt_method_plan(method, args)
+    with force_polars(), pytest.raises(NotImplementedError):
+        optimize(dag, env={"x": _DATES})
+
+
+# Pandas attribute reads with no polars translation. Extraction wraps any
+# attribute read on frame-like data into an AccessorMapOp, so polars has to
+# refuse everything but the `.dt` fields it can read.
+_MIXED = pd.DataFrame({"c": pd.Series(["a", "b", "a"], dtype="category"),
+                       "s": ["xy", "zw", "uv"], "n": [1, 2, 3]})
+_PANDAS_ONLY_ATTR_READS = {
+    "cat.codes": lambda x: x["c"].cat.codes,
+    "cat.categories": lambda x: x["c"].cat.categories,
+    "cat.rename_categories": lambda x: x["c"].cat.rename_categories(["A", "B"]),
+    "str[0]": lambda x: x["s"].str[0],
+    "iloc": lambda x: x.iloc[0:2],
+    "loc": lambda x: x.loc[:, ["n"]],
+    "T": lambda x: x.T,
+    "values": lambda x: x["n"].values,
+}
+
+
+def _pandas_only_attr_plan(name):
+    """A plan for one of :data:`_PANDAS_ONLY_ATTR_READS`, and its eager pandas result."""
+    read = _PANDAS_ONLY_ATTR_READS[name]
+    with skrub.config_context(eager_data_ops=False):
+        dag = read(skrub.var("x", _MIXED))
+    return dag, read(_MIXED)
+
+
+def _assert_same_pandas_value(expected, result):
+    assert type(expected) is type(result)
+    if isinstance(expected, pd.DataFrame):
+        pd.testing.assert_frame_equal(expected, result)
+    elif isinstance(expected, pd.Series):
+        pd.testing.assert_series_equal(expected, result)
+    elif isinstance(expected, pd.Index):
+        pd.testing.assert_index_equal(expected, result)
+    else:
+        np.testing.assert_array_equal(expected, result)
+
+
+@pytest.mark.parametrize("name", _PANDAS_ONLY_ATTR_READS)
+def test_pandas_only_attribute_runs_on_pandas(name):
+    dag, expected = _pandas_only_attr_plan(name)
+    _assert_same_pandas_value(expected, _run_plan(dag, {"x": _MIXED}, polars=False))
+
+
+@pytest.mark.parametrize("name", _PANDAS_ONLY_ATTR_READS)
+def test_pandas_only_attribute_fails_plan_pinned_to_polars(name):
+    # A strict polars pin has no pandas to fall back to, so planning fails
+    # instead of the read crashing at run time.
+    dag, _ = _pandas_only_attr_plan(name)
+    with force_polars(), pytest.raises(NotImplementedError,
+                                       match="No implementation was bound"):
+        optimize(dag, env={"x": _MIXED})
+
+
+@pytest.mark.parametrize("name", _PANDAS_ONLY_ATTR_READS)
+def test_pandas_only_attribute_falls_back_to_pandas(name):
+    # Greedy prefers polars wherever it is supported, so the read only runs if
+    # polars refuses it at plan time.
+    dag, expected = _pandas_only_attr_plan(name)
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = st._api.evaluate(dag)
+    _assert_same_pandas_value(expected, result)
 
 
 @pytest.mark.parametrize("polars", [False, True], ids=["pandas", "polars"])
