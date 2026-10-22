@@ -275,11 +275,20 @@ def _polars_isin(obj, args, kwargs, dtype=None):
 def _polars_notna(obj, args, kwargs, dtype=None):
     # FIXME(#216): same unknown-dtype gap as _polars_fillna. Without a dtype the
     # is_not_nan half is skipped, so (a / b).notna() reports True for a NaN
-    # that pandas reports as False.
+    # that pandas reports as False. _polars_isna has the mirror-image gap.
     result = obj.is_not_null()
     actual_dtype = getattr(obj, "dtype", None) or dtype
     if actual_dtype is not None and actual_dtype.is_float():
         result = result & obj.is_not_nan()
+    return result
+
+
+def _polars_isna(obj, args, kwargs, dtype=None):
+    # pandas counts NaN as missing, polars only null. See _polars_notna's FIXME(#216).
+    result = obj.is_null()
+    actual_dtype = getattr(obj, "dtype", None) or dtype
+    if actual_dtype is not None and actual_dtype.is_float():
+        result = result | obj.is_nan()
     return result
 
 
@@ -312,7 +321,10 @@ COLUMN_METHOD_SPECS = {
         _spec("clip", _validate_clip, _polars_clip),
         _spec("where", _validate_where, _polars_where),
         _spec("isin", _validate_isin, _polars_isin),
+        _spec("isna", _validate_notna, _polars_isna),
+        _spec("isnull", _validate_notna, _polars_isna),
         _spec("notna", _validate_notna, _polars_notna),
+        _spec("notnull", _validate_notna, _polars_notna),
         _spec("map", _validate_map, _polars_map),
     )
 }
@@ -347,7 +359,7 @@ class ColumnMethodOp(MapOp):
     #: others all depend on it: ``fillna`` upcasts on a float fill value, ``clip``
     #: on a float bound, ``where`` null-pads the rows it masks out, and ``astype``
     #: is handed its target (possibly per column), so none of them is certain here.
-    BOOLEAN_METHODS = frozenset({"isin", "notna"})
+    BOOLEAN_METHODS = frozenset({"isin", "isna", "isnull", "notna", "notnull"})
 
     def propagate_output_schema(self):
         """A column method is shape-preserving, so the column names carry over and

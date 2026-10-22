@@ -5,6 +5,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import polars as pl
+import skrub
 
 import stratum as st
 from stratum.optimizer._optimize import OptConfig
@@ -16,7 +17,10 @@ from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._column_expr import (
     BinOpExpr, Col, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, OperandLeaf,
     StrExpr, _Folder)
-from stratum.optimizer.logical._column_methods import ColumnMethodOp
+from stratum.optimizer.logical._column_methods import (
+    ColumnMethodOp, is_supported_column_method)
+from stratum.optimizer.logical._dataframe_ops import extract_dataframe_op
+from stratum.optimizer.logical._selection_ops import SelectionOp
 from stratum.optimizer.logical._ops import (
     BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType,
     UnaryOp)
@@ -758,6 +762,190 @@ def test_notna_is_foldable_in_selection_predicate():
     selection = _one(unittest.TestCase(), ops, SelectionOp)
     assert ColumnMethodExpr(Col("x"), "notna") == selection.predicate
     assert 2 == len(ops)
+
+
+def _series_input():
+    src = Op()
+    src.output_type = OutputType.SERIES
+    return src
+
+
+def _wire(op, *inputs):
+    op.inputs = list(inputs)
+    for in_op in inputs:
+        in_op.outputs = [op]
+    return op
+
+
+class TestMissingValueMethods(unittest.TestCase):
+    """isna/isnull/notna/notnull, as methods or as pd.isna(x), are column methods."""
+
+    def setUp(self):
+        self.df = pd.DataFrame({"a": [1.0, np.nan]})
+
+    def test_method_extracts(self):
+        src = st.as_data_op(self.df)
+        for method in ("isna", "isnull", "notna", "notnull"):
+            with self.subTest(method=method):
+                ops = optimize(getattr(src["a"], method)(),
+                               OptConfig(dataframe_ops=True))
+                method_op = _one(self, ops, ColumnMethodOp)
+                self.assertEqual(method, method_op.method)
+                self.assertIs(OutputType.SERIES, method_op.output_type)
+                self.assertFalse(any(isinstance(op, MethodCallOp) for op in ops))
+
+    def test_function_extracts(self):
+        # pd.isnull / pd.notnull are the very same objects as pd.isna / pd.notna.
+        src = st.as_data_op(self.df)
+        for func, method in ((pd.isna, "isna"), (pd.isnull, "isna"),
+                             (pd.notna, "notna"), (pd.notnull, "notna")):
+            with self.subTest(func=func.__name__):
+                ops = optimize(src["a"].skb.apply_func(func),
+                               OptConfig(dataframe_ops=True))
+                method_op = _one(self, ops, ColumnMethodOp)
+                self.assertEqual(method, method_op.method)
+                self.assertIs(OutputType.SERIES, method_op.output_type)
+                self.assertFalse(any(isinstance(op, CallOp) for op in ops))
+
+    def test_function_accepts_obj_keyword(self):
+        src = _series_input()
+        call = _wire(CallOp(func=pd.notna, args=(), kwargs={"obj": OperandRef(0)}), src)
+
+        root, changed = extract_dataframe_op(call, call)
+
+        self.assertTrue(changed)
+        self.assertIsInstance(root, ColumnMethodOp)
+        self.assertEqual("notna", root.method)
+        self.assertEqual((), root.args)
+        self.assertEqual({}, root.kwargs)
+        self.assertEqual([src], root.inputs)
+        self.assertEqual([root], src.outputs)
+
+    def test_method_rejects_args_and_kwargs(self):
+        for args, kwargs in (((1,), {}), ((), {"foo": 1})):
+            with self.subTest(args=args, kwargs=kwargs):
+                call = _wire(MethodCallOp("isna", args=args, kwargs=kwargs),
+                             _series_input())
+                self.assertFalse(is_supported_column_method(call))
+                self.assertFalse(extract_dataframe_op(call, call)[1])
+
+    def test_function_rejects_unsupported_calls(self):
+        a, b = _series_input(), _series_input()
+        frame = _series_input()
+        frame.output_type = OutputType.FRAME
+        cases = {
+            # pd.isna(1) is a plain bool, not a column method.
+            "scalar": _wire(CallOp(func=pd.isna, args=(1,), kwargs={})),
+            "two operands": _wire(
+                CallOp(func=pd.isna, args=(OperandRef(0), OperandRef(1)), kwargs={}),
+                a, b),
+            "positional and obj": _wire(
+                CallOp(func=pd.isna, args=(OperandRef(0),), kwargs={"obj": OperandRef(0)}),
+                _series_input()),
+            "no operand": _wire(CallOp(func=pd.isna, args=(), kwargs={}),
+                                _series_input()),
+            # Frame-level isna has no validate_frame yet.
+            "frame": _wire(CallOp(func=pd.isna, args=(OperandRef(0),), kwargs={}),
+                           frame),
+        }
+        for name, call in cases.items():
+            with self.subTest(name):
+                root, changed = extract_dataframe_op(call, call)
+                self.assertFalse(changed)
+                self.assertIs(call, root)
+
+    def test_folds_into_selection(self):
+        src = st.as_data_op(self.df)
+        for out, expected in (
+                (src[src["a"].isnull()], ColumnMethodExpr(Col("a"), "isnull")),
+                (src[src["a"].skb.apply_func(pd.notna)],
+                 ColumnMethodExpr(Col("a"), "notna"))):
+            with self.subTest(expected=expected):
+                ops = optimize(out, OptConfig(dataframe_ops=True))
+                selection = _one(self, ops, SelectionOp)
+                self.assertEqual(expected, selection.predicate)
+                self.assertEqual([], [op for op in ops if isinstance(op, ColumnMethodOp)])
+
+    def test_folds_into_assign(self):
+        src = st.as_data_op(self.df)
+        out = src.assign(missing=src["a"].isnull(),
+                         present=src["a"].skb.apply_func(pd.notnull))
+        ops = optimize(out, OptConfig(dataframe_ops=True))
+        map_op = _one(self, ops, AssignMapOp)
+        self.assertEqual({"missing": ColumnMethodExpr(Col("a"), "isnull"),
+                          "present": ColumnMethodExpr(Col("a"), "notna")},
+                         map_op.entries)
+        self.assertEqual([], [op for op in ops if isinstance(op, ColumnMethodOp)])
+
+    def test_standalone_polars_handles_nan_and_null(self):
+        series = pl.Series("a", [1.0, float("nan"), None])
+        for method, expected in (("isna", [False, True, True]),
+                                 ("isnull", [False, True, True]),
+                                 ("notna", [True, False, False]),
+                                 ("notnull", [True, False, False])):
+            with self.subTest(method=method), force_polars():
+                self.assertEqual(expected, run_op(ColumnMethodOp(method), series).to_list())
+
+    def test_standalone_polars_on_non_float(self):
+        series = pl.Series("s", ["x", None])
+        with force_polars():
+            self.assertEqual([False, True], run_op(ColumnMethodOp("isna"), series).to_list())
+
+
+_MISSING = pd.DataFrame({"a": [0.0, 1.0, np.nan, 4.0], "b": [0.0, 2.0, 1.0, None],
+                         "s": ["x", None, "z", "w"]})
+
+
+def _evaluate_on_polars(plan):
+    """Run ``plan`` end to end, where greedy picks the native polars impls."""
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = st._api.evaluate(plan)
+    assert isinstance(result, (pl.Series, pl.DataFrame))
+    return result.to_pandas()
+
+
+_FOLDED_NAN_GAP = pytest.mark.xfail(
+    strict=True, reason="FIXME(#216): a folded operand has no dtype, so polars "
+                        "skips the NaN half")
+
+
+def _cases():
+    cases = {
+        "isna": lambda f, call: f["a"].isna(),
+        "isnull": lambda f, call: f["b"].isnull(),
+        "notna": lambda f, call: f["s"].notna(),
+        "notnull": lambda f, call: f["s"].notnull(),
+        "pd.isna": lambda f, call: call(f["a"], pd.isna),
+        "pd.notnull": lambda f, call: call(f["s"], pd.notnull),
+        # 0 / 0 is a NaN, not a null, in polars too: is_null alone would miss it.
+        "computed-isna": lambda f, call: (f["a"] / f["b"]).isna(),
+        "computed-notnull": lambda f, call: (f["a"] / f["b"]).notnull(),
+    }
+    for path in ("standalone", "assign", "selection"):
+        for name, build in cases.items():
+            gap = name.startswith("computed") and path != "standalone"
+            yield pytest.param(build, path, id=f"{path}-{name}",
+                               marks=[_FOLDED_NAN_GAP] if gap else [])
+
+
+@pytest.mark.parametrize("build,path", _cases())
+def test_missing_value_methods_match_pandas(build, path):
+    expected_mask = build(_MISSING, lambda x, func: func(x))
+    expected = {"standalone": expected_mask,
+                "assign": _MISSING.assign(m=expected_mask),
+                "selection": _MISSING[expected_mask]}[path]
+    with skrub.config_context(eager_data_ops=False):
+        src = skrub.var("frame", _MISSING)
+        mask = build(src, lambda x, func: x.skb.apply_func(func))
+        plan = {"standalone": mask, "assign": src.assign(m=mask),
+                "selection": src[mask]}[path]
+    result = _evaluate_on_polars(plan)
+    if path == "standalone":
+        assert expected.tolist() == result.tolist()
+    else:
+        pd.testing.assert_frame_equal(expected.reset_index(drop=True),
+                                      result.reset_index(drop=True),
+                                      check_dtype=False)
 
 
 if __name__ == "__main__":

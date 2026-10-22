@@ -33,7 +33,8 @@ from stratum.optimizer.logical._map_ops import (
     StringMethodOp, make_assign_map_op, make_datetime_conversion_op,
     make_frame_get_attr, make_string_method_op)
 from stratum.optimizer.logical._column_methods import (
-    ColumnMethodOp, is_supported_column_method, make_column_method_op)
+    ColumnMethodOp, get_column_method_spec, is_supported_column_method,
+    make_column_method_op)
 from stratum.optimizer.logical._join_ops import (
     JoinOp, FilteringJoinOp, _MERGE_POSITIONAL, _JOIN_POSITIONAL, _JOIN_OP_FIELDS, make_join_op,
     _make_chained_join_op)
@@ -191,6 +192,41 @@ def _is_column_projection(op: GetItemOp) -> bool:
     return isinstance(key, list) and all(isinstance(k, str) for k in key)
 
 
+#: ``pd.isna(x)`` / ``pd.notna(x)`` as the column method they are equivalent to.
+#: ``pd.isnull`` and ``pd.notnull`` are the same function objects, so they map
+#: here too.
+_MISSING_VALUE_FUNCS = {pd.isna: "isna", pd.notna: "notna"}
+
+
+def _make_missing_value_method(op: CallOp) -> ColumnMethodOp | None:
+    """``pd.isna(x)`` / ``pd.notna(x)`` as ``x.isna()`` / ``x.notna()``.
+
+    Only for a lone graph-fed operand, positional or ``obj=``: on a scalar or a
+    list the function returns a bool or an array instead. The operand must pass
+    the same spec check as the method call would, so a frame is refused until
+    the spec has a ``validate_frame``.
+    """
+    if len(op.args or ()) == 1 and not op.kwargs:
+        operand = op.args[0]
+    elif not op.args and set(op.kwargs or {}) == {"obj"}:
+        operand = op.kwargs["obj"]
+    else:
+        return None
+    if not isinstance(operand, OperandRef) or len(op.inputs) != 1:
+        return None
+    source = op.inputs[operand.k]
+    method = _MISSING_VALUE_FUNCS[op.func]
+    spec = get_column_method_spec(method)
+    validate = (spec.validate_frame if source.output_type is OutputType.FRAME
+                else spec.validate)
+    if not is_frame_like(source) or validate is None or not validate((), {}):
+        return None
+    new_op = ColumnMethodOp(method=method, inputs=op.inputs, outputs=op.outputs)
+    new_op.output_type = source.output_type
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+
 def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                          column_projection = True) -> tuple[Op, bool]:
     new_op = None
@@ -216,6 +252,8 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
             # Datetime conversion detection
             if op.func is pd.to_datetime:
                 new_op = make_datetime_conversion_op(op)
+            elif op.func in (pd.isna, pd.notna):
+                new_op = _make_missing_value_method(op)
 
         elif isinstance(op, MethodCallOp):
             if isinstance(op.inputs[0], AccessorMapOp) and op.inputs[0].attr_name == ["str"]:

@@ -907,13 +907,17 @@ class TestSchemaPropagation(unittest.TestCase):
 
     def test_column_method_keeps_columns_and_derives_dtype(self):
         # a column method is shape-preserving, so only the dtype can change:
-        # isin/notna are always boolean, the rest depend on the input.
+        # isin and the missing-value masks are always boolean, the rest depend
+        # on the input.
         column = pd.Series([1, 2, 3])
         self.assertEqual("bool", str(column.isin([1]).dtype))
-        self.assertEqual("bool", str(column.notna().dtype))
+        for method in ("isna", "isnull", "notna", "notnull"):
+            self.assertEqual("bool", str(getattr(column, method)().dtype))
         self.assertEqual("float64", str(column.where(column > 1).dtype))
 
-        for method, expected in [("isin", pl.Boolean), ("notna", pl.Boolean),
+        for method, expected in [("isin", pl.Boolean), ("isna", pl.Boolean),
+                                 ("isnull", pl.Boolean), ("notna", pl.Boolean),
+                                 ("notnull", pl.Boolean),
                                  ("fillna", pl.Unknown), ("clip", pl.Unknown),
                                  ("where", pl.Unknown), ("astype", pl.Unknown)]:
             with self.subTest(method=method):
