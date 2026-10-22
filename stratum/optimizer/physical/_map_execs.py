@@ -24,7 +24,7 @@ from stratum.optimizer.logical._column_methods import (
 from stratum.optimizer.logical._map_ops import (
     AccessorMapOp, ApplyUDFOp, AssignMapOp, AssignOp, CallMapOp,
     DatetimeConversionOp, StringMethodOp, polars_datetime_kwargs,
-    polars_string_method, polars_str_method_unsupported)
+    polars_dt_attribute, polars_string_method, polars_str_method_unsupported)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._representation import refuse_unsupported_exprs
 from stratum.optimizer.physical._registry import physical_impl
@@ -184,18 +184,20 @@ def _to_datetime_via_pandas(obj, args, kwargs):
 @physical_impl(of=DatetimeConversionOp, backend="pandas")
 class PandasDatetimeConversionOp(DatetimeConversionOp, PhysicalOp):
     def process(self, mode: str, inputs: list):
-        return pd.to_datetime(inputs[0], *self.args, **self.kwargs)
+        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
+        return pd.to_datetime(_obj, *_args, **_kwargs)
 
 
 @physical_impl(of=DatetimeConversionOp, backend="polars")
 class PolarsDatetimeConversionOp(DatetimeConversionOp, PhysicalOp):
     def process(self, mode: str, inputs: list):
-        translated = polars_datetime_kwargs(self.args, self.kwargs)
+        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
+        translated = polars_datetime_kwargs(_args, _kwargs)
         if translated is not None:
             # TODO: Support already-datetime and numeric operands natively;
             # the Polars string namespace only accepts string input.
-            return inputs[0].str.to_datetime(**translated)
-        return _to_datetime_via_pandas(inputs[0], self.args, self.kwargs)
+            return _obj.str.to_datetime(**translated)
+        return _to_datetime_via_pandas(_obj, _args, _kwargs)
 
 
 # --- StringMethodOp (col.str.<method>) ----------------------------------------
@@ -261,16 +263,12 @@ class PolarsAccessorMapOp(AccessorMapOp, PhysicalOp):
         return op.attr_name != ["index"]
 
     def process(self, mode: str, inputs: list):
-        result = inputs[0]
-        tmp = result
+        if len(self.attr_name) == 2 and self.attr_name[0] == "dt":
+            return polars_dt_attribute(inputs[0], self.attr_name[1])
+        tmp = inputs[0]
         for attr in self.attr_name:
-            attr = self.POLARS_ATTR_NAME_MAP.get(attr, attr)
-            # TODO find better way to handle this
-            if attr == "is_month_end":
-                return result.dt.month_end() == result
-            # polars implements dt.day as a method, not an attribute; getattr
-            # handles both attributes and methods.
             tmp = getattr(tmp, attr)
         if len(self.attr_name) == 2:
+            # polars implements accessor attributes as methods.
             return tmp()
         return tmp
