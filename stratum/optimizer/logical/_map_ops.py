@@ -312,10 +312,14 @@ class AccessorMapOp(MapOp):
     """
     fields = ["attr_name"]
 
-    # NOTE: Polars and Pandas differ in semantics for some datetime attributes:
-    #   - dayofweek: Pandas uses Monday=0, Polars weekday() uses Monday=1 (ISO 8601)
-    #   - dayofyear: Pandas is 1-indexed, Polars ordinal_day() is also 1-indexed (same)
-    POLARS_ATTR_NAME_MAP = {"dayofweek": "weekday","dayofyear": "ordinal_day"}
+    # pandas `.dt.<attr>` -> polars `.dt.<method>`, for the attributes whose names
+    # differ between backends. Some also differ in *values*; those are corrected
+    # in :func:`polars_dt_attribute`.
+    POLARS_ATTR_NAME_MAP = {
+        "dayofweek": "weekday", "day_of_week": "weekday",
+        "dayofyear": "ordinal_day", "day_of_year": "ordinal_day",
+        "daysinmonth": "days_in_month",
+    }
 
     def __init__(self, attr_name: list[str] | str = None, inputs: list[Op] = None, outputs: list[Op] = None):
         if attr_name is None:
@@ -363,6 +367,26 @@ class AccessorMapOp(MapOp):
             self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
         else:
             self.output_schema = None
+
+
+def polars_dt_attribute(obj, attr: str):
+    """Read pandas' ``.dt.<attr>`` off a polars Series or expression.
+
+    polars exposes the attributes as methods, some under other names (see
+    :data:`AccessorMapOp.POLARS_ATTR_NAME_MAP`), and counts two of them
+    differently: weekdays from Monday=1 (ISO 8601, pandas: Monday=0) and
+    nanoseconds past the second (pandas: past the microsecond, 0..999). The
+    result carries pandas' values in polars' integer dtype.
+    """
+    if attr == "is_month_end":
+        return obj.dt.month_end() == obj
+    name = AccessorMapOp.POLARS_ATTR_NAME_MAP.get(attr, attr)
+    result = getattr(obj.dt, name)()
+    if name == "weekday":
+        return result - 1
+    if name == "nanosecond":
+        return result % 1000
+    return result
 
 
 class AssignMapOp(MapOp):

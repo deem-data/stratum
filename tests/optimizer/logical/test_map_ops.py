@@ -1176,6 +1176,29 @@ class TestDatetimeConversionOp(unittest.TestCase):
             result = run_op(op, "01/02/2020")
         self.assertEqual(pd.Timestamp("2020-02-01"), result)
 
+    def _convert_with_option(self, polars, values, args, kwargs, option):
+        # A plan-fed option is an OperandRef into the op's inputs: here inputs[1].
+        series = pl.Series("dt", values) if polars else pd.Series(values)
+        with force_polars(polars):
+            op = DatetimeConversionOp(args=args, kwargs=kwargs)
+            return list(run_op(op, series, option))
+
+    def test_resolves_graph_fed_kwarg(self):
+        # On polars the kwargs translation must see the resolved format.
+        for polars in (False, True):
+            with self.subTest(polars=polars):
+                result = self._convert_with_option(
+                    polars, ["2025-01-06"], (), {"format": OperandRef(1)}, "%Y-%m-%d")
+                self.assertEqual([pd.Timestamp("2025-01-06")], result)
+
+    def test_resolves_graph_fed_positional(self):
+        for polars in (False, True):
+            with self.subTest(polars=polars):
+                result = self._convert_with_option(
+                    polars, ["2025-01-06", "bad"], (OperandRef(1),), {}, "coerce")
+                self.assertEqual(pd.Timestamp("2025-01-06"), result[0])
+                self.assertTrue(pd.isna(result[1]))
+
     def test_polars_datetime_kwargs_rejects_unsupported_errors(self):
         self.assertIsNone(
             polars_datetime_kwargs((), {"errors": "ignore"}))
@@ -1198,10 +1221,12 @@ class TestAccessorMapOp(unittest.TestCase):
         result = self._run_polars(["2025-01-15", "2025-06-20"], ["dt", "year"])
         self.assertEqual([2025, 2025], result.to_list())
 
-    def test_polars_dayofweek(self):
-        # polars: Monday=1 (pandas: Monday=0)
-        result = self._run_polars(["2025-01-06"], ["dt", "dayofweek"])
-        self.assertEqual([1], result.to_list())
+    def test_polars_matches_pandas_values(self):
+        values = _DATES["d"]
+        for attr in _DT_ATTRS_PANDAS_SEMANTICS:
+            with self.subTest(attr=attr):
+                result = self._run_polars(values, ["dt", attr])
+                self.assertEqual(getattr(values.dt, attr).tolist(), result.to_list())
 
     def test_polars_is_month_end(self):
         result = self._run_polars(["2025-01-31", "2025-01-15"],
@@ -1228,6 +1253,66 @@ class TestAccessorMapOp(unittest.TestCase):
         self.assertEqual([other_consumer], accessor.outputs)
         self.assertIn(accessor, source.outputs)
         self.assertIn(new_op, source.outputs)
+
+
+_DATES = pd.DataFrame({
+    "d": pd.to_datetime(["2025-01-06 00:00:00.000001001",  # a Monday
+                         "2025-01-12 12:00:00.123456789"]),  # a Sunday
+    "s": ["2025-01-06", "2025-01-12"]})
+
+# The `.dt` attributes where polars disagrees with pandas: it counts weekdays
+# from Monday=1 and nanoseconds past the second (pandas: Monday=0, past the
+# microsecond), and it lacks some of pandas' alias spellings.
+_DT_ATTRS_PANDAS_SEMANTICS = ("dayofweek", "day_of_week", "weekday", "nanosecond",
+                              "day_of_year", "daysinmonth")
+
+
+def _run_plan(dag, env, polars):
+    """Plan ``dag`` against one backend, run it and return a pandas result."""
+    from stratum.runtime._buffer_pool import BufferPool
+    with force_polars(polars):
+        ops = optimize(dag, env=env)
+    pool = BufferPool()
+    for op in ops:
+        pool.put(op, op.process("fit_transform", [pool.pin(inp) for inp in op.inputs]))
+    result = pool.pin(ops[-1])
+    # Every op here has a native polars impl, so a pandas result would mean a
+    # fallback hid the polars kernel.
+    assert isinstance(result, (pl.Series, pl.DataFrame)) == polars
+    return result.to_pandas() if polars else result
+
+
+@pytest.mark.parametrize("polars", [False, True], ids=["pandas", "polars"])
+@pytest.mark.parametrize("path", ["accessor", "assign", "selection"])
+@pytest.mark.parametrize("attr", _DT_ATTRS_PANDAS_SEMANTICS)
+def test_dt_attribute_matches_pandas(attr, path, polars):
+    # The standalone accessor runs PolarsAccessorMapOp; assign and mask
+    # selection fold the read into a DtExpr.
+    values = getattr(_DATES["d"].dt, attr)
+    expected = {"accessor": values, "assign": _DATES.assign(v=values),
+                "selection": _DATES[values == values.iloc[-1]]}[path]
+    with skrub.config_context(eager_data_ops=False):
+        src = skrub.var("x", _DATES)
+        read = getattr(src["d"].dt, attr)
+        dag = {"accessor": read, "assign": src.assign(v=read),
+               "selection": src[read == values.iloc[-1]]}[path]
+    result = _run_plan(dag, {"x": _DATES}, polars)
+    if path == "accessor":
+        assert expected.tolist() == result.tolist()
+    else:
+        pd.testing.assert_frame_equal(expected.reset_index(drop=True),
+                                      result.reset_index(drop=True),
+                                      check_dtype=False)
+
+
+@pytest.mark.parametrize("polars", [False, True], ids=["pandas", "polars"])
+def test_to_datetime_resolves_graph_fed_format(polars):
+    with skrub.config_context(eager_data_ops=False):
+        src = skrub.var("x", _DATES)
+        fmt = skrub.deferred(lambda: "%Y-%m-%d")()
+        dag = skrub.deferred(pd.to_datetime)(src["s"], format=fmt)
+    result = _run_plan(dag, {"x": _DATES}, polars)
+    assert pd.to_datetime(_DATES["s"]).tolist() == result.tolist()
 
 
 class TestStringMethodOp(unittest.TestCase):
