@@ -70,7 +70,6 @@ from stratum.optimizer.physical._predictor_execs import (
     lower_predictor,
 )
 from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry,
-                                                  _current_process_execute,
                                                   _placeholder_cost,
                                                   _placeholder_exec_mem,
                                                   build_default_physical_registry)
@@ -233,7 +232,7 @@ def test_alternative_impl_registers_against_the_family_op():
         op_type=RandomForestOp, backend_name="stratum",
         input_format="frame", output_format="frame",
         supports=ClassifierOnlyForest.supports, cost=_placeholder_cost,
-        exec_mem=_placeholder_exec_mem, execute=_current_process_execute,
+        exec_mem=_placeholder_exec_mem,
         impl_class=ClassifierOnlyForest,
         implementation_name="rf_hist",
     ))

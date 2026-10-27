@@ -11,16 +11,20 @@ import stratum as st
 from stratum.optimizer._optimize import OptConfig, logical_optimize
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.logical._dataframe_ops import (
-    AggregateOp, AssignMapOp, AssignOp, ColumnProjectionOp, ConcatOp, DataSourceOp,
-    DatetimeConversionOp, DropOp, AccessorMapOp, JoinOp, RenameOp, ResetIndexOp,
+    AggregateOp, AssignMapOp, AssignOp, ColumnProjectionOp, ConcatOp, InMemoryFrameOp,
+    ReadCSVOp, ReadParquetOp,
+    DatetimeConversionOp, DatetimeFieldOp, DropOp, AttributeReadOp, JoinOp, RenameOp,
+    ResetIndexOp,
     DropLabelsSelectionOp, SelectionOp, SliceSelectionOp, SplitOp, SplitOutput)
+from stratum.optimizer.logical._source_ops import make_read_op
 from stratum.optimizer.logical._ops import (
+    CallOp,
     BinOp, ChoiceOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType, UnaryOp)
 from stratum.optimizer.logical._map_ops import StringMethodOp
 from stratum.optimizer.logical._metadata_ops import make_rename_op
 from stratum.optimizer._optimize import optimize as optimize_full
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
-from stratum.optimizer.logical._column_methods import ColumnMethodOp
+from stratum.optimizer.logical._column_methods import COLUMN_METHODS, FillnaOp
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, BinOpExpr, Col, DtExpr)
 from stratum.optimizer.logical._scoring import Metric
@@ -55,17 +59,22 @@ def _stub(schema, output_type=OutputType.UNKNOWN):
     return op
 
 
+def _read_csv_op(path, **options) -> ReadCSVOp:
+    """The source op extraction makes of ``pd.read_csv(path, **options)``."""
+    return make_read_op(CallOp(func=pd.read_csv, args=(path,), kwargs=options))
+
+
 class TestSchemaPropagation(unittest.TestCase):
     def setUp(self):
         self.df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6], "z": [7, 8, 9]})
 
     # --- source ----------------------------------------------------------
     def test_source_schema_from_frame(self):
-        src = _schema_op(st.as_data_op(self.df).drop(columns=["z"]), DataSourceOp)
+        src = _schema_op(st.as_data_op(self.df).drop(columns=["z"]), InMemoryFrameOp)
         self.assertEqual(["x", "y", "z"], list(src.output_schema.keys()))
 
     def test_source_keeps_exact_dtype_for_typed_columns(self):
-        op = DataSourceOp(data=pd.DataFrame({"i": [1, 2], "f": [1.5, 2.5]}))
+        op = InMemoryFrameOp(data=pd.DataFrame({"i": [1, 2], "f": [1.5, 2.5]}))
         op.propagate_output_schema()
         self.assertEqual(pl.Int64, op.output_schema["i"])
         self.assertEqual(pl.Float64, op.output_schema["f"])
@@ -74,14 +83,14 @@ class TestSchemaPropagation(unittest.TestCase):
         # an object column is element-typed only by scanning; a sample can be
         # confidently wrong, so the name is kept but the dtype is left Unknown.
         df = pd.DataFrame({"i": [1, 2, 3], "obj": pd.Series([1, 2, "x"], dtype=object)})
-        op = DataSourceOp(data=df)
+        op = InMemoryFrameOp(data=df)
         op.propagate_output_schema()
         self.assertEqual(["i", "obj"], list(op.output_schema.keys()))
         self.assertEqual(pl.Int64, op.output_schema["i"])
         self.assertEqual(pl.Unknown, op.output_schema["obj"])
 
     def test_source_polars_frame_keeps_exact_schema(self):
-        op = DataSourceOp(data=pl.DataFrame({"a": [1], "b": ["x"]}))
+        op = InMemoryFrameOp(data=pl.DataFrame({"a": [1], "b": ["x"]}))
         op.propagate_output_schema()
         self.assertEqual(pl.Int64, op.output_schema["a"])
         self.assertEqual(pl.String, op.output_schema["b"])
@@ -94,7 +103,7 @@ class TestSchemaPropagation(unittest.TestCase):
         os.close(fd)
         try:
             self.df.to_csv(path, index=False)
-            op = DataSourceOp(file_path=path, _format="csv")
+            op = ReadCSVOp(file_path=path)
             op.propagate_output_schema()
             self.assertEqual(["x", "y", "z"], list(op.output_schema.keys()))
             # dtypes need a full-file scan to be safe -> left Unknown.
@@ -115,7 +124,7 @@ class TestSchemaPropagation(unittest.TestCase):
         for read_kwargs, write_kwargs in cases:
             with self.subTest(read_kwargs=read_kwargs), csv_file(self.df, **write_kwargs) as path:
                 expected = list(pd.read_csv(path, **read_kwargs).columns)
-                op = DataSourceOp(file_path=path, _format="csv", read_kwargs=read_kwargs)
+                op = _read_csv_op(path, **read_kwargs)
                 op.propagate_output_schema()
                 self.assertEqual(expected, list(op.output_schema.keys()))
 
@@ -123,7 +132,7 @@ class TestSchemaPropagation(unittest.TestCase):
         # header=None makes pandas name the columns 0..n-1; the schema keeps those
         # labels verbatim rather than stringifying them.
         with csv_file(self.df, header=False) as path:
-            op = DataSourceOp(file_path=path, _format="csv", read_kwargs={"header": None})
+            op = ReadCSVOp(file_path=path, header=None)
             op.propagate_output_schema()
             self.assertEqual([0, 1, 2], list(op.output_schema.keys()))
 
@@ -131,18 +140,17 @@ class TestSchemaPropagation(unittest.TestCase):
         # a graph-fed option is still an OperandRef at plan time, so the column
         # set it implies isn't knowable.
         with csv_file(self.df) as path:
-            op = DataSourceOp(file_path=path, _format="csv",
-                              read_kwargs={"sep": OperandRef(0)})
+            op = ReadCSVOp(file_path=path, sep=OperandRef(0))
             op.propagate_output_schema()
             self.assertIsNone(op.output_schema)
 
     def test_non_csv_source_format_is_unknown(self):
-        op = DataSourceOp(file_path="/some/file.parquet", _format="parquet")
+        op = ReadParquetOp(file_path="/some/file.parquet")
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
     def test_csv_source_unreadable_path_falls_back_to_unknown(self):
-        op = DataSourceOp(file_path="/no/such/file.csv", _format="csv")
+        op = ReadCSVOp(file_path="/no/such/file.csv")
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
@@ -151,13 +159,13 @@ class TestSchemaPropagation(unittest.TestCase):
         # costly for the optimizer: the schema is left unknown, unprobed.
         for path in ("gs://bucket/data.csv", "gcs://bucket/data.csv", "GS://bucket/data.csv"):
             with self.subTest(path=path), mock.patch("pandas.read_csv") as read_csv:
-                op = DataSourceOp(file_path=path, _format="csv")
+                op = ReadCSVOp(file_path=path)
                 op.propagate_output_schema()
                 self.assertIsNone(op.output_schema)
                 read_csv.assert_not_called()
 
     def test_graph_fed_path_is_unknown(self):
-        op = DataSourceOp(file_path=OperandRef(0), _format="csv")
+        op = ReadCSVOp(file_path=OperandRef(0))
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
@@ -165,7 +173,7 @@ class TestSchemaPropagation(unittest.TestCase):
         # an unconvertible pandas frame (e.g. an exotic/extension dtype) must not
         # crash optimize(); the pandas->polars conversion is caught and the schema
         # falls back to unknown.
-        op = DataSourceOp(data=self.df)
+        op = InMemoryFrameOp(data=self.df)
         with mock.patch("polars.from_pandas", side_effect=Exception("boom")):
             op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
@@ -177,9 +185,7 @@ class TestSchemaPropagation(unittest.TestCase):
 
     def test_drop_positional_axis1_removes_columns(self):
         # positional form `df.drop(labels, axis=1)`: labels are columns.
-        op = DropOp(args=[["z"]], kwargs={"axis": 1})
-        op.inputs = [_stub(pl.Schema({"x": pl.Int64, "y": pl.Int64, "z": pl.Int64}))]
-        op.propagate_output_schema()
+        op = _schema_op(st.as_data_op(self.df).drop(["z"], axis=1), DropOp)
         self.assertEqual(["x", "y"], list(op.output_schema.keys()))
 
     def test_row_drop_is_a_selection_that_keeps_every_column(self):
@@ -200,7 +206,7 @@ class TestSchemaPropagation(unittest.TestCase):
                                  list(op.output_schema.keys()))
 
     def test_drop_with_a_string_column_axis_removes_columns(self):
-        op = DropOp(args=[["y"]], kwargs={"axis": "columns"})
+        op = DropOp(columns=["y"])
         op.inputs = [_stub(pl.Schema({"x": pl.Int64, "y": pl.Int64}))]
         op.propagate_output_schema()
         self.assertEqual(["x"], list(op.output_schema.keys()))
@@ -397,31 +403,24 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertEqual(["a", "v_l", "b", "v_r"], list(op.output_schema.keys()))
 
     def test_concat_unions_columns(self):
-        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=1)
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(1)], axis=1)
         op.inputs = [_stub(pl.Schema({"a": pl.Int64})), _stub(pl.Schema({"b": pl.String}))]
         op.propagate_output_schema()
         self.assertEqual(["a", "b"], list(op.output_schema.keys()))
 
-    def test_concat_includes_inline_constant_operand(self):
-        # an operand that was a literal frame is stored in `others`, not as an
-        # input edge, so reading `inputs` would silently drop its columns.
-        op = ConcatOp(first=OperandRef(0), others=[pd.DataFrame({"c": [3]})], axis=1)
-        op.inputs = [_stub(pl.Schema({"a": pl.Int64, "b": pl.Int64}))]
+    def test_concat_reads_an_operand_repeated_on_one_edge_twice(self):
+        # `df.skb.concat([df])` de-duplicates to a single input edge.
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(0)], axis=0)
+        op.inputs = [_stub(pl.Schema({"a": pl.Int64}))]
         op.propagate_output_schema()
-        self.assertEqual(["a", "b", "c"], list(op.output_schema.keys()))
-
-    def test_concat_of_only_constant_operands_is_not_an_empty_schema(self):
-        # with no graph-fed operand there are no inputs at all; the result must be
-        # the constants' columns, never a *known* zero-column schema.
-        op = ConcatOp(first=pd.DataFrame({"c": [1]}),
-                      others=[pd.DataFrame({"d": [2]})], axis=1)
-        op.inputs = []
+        self.assertEqual(pl.Schema({"a": pl.Int64}), op.output_schema)
+        op.axis = 1
         op.propagate_output_schema()
-        self.assertEqual(["c", "d"], list(op.output_schema.keys()))
+        self.assertIsNone(op.output_schema)  # two columns named `a`
 
     def test_concat_graph_fed_axis_is_unknown(self):
         # the axis selects the dtype rule, so an unresolvable axis is unknown.
-        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=OperandRef(2))
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(1)], axis=OperandRef(2))
         op.inputs = [_stub(pl.Schema({"a": pl.Int64})),
                      _stub(pl.Schema({"a": pl.Int64})), _stub(None)]
         op.propagate_output_schema()
@@ -434,7 +433,7 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertEqual("int64", str(actual["a"]))
         self.assertEqual("float64", str(actual["b"]))
 
-        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=0)
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(1)], axis=0)
         op.inputs = [_stub(pl.Schema({"a": pl.Int64})),
                      _stub(pl.Schema({"a": pl.Int64, "b": pl.Int64}))]
         op.propagate_output_schema()
@@ -442,7 +441,7 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertEqual(pl.Unknown, op.output_schema["b"])   # widened by pandas
 
     def test_row_concat_drops_dtype_when_operands_disagree(self):
-        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=0)
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(1)], axis=0)
         op.inputs = [_stub(pl.Schema({"a": pl.Int64})), _stub(pl.Schema({"a": pl.Float64}))]
         op.propagate_output_schema()
         self.assertEqual(pl.Unknown, op.output_schema["a"])
@@ -454,7 +453,7 @@ class TestSchemaPropagation(unittest.TestCase):
                             pd.DataFrame({"b": [2]}, index=[5])], axis=1).dtypes
         self.assertEqual(["float64", "float64"], [str(dt) for dt in actual])
 
-        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=1)
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(1)], axis=1)
         op.inputs = [_stub(pl.Schema({"a": pl.Int64})), _stub(pl.Schema({"b": pl.Int64}))]
         op.propagate_output_schema()
         self.assertEqual(["a", "b"], list(op.output_schema.keys()))
@@ -465,7 +464,7 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertEqual(["x", "x"], list(pd.concat(
             [pd.DataFrame({"x": [1]}), pd.DataFrame({"x": [2]})], axis=1).columns))
 
-        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=1)
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(1)], axis=1)
         op.inputs = [_stub(pl.Schema({"x": pl.Int64})), _stub(pl.Schema({"x": pl.Int64}))]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
@@ -498,7 +497,7 @@ class TestSchemaPropagation(unittest.TestCase):
 
     # --- unknown propagation --------------------------------------------
     def test_unknown_input_propagates(self):
-        op = ConcatOp(first=OperandRef(0), others=[OperandRef(1)], axis=0)
+        op = ConcatOp(operands=[OperandRef(0), OperandRef(1)], axis=0)
         op.inputs = [_stub(pl.Schema({"a": pl.Int64})), _stub(None)]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
@@ -654,54 +653,44 @@ class TestSchemaPropagation(unittest.TestCase):
         op = _schema_op(dag, DropOp)
         self.assertIsNone(op.output_schema)
 
-    # --- accessor projection (.dt.year, ...) ----------------------------
-    def test_getattr_projection_keeps_columns_retypes(self):
-        op = AccessorMapOp(attr_name=["dt", "year"])
+    # --- datetime fields (.dt.year, ...) ---------------------------------
+    def test_datetime_field_keeps_columns_retypes(self):
+        op = DatetimeFieldOp(field="year")
         op.inputs = [_stub(pl.Schema({"d": pl.Datetime("us")}))]
         op.propagate_output_schema()
         # column name is preserved; the dtype is no longer tracked.
         self.assertEqual(["d"], list(op.output_schema.keys()))
         self.assertEqual(pl.Unknown, op.output_schema["d"])
 
-    def test_non_accessor_attribute_is_unknown(self):
-        # make_frame_get_attr wraps *any* attribute of a frame-like input, but only
-        # an accessor projection preserves the columns. `.T` transposes (its columns
-        # become the old index labels), `.values` is an ndarray, `.shape` a tuple.
+    def test_other_attribute_reads_are_unknown(self):
+        # make_frame_get_attr sees *any* attribute of a frame-like input, but only
+        # a datetime field preserves the columns. `.T` transposes (its columns
+        # become the old index labels), `.values` is an ndarray, and `.dt.components`
+        # and `.dt.isocalendar` fan one column out into several.
         self.assertEqual([0, 1], list(pd.DataFrame({"a": [1, 2], "b": [3, 4]}).T.columns))
-
-        src = _stub(pl.Schema({"a": pl.Int64, "b": pl.Int64}))
-        for attr_name in (["T"], ["values"], ["shape"], ["index"], ["columns"],
-                          ["loc"], ["iloc"], ["dt"], ["dt", "year", "extra"]):
-            with self.subTest(attr_name=attr_name):
-                op = AccessorMapOp(attr_name=attr_name, inputs=[src], outputs=[])
-                op.propagate_output_schema()
-                self.assertIsNone(op.output_schema)
-
-    def test_getattr_projection_unknown_input_propagates(self):
-        op = AccessorMapOp(attr_name="dt")
-        op.inputs = [_stub(None)]
-        op.propagate_output_schema()
-        self.assertIsNone(op.output_schema)
-
-    def test_dt_attributes_fanning_out_columns_are_unknown(self):
-        # `.dt` is not uniformly column-preserving: these two are the whole-frame
-        # members of the namespace, so the gate is per attribute, not per namespace.
         td = pd.Series(pd.to_timedelta(["1 days 2:03:04"]))
         self.assertEqual(7, len(td.dt.components.columns))
         self.assertEqual(3, len(pd.Series(pd.to_datetime(["2024-01-01"])).dt.isocalendar().columns))
 
-        src = _stub(pl.Schema({"t": pl.Duration("us")}))
-        for attr in ("components", "isocalendar"):
-            with self.subTest(attr=attr):
-                op = AccessorMapOp(attr_name=["dt", attr], inputs=[src], outputs=[])
+        src = _stub(pl.Schema({"a": pl.Int64, "b": pl.Int64}))
+        for attr_name in (["T"], ["values"], ["loc"], ["iloc"], ["dt"],
+                          ["dt", "components"], ["dt", "isocalendar"]):
+            with self.subTest(attr_name=attr_name):
+                op = AttributeReadOp(attr_name=attr_name, inputs=[src], outputs=[])
                 op.propagate_output_schema()
                 self.assertIsNone(op.output_schema)
+
+    def test_datetime_field_unknown_input_propagates(self):
+        op = DatetimeFieldOp(field="year")
+        op.inputs = [_stub(None)]
+        op.propagate_output_schema()
+        self.assertIsNone(op.output_schema)
 
     def test_dt_allow_list_holds_only_series_valued_properties(self):
         # Guards the allow-list against a member that isn't actually one-to-one.
         stamps = pd.Series(pd.to_datetime(["2024-03-05 01:02:03"]))
         spans = pd.Series(pd.to_timedelta(["1 days 2:03:04"]))
-        for attr in AccessorMapOp.ELEMENTWISE_ACCESSORS["dt"]:
+        for attr in DatetimeFieldOp.FIELDS:
             with self.subTest(attr=attr):
                 values = [getattr(s.dt, attr, None) for s in (stamps, spans)]
                 self.assertTrue(any(isinstance(v, pd.Series) for v in values))
@@ -711,7 +700,7 @@ class TestSchemaPropagation(unittest.TestCase):
     @staticmethod
     def _aggregate(aggregations, grouping=(Col("g"),), **options):
         return AggregateOp(grouped=True, grouping=grouping,
-                           aggregations=aggregations, options=options)
+                           aggregations=aggregations, **options)
 
     def test_aggregate_named_entries_are_columns(self):
         # as_index defaults to True -> grouping key `g` goes to the index, not a column.
@@ -728,7 +717,7 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertEqual(["total"], list(op.output_schema.keys()))
 
     def test_aggregate_as_index_false_keeps_grouping_keys(self):
-        op = self._aggregate(((None, AggExpr("sum", Col("v"))),), as_index=False)
+        op = self._aggregate(((None, AggExpr("sum", Col("v"))),), keys_as_columns=True)
         op.inputs = [_stub(pl.Schema({"g": pl.Int64, "v": pl.Int64}))]
         op.propagate_output_schema()
         self.assertEqual(["g", "v"], list(op.output_schema.keys()))
@@ -736,7 +725,7 @@ class TestSchemaPropagation(unittest.TestCase):
     def test_aggregate_as_index_false_skips_unknown_grouping_key(self):
         # as_index=False adds grouping keys as columns, but only those actually
         # present in the input schema; an unknown key is simply not emitted.
-        op = self._aggregate(((None, AggExpr("sum", Col("v"))),), as_index=False)
+        op = self._aggregate(((None, AggExpr("sum", Col("v"))),), keys_as_columns=True)
         op.inputs = [_stub(pl.Schema({"v": pl.Int64}))]
         op.propagate_output_schema()
         self.assertEqual(["v"], list(op.output_schema.keys()))
@@ -744,7 +733,7 @@ class TestSchemaPropagation(unittest.TestCase):
     def test_aggregate_as_index_false_computed_key_is_unknown(self):
         # A computed key has no static column name to emit.
         op = self._aggregate(((None, AggExpr("sum", Col("v"))),),
-                             grouping=(DtExpr(Col("d"), "year"),), as_index=False)
+                             grouping=(DtExpr(Col("d"), "year"),), keys_as_columns=True)
         op.inputs = [_stub(pl.Schema({"d": pl.Datetime("us"), "v": pl.Int64}))]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
@@ -921,14 +910,14 @@ class TestSchemaPropagation(unittest.TestCase):
                                  ("fillna", pl.Unknown), ("clip", pl.Unknown),
                                  ("where", pl.Unknown), ("astype", pl.Unknown)]:
             with self.subTest(method=method):
-                op = ColumnMethodOp(method=method)
+                op = COLUMN_METHODS[method][0]()
                 op.inputs = [_stub(pl.Schema({"x": pl.Int64}), OutputType.SERIES)]
                 op.propagate_output_schema()
                 self.assertEqual(["x"], list(op.output_schema.keys()))
                 self.assertEqual(expected, op.output_schema["x"])
 
     def test_column_method_unknown_input_propagates(self):
-        op = ColumnMethodOp(method="fillna")
+        op = FillnaOp()
         op.inputs = [_stub(None)]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)

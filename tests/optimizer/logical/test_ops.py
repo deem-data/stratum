@@ -22,7 +22,7 @@ from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.logical._column_expr import BinOpExpr, Col, OperandLeaf
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
 from stratum.optimizer._optimize import convert_to_ops, optimize as optimize_
-from stratum.optimizer.logical._map_ops import ApplyUDFOp
+from stratum.optimizer.logical._map_ops import ApplyUDFOp, AssignOp
 from stratum.optimizer.physical._impl_selection import bind_op
 from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._physical_ops import PhysicalOp
@@ -70,9 +70,9 @@ class TestOpCloning(unittest.TestCase):
         # clone with their config preserved. In the optimized plan above these
         # have been swapped to physical impls, which refuse cloning (as asserted
         # for ops[0]).
-        udf = ApplyUDFOp(args=(1,), kwargs={}, columns=["a"])
-        self.assertEqual((1,), udf.clone().args)
-        self.assertEqual(["a"], udf.clone().columns)
+        udf = ApplyUDFOp(args=(1,), kwargs={"axis": 1})
+        self.assertEqual(((1,), {"axis": 1}), (udf.clone().args, udf.clone().kwargs))
+        self.assertEqual({"b": 1}, AssignOp(kwargs={"b": 1}).clone().kwargs)
 
         getitem = GetItemOp(key="a")
         self.assertEqual("a", getitem.clone().key)

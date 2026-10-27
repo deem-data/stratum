@@ -1,5 +1,6 @@
+from stratum.optimizer.logical._base import IndexEffect
 from stratum.optimizer.logical._ops import (OperandRef, OutputType, is_frame_like, BaseEstimatorOp, BinOp, UnaryOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp,
-                                       MethodCallOp, Op, TransformerOp, ValueOp)
+                                       MethodCallOp, Op, TransformerOp, ValueOp, substitute_op)
 from pandas import DataFrame
 from polars import DataFrame as PolarsDataFrame
 from skrub import SelectCols
@@ -12,78 +13,117 @@ import numpy as np
 # Per-category frame ops. These are imported here both because the
 # `extract_dataframe_op` dispatcher below references them and so that existing
 # `from ..._dataframe_ops import X` import sites keep working (re-export hub).
-from stratum.optimizer.logical._source_ops import DataSourceOp, make_read_op, try_make_read_op
+from stratum.optimizer.logical._source_ops import (
+    FileReadOp, InMemoryFrameOp, LoadNumpyOp, ReadCSVOp, ReadParquetOp, SourceOp, make_read_op,
+    try_make_read_op)
 from stratum.optimizer.logical._selection_ops import (
     SelectionOp, MaskSelectionOp, DropMissingSelectionOp, DropDuplicatesSelectionOp,
     SliceSelectionOp, SampleSelectionOp, DropLabelsSelectionOp, _SELECTION_METHODS,
     make_selection_op, is_mask_selection, make_mask_selection_op)
 from stratum.optimizer.logical._aggregation_ops import (
-    AggregateOp, GroupedDataframeOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
+    AggregateOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
     _is_aggregation, _is_value_counts, _extract_grouping, _extract_aggregations,
     make_aggregate_op, make_value_counts_ops)
 from stratum.optimizer.logical._sort_ops import SortOp, make_sort_op
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, ProjectionOp, DropOp,
     drop_targets_columns, make_column_projection_op, make_column_selector_op,
-    make_drop_op, resolve_selector_columns)
+    make_drop_op)
 from stratum.optimizer.logical._metadata_ops import (
     MetadataOp, RenameOp, ResetIndexOp, make_rename_op, make_reset_index_op)
 from stratum.optimizer.logical._map_ops import (
-    MapOp, AccessorMapOp, ApplyUDFOp, AssignMapOp, AssignOp, DatetimeConversionOp,
+    MapOp, ApplyUDFOp, AssignMapOp, AssignOp, AttributeReadOp, DatetimeConversionOp,
+    DatetimeFieldOp,
     StringMethodOp, make_assign_map_op, make_datetime_conversion_op,
     make_frame_get_attr, make_string_method_op)
 from stratum.optimizer.logical._column_methods import (
-    ColumnMethodOp, get_column_method_spec, is_supported_column_method,
-    make_column_method_op)
+    COLUMN_METHODS, ColumnMethodOp, IsnaOp, NotnaOp, make_column_method_op)
 from stratum.optimizer.logical._join_ops import (
-    JoinOp, FilteringJoinOp, _MERGE_POSITIONAL, _JOIN_POSITIONAL, _JOIN_OP_FIELDS, make_join_op,
-    _make_chained_join_op)
+    JoinOp, FilteringJoinOp, make_join_op, _make_chained_join_op)
 from stratum.optimizer.logical._split_ops import SplitOp, SplitOutput, add_splitting_op
 
 
 class ConcatOp(Op):
-    """Logical frame concatenation. Pure config -- execution is provided by the
-    physical impls in ``physical/_concat_execs.py`` (Pandas/PolarsConcatOp),
-    selected at plan time.
+    """Concatenates frames: ``axis=0`` stacks their rows, ``axis=1`` places their
+    columns side by side.
 
-    Like skrub's ``.skb.concat`` it also stacks numpy arrays, which the physical
-    impls detect at run time. A graph-fed operand's kind is unknown when planning,
-    so the op is taken to produce a frame unless its first operand is a literal
-    array."""
+    ``operands`` are the ``OperandRef``s of the frames, in order; one input edge
+    may feed several of them. ``axis`` is ``0`` or ``1`` (extraction normalizes
+    pandas' names for them), or an ``OperandRef`` when graph-fed.
+
+    Like skrub's ``.skb.concat`` it also stacks numpy arrays. Extraction turns a
+    concat whose first operand is known to be an array into an
+    :class:`ArrayConcatOp`. When the first operand's kind is unknown at plan time
+    (an opaque call can return either), the frame impls stack arrays at run time.
+    """
     logical_family = "Concat"
-    fields = ["first", "others", "axis"] # Add more if needed
+    fields = ["operands", "axis"]
+    # Stacked rows keep their inputs' labels, repeats and all.
+    index_effect = IndexEffect.NEW
 
-    def __init__(self, first, others: list, axis):
+    def __init__(self, operands: list = None, axis=0, inputs: list[Op] = None,
+                 outputs: list[Op] = None):
         # No name: the "Concat" family label alone renders cleanly (avoids the
         # redundant "Concat(CONCAT)").
-        super().__init__(name="", is_X=False, is_y=False)
-        # first/others entries/axis are OperandRefs when graph-fed, else constants.
-        self.first = first
-        self.others = list(others)
+        super().__init__(name="", inputs=inputs, outputs=outputs)
+        self.operands = list(operands or [])
         self.axis = axis
-        self.output_type = (OutputType.UNKNOWN if isinstance(first, np.ndarray)
-                            else OutputType.FRAME)
+        self.output_type = OutputType.FRAME
+
+    @property
+    def aligns_by_label(self):
+        # Stacking rows pairs nothing; placing columns side by side aligns rows.
+        return False if self.axis == 0 else None
 
     def propagate_output_schema(self):
-        """See :func:`_schema.concat_schemas` for the per-axis rules.
-
-        The operands are ``first``/``others``, *not* ``self.inputs``: a literal
-        frame operand is stored inline rather than as an input edge, so reading
-        ``inputs`` would silently omit its columns."""
+        """See :func:`_schema.concat_schemas` for the per-axis rules."""
         if isinstance(self.axis, OperandRef):
             # The axis picks the dtype rule, so a graph-fed axis is unknown.
             self.output_schema = None
             return
-        operands = [self.first, *self.others]
         self.output_schema = _schema.concat_schemas(
-            [self._operand_schema(o) for o in operands], self.axis)
+            [self.inputs[ref.k].output_schema for ref in self.operands], self.axis)
 
-    def _operand_schema(self, operand):
-        """Schema of one concat operand: a graph-fed op's propagated schema, or
-        the schema of an inline constant frame."""
-        if isinstance(operand, OperandRef):
-            return self.inputs[operand.k].output_schema
-        return _schema.schema_of_frame(operand)
+
+class ArrayConcatOp(ConcatOp):
+    """Joins numpy arrays along ``axis`` (``np.concatenate``): a concat whose first
+    operand is known at plan time to be an array."""
+
+    def __init__(self, operands: list = None, axis=0, inputs: list[Op] = None,
+                 outputs: list[Op] = None):
+        super().__init__(operands=operands, axis=axis, inputs=inputs, outputs=outputs)
+        self.output_type = OutputType.MATRIX
+
+    def propagate_output_schema(self):
+        """An array has no columns."""
+        self.output_schema = None
+
+
+#: pandas' names for the two concat axes.
+_CONCAT_AXES = {0: 0, "index": 0, "rows": 0, 1: 1, "columns": 1}
+
+
+def _is_array(op: Op) -> bool:
+    """Whether ``op`` is known at plan time to produce a numpy array."""
+    return (op.output_type is OutputType.MATRIX
+            or isinstance(op, ValueOp) and isinstance(op.value, np.ndarray))
+
+
+def make_concat_op(op: ConcatOp) -> ConcatOp | None:
+    """Normalize the axis of a recorded concat and pick its variant.
+
+    The first operand decides, as in skrub: a known array makes an
+    :class:`ArrayConcatOp`. Returns ``None`` when there is nothing to change.
+    """
+    axis = op.axis
+    if not isinstance(axis, OperandRef):
+        axis = _CONCAT_AXES.get(axis, axis)
+    is_array = bool(op.operands) and _is_array(op.inputs[op.operands[0].k])
+    normalized = axis == op.axis and type(axis) is type(op.axis)
+    if type(op) is not ConcatOp or (normalized and not is_array):
+        return None
+    cls = ArrayConcatOp if is_array else ConcatOp
+    return substitute_op(op, cls(operands=op.operands, axis=axis))
 
 
 # The accessors whose ``[...]`` takes one indexer per axis, so a tuple key is a
@@ -111,11 +151,9 @@ def _make_scalar_comparison(op: MethodCallOp) -> BinOp | None:
                                                            np.ndarray, list, tuple, dict))
             or (not isinstance(value, str) and hasattr(value, "__len__"))):
         return None
-    result = BinOp(_SCALAR_COMPARISONS[op.method_name], OperandRef(0), value)
-    result.inputs, result.outputs = list(op.inputs), list(op.outputs)
-    result.output_type = OutputType.SERIES
-    op.replace_output_of_inputs(result)
-    return result
+    # A series compared to a scalar is a series.
+    return substitute_op(op, BinOp(_SCALAR_COMPARISONS[op.method_name], OperandRef(0), value),
+                         keep_kind=True)
 
 
 def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
@@ -126,8 +164,8 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
     Each listed method has a stable return kind for both Series and DataFrame.
     """
     source = op.inputs[0].output_type
-    if op.method_name in {"where", "map", "sort_values", "dropna", "fillna",
-                          "set_axis", "drop", "drop_duplicates", "sample", "rename"}:
+    keeps_kind, _ = MethodCallOp.OPAQUE_METHODS.get(op.method_name, (False, False))
+    if keeps_kind:
         return source
     if op.method_name == "to_frame" and source is OutputType.SERIES:
         return OutputType.FRAME
@@ -138,16 +176,21 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
     return None
 
 
+def _is_receiver(value) -> bool:
+    """Whether a call argument is the call's frame-world operand 0."""
+    return isinstance(value, OperandRef) and value.k == 0
+
+
 def _is_row_col_indexer(op: GetItemOp) -> bool:
     """Whether ``op`` indexes through ``.loc``/``.iloc``, i.e. one axis per key element.
 
-    The accessor survives extraction as the ``AccessorMapOp`` feeding this
+    The accessor survives extraction as the ``AttributeReadOp`` feeding this
     GetItem, so the container tells the two tuple-key meanings apart: ``df.loc[a, b]``
     indexes rows by ``a`` and columns by ``b``, while a bare ``df[("a", "b")]`` is one
     MultiIndex column label.
     """
     container = op.inputs[0]
-    return (isinstance(container, AccessorMapOp) and bool(container.attr_name)
+    return (isinstance(container, AttributeReadOp) and bool(container.attr_name)
             and container.attr_name[-1] in _ROW_COL_ACCESSORS)
 
 
@@ -195,16 +238,15 @@ def _is_column_projection(op: GetItemOp) -> bool:
 #: ``pd.isna(x)`` / ``pd.notna(x)`` as the column method they are equivalent to.
 #: ``pd.isnull`` and ``pd.notnull`` are the same function objects, so they map
 #: here too.
-_MISSING_VALUE_FUNCS = {pd.isna: "isna", pd.notna: "notna"}
+_MISSING_VALUE_FUNCS = {pd.isna: IsnaOp, pd.notna: NotnaOp}
 
 
 def _make_missing_value_method(op: CallOp) -> ColumnMethodOp | None:
     """``pd.isna(x)`` / ``pd.notna(x)`` as ``x.isna()`` / ``x.notna()``.
 
-    Only for a lone graph-fed operand, positional or ``obj=``: on a scalar or a
-    list the function returns a bool or an array instead. The operand must pass
-    the same spec check as the method call would, so a frame is refused until
-    the spec has a ``validate_frame``.
+    Only for a lone graph-fed Series operand, positional or ``obj=``: on a scalar
+    or a list the function returns a bool or an array instead, and the method is
+    only modelled on a Series, as it is for the method call.
     """
     if len(op.args or ()) == 1 and not op.kwargs:
         operand = op.args[0]
@@ -214,26 +256,24 @@ def _make_missing_value_method(op: CallOp) -> ColumnMethodOp | None:
         return None
     if not isinstance(operand, OperandRef) or len(op.inputs) != 1:
         return None
-    source = op.inputs[operand.k]
-    method = _MISSING_VALUE_FUNCS[op.func]
-    spec = get_column_method_spec(method)
-    validate = (spec.validate_frame if source.output_type is OutputType.FRAME
-                else spec.validate)
-    if not is_frame_like(source) or validate is None or not validate((), {}):
+    if op.inputs[operand.k].output_type is not OutputType.SERIES:
         return None
-    new_op = ColumnMethodOp(method=method, inputs=op.inputs, outputs=op.outputs)
-    new_op.output_type = source.output_type
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    # The operand is the only input, so it is the receiver whose kind is kept.
+    return substitute_op(op, _MISSING_VALUE_FUNCS[op.func](), keep_kind=True)
 
 
 def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                          column_projection = True) -> tuple[Op, bool]:
     new_op = None
-    if len(op.inputs) == 0:
+    if isinstance(op, ConcatOp):
+        # Concat is built when the skrub graph is converted; its operands' kinds
+        # are only known here.
+        new_op = make_concat_op(op)
+
+    elif len(op.inputs) == 0:
         # DataSource detection (directly passed dataframe)
         if isinstance(op, ValueOp) and (isinstance(op.value, DataFrame) or isinstance(op.value, PolarsDataFrame)):
-            new_op = DataSourceOp(data=op.value)
+            new_op = InMemoryFrameOp(data=op.value)
             new_op.outputs = op.outputs
         else:
             # DataSource detection (read operation with a literal path):
@@ -252,11 +292,16 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
             # Datetime conversion detection
             if op.func is pd.to_datetime:
                 new_op = make_datetime_conversion_op(op)
+                if new_op is None and _is_receiver(op.args[0] if op.args
+                                                   else (op.kwargs or {}).get("arg")):
+                    # An opaque conversion of a column or a frame (the assembly
+                    # form) still yields a Series.
+                    op.output_type = OutputType.SERIES
             elif op.func in (pd.isna, pd.notna):
                 new_op = _make_missing_value_method(op)
 
         elif isinstance(op, MethodCallOp):
-            if isinstance(op.inputs[0], AccessorMapOp) and op.inputs[0].attr_name == ["str"]:
+            if isinstance(op.inputs[0], AttributeReadOp) and op.inputs[0].attr_name == ["str"]:
                 # `col.str.<method>(...)` -> fuse the .str accessor and the method
                 # call into a single StringMethodOp (a SERIES-typed projection). An
                 # enclosing `df[...]` then sees a mask and folds the chain into a
@@ -264,7 +309,7 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 new_op = make_string_method_op(op)
             elif op.method_name in _SCALAR_COMPARISONS:
                 new_op = _make_scalar_comparison(op)
-            elif is_supported_column_method(op):
+            elif op.method_name in COLUMN_METHODS:
                 new_op = make_column_method_op(op)
             elif op.method_name == "groupby":
                 # Leave groupby as-is; mark it as a dataframe op so the following
@@ -292,19 +337,17 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 elif drops_columns and op.inputs[0].output_type is OutputType.FRAME:
                     new_op = make_drop_op(op)
             elif op.method_name == "apply":
-                new_op = ApplyUDFOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
                 # apply on a column yields a column, on a frame yields a frame:
                 # keep the input's kind (MapOp defaults to FRAME).
-                new_op.output_type = op.inputs[0].output_type
-                op.replace_output_of_inputs(new_op)
+                new_op = substitute_op(op, ApplyUDFOp(args=op.args, kwargs=op.kwargs),
+                                       keep_kind=True)
             elif op.method_name in ["assign"]:
                 if map_op:
                     new_op = make_assign_map_op(op)
                 if new_op is None:
                     # Not foldable (positional args / sequence-valued constant
                     # kwargs): keep the opaque assign.
-                    new_op = AssignOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-                    op.replace_output_of_inputs(new_op)
+                    new_op = substitute_op(op, AssignOp(args=op.args, kwargs=op.kwargs))
             elif op.method_name in ["join", "merge"]:
                 new_op = make_join_op(op)
             elif op.method_name in _SELECTION_METHODS:
@@ -317,7 +360,7 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
 
         # GetAttr Fusing and conversion to GetAttrDataframeOp
         elif isinstance(op, GetAttrOp):
-            new_op = make_frame_get_attr(new_op, op)
+            new_op = make_frame_get_attr(op)
 
         # Projection: BinOp/UnaryOp over tabular data -> same tabular kind as its
         # operand (e.g. `df["a"] > 7` is a SERIES, `df + 1` is a FRAME, `~mask` is
@@ -367,6 +410,3 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
             root = new_op
     return root, True
 
-
-def group_dataframe_ops(root: Op) -> Op:
-    return root

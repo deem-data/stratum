@@ -30,12 +30,11 @@ from stratum.optimizer.physical._join_execs import PandasJoinOp, PolarsJoinOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry,
-                                                  _current_process_execute,
                                                   _placeholder_cost,
                                                   _placeholder_exec_mem,
                                                   get_default_physical_registry)
-from stratum.optimizer.physical._source_execs import (InMemoryFrame,
-                                                       PandasInMemoryFrame,
+from stratum.optimizer.logical._source_ops import InMemoryFrameOp
+from stratum.optimizer.physical._source_execs import (PandasInMemoryFrame,
                                                        PolarsInMemoryFrame)
 from stratum.optimizer.physical._selection_execs import (
     PandasSliceSelectionOp,
@@ -55,7 +54,6 @@ def _impl(op_type, backend, supports=lambda op, ctx: True, impl_class=None):
                         input_format="frame", output_format="frame",
                         supports=supports, cost=_placeholder_cost,
                         exec_mem=_placeholder_exec_mem,
-                        execute=_current_process_execute,
                         impl_class=impl_class)
 
 
@@ -191,8 +189,7 @@ class TestGreedyImplementationSelector(unittest.TestCase):
         rust = PhysicalImpl(op_type=DummyOp, backend_name="rust",
                             input_format="frame", output_format="frame",
                             supports=lambda op, ctx: True, cost=_boom,
-                            exec_mem=_placeholder_exec_mem,
-                            execute=_current_process_execute)
+                            exec_mem=_placeholder_exec_mem)
         selector = GreedyImplementationSelector()
         self.assertIs(rust, selector.choose(DummyOp(), [rust], _ctx()))
 
@@ -212,8 +209,8 @@ class TestGreedyImplementationSelector(unittest.TestCase):
 
     def test_greedy_selector_prefers_polars_for_dataframe_source(self):
         registry = get_default_physical_registry()
-        candidates = list(registry.candidates_for(InMemoryFrame))
-        op = InMemoryFrame(data=None)
+        candidates = list(registry.candidates_for(InMemoryFrameOp))
+        op = InMemoryFrameOp(data=None)
         chosen = GreedyImplementationSelector().choose(op, candidates, _ctx())
         self.assertIs(PolarsInMemoryFrame, chosen.impl_class)
 

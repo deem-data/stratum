@@ -20,7 +20,7 @@ from __future__ import annotations
 import polars as pl
 
 from stratum.optimizer.logical import _schema
-from stratum.optimizer.logical._base import OutputType, _resolve_operand
+from stratum.optimizer.logical._base import OutputType, _resolve_operand, clone_value
 from stratum.optimizer.logical._ops import FITTING_MODE, Op, OperandRef
 from stratum.optimizer.logical._scoring import Metric, read_response
 
@@ -110,20 +110,22 @@ class ScoreCandidatesOp(CandidateSetOp):
     """
 
     logical_family = "ScoreCandidates"
-    fields = ["candidate_names", "metric", "response_mode", "emit_predictions"]
+    fields = ["candidate_names", "metric", "response_mode", "emit_predictions", "y_ref",
+              "kwargs_refs"]
 
     def __init__(self, candidate_names: list[str], metric: Metric,
                  inputs: list | None = None, response_mode: str = "predict",
-                 emit_predictions: bool = False):
+                 emit_predictions: bool = False, y_ref: OperandRef | None = None,
+                 kwargs_refs: list | None = None):
         super().__init__(candidate_names, inputs)
         self.metric = metric
         self.response_mode = response_mode
         self.emit_predictions = emit_predictions
         self.output_type = OutputType.FRAME
-        self.y_ref: OperandRef | None = None
+        self.y_ref = y_ref
         # One entry per candidate: the kwargs its declared scorer reads, with
         # OperandRefs for the ones the plan computes on the fold; None for none.
-        self.kwargs_refs: list | None = None
+        self.kwargs_refs = kwargs_refs
 
     def propagate_output_schema(self):
         """The scored table is built column by column in ``process``: one row per
@@ -144,7 +146,8 @@ class ScoreCandidatesOp(CandidateSetOp):
     def clone(self):
         new_op = type(self)(self.candidate_names, self.metric,
                             response_mode=self.response_mode,
-                            emit_predictions=self.emit_predictions)
+                            emit_predictions=self.emit_predictions, y_ref=self.y_ref,
+                            kwargs_refs=clone_value(self.kwargs_refs))
         new_op.was_cloned = True
         return new_op
 

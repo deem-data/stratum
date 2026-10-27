@@ -14,7 +14,8 @@ from stratum.optimizer.logical._dataframe_ops import (
 from stratum.optimizer.logical._ops import (
     BinOp, GetItemOp, UnaryOp, Op, OperandRef, OutputType, ValueOp)
 from stratum.optimizer.logical._column_expr import (
-    Col, ColumnMethodExpr, Const, BinOpExpr, UnaryOpExpr, OperandLeaf, StrExpr)
+    Col, Const, BinOpExpr, IsinExpr, UnaryOpExpr, OperandLeaf, StrExpr)
+from stratum.optimizer.physical._expressions import to_pandas_query
 from stratum.optimizer.physical._source_execs import rechunk_pl_frame
 from .test_dataframe_ops import (
     optimize, run_op, force_polars, pandas_query, plan_context)
@@ -152,14 +153,14 @@ class TestSelectionProcess(unittest.TestCase):
 
     def test_mask_str_predicate_pandas(self):
         op = MaskSelectionOp(predicate=BinOpExpr(operator.gt,
-                                             StrExpr(Col("s"), "count", ("1",)), Const(0)))
+                                             StrExpr(Col("s"), "count", {"pat": "1"}), Const(0)))
         result = run_op(op, pd.DataFrame({"s": ["a1", "bb", "c1"]}))
         self.assertEqual(["a1", "c1"], result["s"].tolist())
 
     def test_mask_str_predicate_polars(self):
-        # polars renames .str.count -> .str.count_matches (STR_POLARS_METHODS).
+        # polars spells .str.count as .str.count_matches.
         op = MaskSelectionOp(predicate=BinOpExpr(operator.gt,
-                                             StrExpr(Col("s"), "count", ("1",)), Const(0)))
+                                             StrExpr(Col("s"), "count", {"pat": "1"}), Const(0)))
         with force_polars():
             result = run_op(op, pl.DataFrame({"s": ["a1", "bb", "c1"]}))
         self.assertEqual(["a1", "c1"], result["s"].to_list())
@@ -225,7 +226,7 @@ class TestMaskFolding(unittest.TestCase):
         data = st.as_data_op(df)
         ops = optimize(data[data["s"].str.count("1") > 0], OptConfig(dataframe_ops=True))
         self.assertEqual(
-            BinOpExpr(operator.gt, StrExpr(Col("s"), "count", ("1",)), Const(0)),
+            BinOpExpr(operator.gt, StrExpr(Col("s"), "count", {"pat": "1"}), Const(0)),
             self._mask(ops).predicate)
 
     def test_string_filter_in_mask_folds2(self):
@@ -234,7 +235,7 @@ class TestMaskFolding(unittest.TestCase):
         col_s_transformed = data["s"].apply(lambda s: "row_" + s)
         ops = optimize(data[col_s_transformed.str.count("1") > 0], OptConfig(dataframe_ops=True))
         self.assertEqual(
-            BinOpExpr(operator.gt, StrExpr(OperandLeaf(OperandRef(1)), "count", ("1",)), Const(0)),
+            BinOpExpr(operator.gt, StrExpr(OperandLeaf(OperandRef(1)), "count", {"pat": "1"}), Const(0)),
             self._mask(ops).predicate)
 
     def test_graph_fed_scalar_operand_folds_to_const(self):
@@ -409,18 +410,18 @@ class TestIsInPredicate(unittest.TestCase):
     def test_a_literal_collection_folds_into_the_predicate(self):
         data = st.as_data_op(self.pdf)
         predicate = self._predicate(lambda: data[data["c"].isin(["a", "c"])])
-        self.assertEqual(ColumnMethodExpr(Col("c"), "isin", (["a", "c"],)), predicate)
+        self.assertEqual(IsinExpr(Col("c"), ["a", "c"]), predicate)
 
     def test_a_relation_stays_a_leaf(self):
         data = st.as_data_op(self.pdf)
         other = st.as_data_op(pd.DataFrame({"c": ["a"]}))
         predicate = self._predicate(lambda: data[data["c"].isin(other["c"])])
         self.assertEqual(
-            ColumnMethodExpr(Col("c"), "isin", (OperandLeaf(OperandRef(1)),)), predicate)
+            IsinExpr(Col("c"), OperandLeaf(OperandRef(1))), predicate)
 
     def test_a_membership_test_is_not_an_aggregate(self):
         self.assertFalse(
-            ColumnMethodExpr(Col("c"), "isin", (("a", "c"),)).has_aggregate())
+            IsinExpr(Col("c"), ("a", "c")).has_aggregate())
 
 
 class TestColumnExprOperandRefs(unittest.TestCase):
@@ -563,30 +564,30 @@ class TestColumnExprQueryStrings(unittest.TestCase):
     """to_pandas_query builds a query string, binding literals into params."""
 
     def test_col_backticks_name(self):
-        self.assertEqual("`x`", Col("x").to_pandas_query({}))
+        self.assertEqual("`x`", to_pandas_query(Col("x"), {}))
 
     def test_const_binds_param(self):
         params = {}
-        self.assertEqual("@p0", Const(7).to_pandas_query(params))
+        self.assertEqual("@p0", to_pandas_query(Const(7), params))
         self.assertEqual({"p0": 7}, params)
 
     def test_binop_unsupported_op_returns_none(self):
         # matmul isn't in BINARY_SYMBOLS, so it isn't query-expressible.
         expr = BinOpExpr(operator.matmul, Col("x"), Const(1))
-        self.assertIsNone(expr.to_pandas_query({}))
+        self.assertIsNone(to_pandas_query(expr, {}))
 
     def test_unaryop_unsupported_op_returns_none(self):
         # abs isn't in UNARY_SYMBOLS.
-        self.assertIsNone(UnaryOpExpr(operator.abs, Col("x")).to_pandas_query({}))
+        self.assertIsNone(to_pandas_query(UnaryOpExpr(operator.abs, Col("x")), {}))
 
     def test_operand_leaf_and_str_not_query_expressible(self):
-        self.assertIsNone(OperandLeaf(OperandRef(1)).to_pandas_query({}))
-        self.assertIsNone(StrExpr(Col("s"), "count", ("1",)).to_pandas_query({}))
+        self.assertIsNone(to_pandas_query(OperandLeaf(OperandRef(1)), {}))
+        self.assertIsNone(to_pandas_query(StrExpr(Col("s"), "count", {"pat": "1"}), {}))
 
     def test_unaryop_over_non_expressible_operand_returns_none(self):
         # A supported unary op whose operand isn't query-expressible -> None.
         expr = UnaryOpExpr(operator.invert, OperandLeaf(OperandRef(1)))
-        self.assertIsNone(expr.to_pandas_query({}))
+        self.assertIsNone(to_pandas_query(expr, {}))
 
 
 class TestColumnExprMisc(unittest.TestCase):
@@ -612,9 +613,9 @@ class TestColumnExprMisc(unittest.TestCase):
             expr.remap_operand_refs({2: 1}))
 
     def test_remap_str_expr(self):
-        expr = StrExpr(OperandLeaf(OperandRef(2)), "count", ("1",))
+        expr = StrExpr(OperandLeaf(OperandRef(2)), "count", {"pat": "1"})
         self.assertEqual(
-            StrExpr(OperandLeaf(OperandRef(1)), "count", ("1",)),
+            StrExpr(OperandLeaf(OperandRef(1)), "count", {"pat": "1"}),
             expr.remap_operand_refs({2: 1}))
 
     def test_remap_refs_descends_into_column_expr(self):

@@ -1,36 +1,24 @@
 """Backend-agnostic column expression tree.
 
-Used by selections (boolean predicates) and maps (computed columns).
-Expressions are immutable value types and compare structurally.
+Used by selections (boolean predicates), maps (computed columns) and
+aggregations (reductions). Expressions are immutable value types and compare
+structurally.
 
-Every node maps 1:1 onto a polars expression (``pl.col``/``pl.lit``,
-arithmetic/boolean operators, the ``.str``/``.dt`` namespaces, datetime
-parsing), so a whole tree compiles into a single backend kernel. Anything
-outside the grammar (fitted transformers, UDFs, data from other frames) is
-referenced through an :class:`OperandLeaf`.
+The grammar is restricted to natively lazy, row-local computations (column
+references, literals, arithmetic and boolean operators, the ``.str``/``.dt``
+namespaces, datetime parsing, registered column methods, and one reduction at
+the root of an aggregation entry), so a whole tree compiles into a single
+backend kernel. Anything outside the grammar (fitted transformers, UDFs, data
+from other frames) is referenced through an :class:`OperandLeaf`.
 
-Evaluation goes through an :class:`EvalContext` carrying the source frame, the
-op's resolved inputs and the execution mode.
+The nodes are pure data. Running them is the physical layer's job
+(``physical/_expressions.py`` compiles a tree for pandas and polars), and
+folding an op subgraph into a tree is ``_expr_folding.py``'s.
 """
 from __future__ import annotations
-import datetime
-import decimal
 import operator
 
-import numpy as np
-import polars as pl
-import pandas as pd
-
-from stratum.optimizer.logical._ops import (OperandRef, BinOp, UnaryOp, GetItemOp, Op,
-                                            ValueOp, apply_binary)
-from stratum.optimizer.logical._base import config_key
-from stratum.optimizer.logical._column_methods import (
-    ColumnMethodOp, get_column_method_spec, polars_dtype)
-from stratum.optimizer.logical._map_ops import (
-    AccessorMapOp, DatetimeConversionOp, StringMethodOp, STR_POLARS_METHODS,
-    polars_datetime_kwargs, polars_dt_attribute, polars_dt_attribute_unsupported,
-    polars_str_method_unsupported, polars_string_method)
-from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
+from stratum.optimizer.logical._base import OperandRef, config_key
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
 # corresponding map is not foldable into a column expression.
@@ -44,35 +32,14 @@ BINARY_SYMBOLS = {
 }
 UNARY_SYMBOLS = {operator.invert: "~", operator.neg: "-", operator.pos: "+"}
 
-# Values a ``ValueOp`` may carry into a ``Const``. Const compiles to ``pl.lit()``,
-# which is only correct for a scalar: a list becomes one list-valued cell repeated
-# per row and a pandas Series is rejected outright. Container values therefore stay
-# ``OperandLeaf``s, where Polars column inputs are converted before expression
-# evaluation. pandas Timestamp/Timedelta subclass the datetime types.
-CONST_SCALAR_TYPES = (
-    bool, int, float, str,
-    datetime.date, datetime.time, datetime.timedelta,
-    decimal.Decimal, np.generic,
-)
-
-
-class EvalContext:
-    """Everything a column expression needs at evaluation time.
-
-    ``frame`` is evaluated against (the op's primary operand); ``inputs`` are the
-    op's resolved input values (read by :class:`OperandLeaf`); ``mode`` is
-    ``fit_transform`` or ``predict`` (unused by the current stateless grammar).
-    """
-    __slots__ = ("frame", "inputs", "mode")
-
-    def __init__(self, frame, inputs, mode: str = "fit_transform"):
-        self.frame = frame
-        self.inputs = inputs
-        self.mode = mode
-
 
 class ColumnExpr:
-    """Base class for column-expression nodes."""
+    """Base class for column-expression nodes.
+
+    Every node's ``__init__`` takes its fields in ``__slots__`` order. The
+    structural walks below rely on that, so a node only defines its fields,
+    its key and its repr.
+    """
     __slots__ = ()
 
     def _key(self):
@@ -84,65 +51,37 @@ class ColumnExpr:
     def __hash__(self):
         return hash((type(self).__name__, self._key()))
 
-    # TODO we should move this to the physical operator selection later
-    def to_pandas(self, ctx: EvalContext):
-        """Evaluate the expression against ``ctx.frame`` (a pandas frame)."""
-        raise NotImplementedError
+    def children(self):
+        """The expressions nested in this node's fields, in field order."""
+        for name in type(self).__slots__:
+            yield from _nested_exprs(getattr(self, name))
 
-    def to_polars(self, ctx: EvalContext):
-        """Evaluate on the polars backend, returning a lazy ``pl.Expr``."""
-        raise NotImplementedError
+    def map_children(self, fn) -> "ColumnExpr":
+        """This node with ``fn`` applied to each nested child expression.
 
-    def to_pandas_query(self, params: dict) -> str | None:
-        """Return a pandas ``query()`` string, or ``None`` if unsupported.
-
-        Literals are bound into ``params`` and referenced as ``@p<i>``. A ``None``
-        anywhere falls back to the boolean-mask path (``to_pandas``).
+        A node without children (a leaf) is returned as is.
         """
-        return None
+        if next(self.children(), None) is None:
+            return self
+        return type(self)(*(map_exprs(getattr(self, name), fn)
+                            for name in type(self).__slots__))
 
     def iter_operand_refs(self):
         """Yield all referenced ``OperandRef`` objects."""
-        return iter(())
+        for child in self.children():
+            yield from child.iter_operand_refs()
 
     def remap_operand_refs(self, mapping: dict) -> "ColumnExpr":
         """Return a copy with operand references remapped."""
-        return self
+        return self.map_children(lambda child: child.remap_operand_refs(mapping))
 
     def has_aggregate(self) -> bool:
         """Whether this subtree contains a reduction (an :class:`AggExpr`).
 
         The grammar is row-wise everywhere else, so an aggregate is only legal at
-        the root of an aggregation entry. Composite nodes recurse; the leaves keep
-        this default.
+        the root of an aggregation entry.
         """
-        return False
-
-    def polars_unsupported(self) -> str | None:
-        """Why ``to_polars`` cannot evaluate this subtree exactly, or ``None``.
-
-        Checked at plan time by the polars impls' ``supports`` (#226), so an
-        expression the polars compiler cannot express binds the pandas impl
-        instead of failing -- or silently differing -- during execution. The
-        first offending node is named.
-        """
-        reason = self._polars_unsupported_here()
-        if reason is not None:
-            return f"{self!r}: {reason}"
-        for child in self._child_exprs():
-            reason = child.polars_unsupported()
-            if reason is not None:
-                return reason
-        return None
-
-    def _polars_unsupported_here(self) -> str | None:
-        """This node's own polars restriction; children are checked separately."""
-        return None
-
-    def _child_exprs(self):
-        for cls in type(self).__mro__:
-            for name in getattr(cls, "__slots__", ()):
-                yield from _nested_exprs(getattr(self, name, None))
+        return any(child.has_aggregate() for child in self.children())
 
 
 def _nested_exprs(value):
@@ -154,6 +93,20 @@ def _nested_exprs(value):
     elif isinstance(value, dict):
         for item in value.values():
             yield from _nested_exprs(item)
+
+
+def map_exprs(value, fn):
+    """``value`` with ``fn`` applied to every expression nested in its
+    tuples/lists/dicts; anything else is kept."""
+    if isinstance(value, ColumnExpr):
+        return fn(value)
+    if isinstance(value, tuple):
+        return tuple(map_exprs(item, fn) for item in value)
+    if isinstance(value, list):
+        return [map_exprs(item, fn) for item in value]
+    if isinstance(value, dict):
+        return {key: map_exprs(item, fn) for key, item in value.items()}
+    return value
 
 
 class Col(ColumnExpr):
@@ -169,19 +122,9 @@ class Col(ColumnExpr):
     def __repr__(self):
         return f"Col({self.name!r})"
 
-    def to_pandas(self, ctx):
-        return ctx.frame[self.name]
-
-    def to_polars(self, ctx):
-        return pl.col(self.name)
-
-    def to_pandas_query(self, params):
-        # Backtick the name so spaces / keywords / dots stay valid inside the query.
-        return f"`{self.name}`"
-
 
 class AllCols(ColumnExpr):
-    """Every column of the source frame (polars ``pl.all()``).
+    """Every column of the source frame.
 
     Lets ``df.groupby(k).sum()`` stay one aggregation entry instead of needing one
     per column, which the logical layer cannot enumerate without schema
@@ -195,12 +138,6 @@ class AllCols(ColumnExpr):
 
     def __repr__(self):
         return "AllCols()"
-
-    def to_pandas(self, ctx):
-        return ctx.frame
-
-    def to_polars(self, ctx):
-        return pl.all()
 
 
 class Const(ColumnExpr):
@@ -220,27 +157,6 @@ class Const(ColumnExpr):
     def __repr__(self):
         return f"Const({self.value!r})"
 
-    def to_pandas(self, ctx):
-        return self.value
-
-    def to_polars(self, ctx):
-        return pl.lit(self.value)
-
-    def _polars_unsupported_here(self):
-        try:
-            pl.lit(self.value)
-        except Exception as exc:  # noqa: BLE001 - any refusal means no literal
-            first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
-            return f"no polars literal for {type(self.value).__name__} ({first_line})"
-        return None
-
-    def to_pandas_query(self, params):
-        # Bind the literal as a real object (referenced as @p<i>) rather than
-        # stringifying it -- keeps timestamps/strings/NaN intact in the query.
-        name = f"p{len(params)}"
-        params[name] = self.value
-        return f"@{name}"
-
 
 class OperandLeaf(ColumnExpr):
     """Reference to an operator input that was not folded."""
@@ -254,17 +170,6 @@ class OperandLeaf(ColumnExpr):
 
     def __repr__(self):
         return f"OperandLeaf({self.ref})"
-
-    def to_pandas(self, ctx):
-        return ctx.inputs[self.ref.k]
-
-    def to_polars(self, ctx):
-        value = ctx.inputs[self.ref.k]
-        if isinstance(value, pd.Series):
-            return pl.from_pandas(value)
-        if isinstance(value, list):
-            return pl.Series(value)
-        return value
 
     def iter_operand_refs(self):
         yield self.ref
@@ -293,33 +198,6 @@ class BinOpExpr(ColumnExpr):
     def __repr__(self):
         return f"({self.left!r} {BINARY_SYMBOLS.get(self.op, self.op)} {self.right!r})"
 
-    def to_pandas(self, ctx):
-        return self.op(self.left.to_pandas(ctx), self.right.to_pandas(ctx))
-
-    def to_polars(self, ctx):
-        return apply_binary(self.op, self.left.to_polars(ctx), self.right.to_polars(ctx))
-
-    def to_pandas_query(self, params):
-        sym = BINARY_SYMBOLS.get(self.op)
-        if sym is None:
-            return None
-        left = self.left.to_pandas_query(params)
-        right = self.right.to_pandas_query(params)
-        if left is None or right is None:
-            return None
-        return f"({left} {sym} {right})"
-
-    def iter_operand_refs(self):
-        yield from self.left.iter_operand_refs()
-        yield from self.right.iter_operand_refs()
-
-    def remap_operand_refs(self, mapping):
-        return BinOpExpr(self.op, self.left.remap_operand_refs(mapping),
-                         self.right.remap_operand_refs(mapping))
-
-    def has_aggregate(self):
-        return self.left.has_aggregate() or self.right.has_aggregate()
-
 
 class UnaryOpExpr(ColumnExpr):
     """Unary operation on an expression."""
@@ -335,79 +213,28 @@ class UnaryOpExpr(ColumnExpr):
     def __repr__(self):
         return f"{UNARY_SYMBOLS.get(self.op, self.op)}({self.operand!r})"
 
-    def to_pandas(self, ctx):
-        return self.op(self.operand.to_pandas(ctx))
-
-    def to_polars(self, ctx):
-        return self.op(self.operand.to_polars(ctx))
-
-    def to_pandas_query(self, params):
-        sym = UNARY_SYMBOLS.get(self.op)
-        if sym is None:
-            return None
-        operand = self.operand.to_pandas_query(params)
-        if operand is None:
-            return None
-        return f"({sym}{operand})"
-
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
-
-    def remap_operand_refs(self, mapping):
-        return UnaryOpExpr(self.op, self.operand.remap_operand_refs(mapping))
-
-    def has_aggregate(self):
-        return self.operand.has_aggregate()
-
-
 
 class StrExpr(ColumnExpr):
-    """String accessor call (``.str.<method>()``)."""
-    __slots__ = ("operand", "method", "args", "kwargs")
+    """String accessor call (``.str.<method>()``), in pandas' spelling: the
+    ``method`` and its ``params`` by pandas' parameter names."""
+    __slots__ = ("operand", "method", "params")
 
-    def __init__(self, operand: ColumnExpr, method: str, args=(), kwargs=None):
+    def __init__(self, operand: ColumnExpr, method: str, params=None):
         self.operand = operand
         self.method = method
-        self.args = tuple(args)
-        self.kwargs = kwargs or {}
+        self.params = dict(params or {})
 
     def _key(self):
-        return (self.operand, self.method, self.args, frozenset(self.kwargs.items()))
+        return (self.operand, self.method, config_key(self.params))
 
     def __repr__(self):
         inner = ", ".join([repr(self.operand)]
-                          + [repr(a) for a in self.args]
-                          + [f"{k}={v!r}" for k, v in self.kwargs.items()])
+                          + [f"{k}={v!r}" for k, v in self.params.items()])
         return f"str.{self.method}({inner})"
-
-    def to_pandas(self, ctx):
-        obj = self.operand.to_pandas(ctx)
-        return getattr(obj.str, self.method)(*self.args, **self.kwargs)
-
-    def to_polars(self, ctx):
-        obj = self.operand.to_polars(ctx)
-        return polars_string_method(obj, self.method, self.args, self.kwargs)
-
-    def _polars_unsupported_here(self):
-        return polars_str_method_unsupported(self.method, self.args, self.kwargs)
-
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
-
-    def remap_operand_refs(self, mapping):
-        return StrExpr(self.operand.remap_operand_refs(mapping),
-                       self.method, self.args, self.kwargs)
-
-    def has_aggregate(self):
-        return self.operand.has_aggregate()
 
 
 class DtExpr(ColumnExpr):
-    """Datetime accessor attribute (``.dt.<attr>``).
-
-    pandas reads the attribute off ``.dt``; polars calls a method through
-    :func:`polars_dt_attribute`, which remaps names and values to pandas'.
-    """
+    """Datetime accessor attribute (``.dt.<attr>``), with pandas' meaning."""
     __slots__ = ("operand", "attr")
 
     def __init__(self, operand: ColumnExpr, attr: str):
@@ -420,73 +247,25 @@ class DtExpr(ColumnExpr):
     def __repr__(self):
         return f"dt.{self.attr}({self.operand!r})"
 
-    def to_pandas(self, ctx):
-        obj = self.operand.to_pandas(ctx)
-        return getattr(obj.dt, self.attr)
-
-    def to_polars(self, ctx):
-        return polars_dt_attribute(self.operand.to_polars(ctx), self.attr)
-
-    def _polars_unsupported_here(self):
-        return polars_dt_attribute_unsupported(self.attr)
-
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
-
-    def remap_operand_refs(self, mapping):
-        return DtExpr(self.operand.remap_operand_refs(mapping), self.attr)
-
-    def has_aggregate(self):
-        return self.operand.has_aggregate()
-
 
 class DatetimeExpr(ColumnExpr):
-    """Datetime conversion (``pd.to_datetime`` / ``.str.to_datetime``).
+    """Datetime parsing (``pd.to_datetime``), with the fields of
+    :class:`~stratum.optimizer.logical._map_ops.DatetimeConversionOp`."""
+    __slots__ = ("operand", "format", "exact", "cache", "errors")
 
-    ``args``/``kwargs`` are literals; a graph-fed argument keeps the conversion
-    op as a leaf instead.
-    """
-    __slots__ = ("operand", "args", "kwargs")
-
-    def __init__(self, operand: ColumnExpr, args=(), kwargs=None):
+    def __init__(self, operand: ColumnExpr, format=None, exact=None, cache=True,
+                 errors="raise"):
         self.operand = operand
-        self.args = tuple(args)
-        self.kwargs = kwargs or {}
+        self.format = format
+        self.exact = exact
+        self.cache = cache
+        self.errors = errors
 
     def _key(self):
-        return (self.operand, self.args, frozenset(self.kwargs.items()))
+        return (self.operand, self.format, self.exact, self.cache, self.errors)
 
     def __repr__(self):
         return f"to_datetime({self.operand!r})"
-
-    def to_pandas(self, ctx):
-        obj = self.operand.to_pandas(ctx)
-        return pd.to_datetime(obj, *self.args, **self.kwargs)
-
-    def to_polars(self, ctx):
-        obj = self.operand.to_polars(ctx)
-        translated = polars_datetime_kwargs(self.args, self.kwargs)
-        if translated is None:
-            raise NotImplementedError(
-                "DatetimeExpr contains options unsupported by Polars")
-        # TODO: Support already-datetime and numeric operands natively; the
-        # Polars string namespace only accepts string input.
-        return obj.str.to_datetime(**translated)
-
-    def _polars_unsupported_here(self):
-        if polars_datetime_kwargs(self.args, self.kwargs) is None:
-            return "to_datetime options without a polars equivalent"
-        return None
-
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
-
-    def remap_operand_refs(self, mapping):
-        return DatetimeExpr(self.operand.remap_operand_refs(mapping),
-                            self.args, self.kwargs)
-
-    def has_aggregate(self):
-        return self.operand.has_aggregate()
 
 
 # --- Aggregation --------------------------------------------------------------
@@ -518,33 +297,6 @@ AGG_PARAMS = _expand_agg_params({
     ("count", "size"):                    (),
 })
 
-# Reduction -> polars ``Expr`` method. `sem` is deliberately absent (polars has no
-# equivalent) and `nunique` is handled separately, because polars' ``n_unique``
-# counts null as a distinct value while pandas' default drops it.
-#
-# idxmin/idxmax require original index labels, including inside each group.
-# They are refused until an implementation can preserve that information.
-_AGG_POLARS_METHODS = {
-    "sum": "sum", "prod": "product", "min": "min", "max": "max",
-    "first": "first", "last": "last", "mean": "mean", "median": "median",
-    "std": "std", "var": "var", "skew": "skew", "kurt": "kurtosis",
-    "idxmin": "arg_min", "idxmax": "arg_max", "all": "all", "any": "any",
-    "quantile": "quantile", "count": "count", "size": "len",
-}
-# Our parameter name -> the polars keyword. Anything outside this map has no
-# polars spelling on the reduction call.
-_AGG_POLARS_PARAMS = {"ddof": "ddof", "q": "quantile",
-                      "interpolation": "interpolation"}
-# Parameters that are a no-op on the polars side when left at their pandas
-# default, so they can be dropped instead of refused.
-_AGG_POLARS_NOOP_DEFAULTS = {"skipna": True, "numeric_only": False,
-                             "min_count": 0}
-# Fixed polars keywords needed to match pandas. pandas' skew/kurt are the
-# bias-corrected (sample) moments, while polars defaults to the biased
-# population form; `fisher=True` (excess kurtosis) is already polars' default and
-# matches pandas.
-_AGG_POLARS_FIXED_KWARGS = {"skew": {"bias": False}, "kurt": {"bias": False}}
-
 
 class AggExpr(ColumnExpr):
     """Reduction of a row-wise expression, e.g. ``SUM(a * b)``.
@@ -556,10 +308,8 @@ class AggExpr(ColumnExpr):
     :data:`AGG_PARAMS`.
 
     Evaluating a *grouped* aggregation is the operator's job, not the
-    expression's: ``to_polars`` returns the same ``pl.Expr`` in either case (it
-    goes inside ``group_by(...).agg(...)`` or a bare ``select``), while
-    ``to_pandas`` performs the whole-object reduction, and the grouped pandas
-    path reads ``func``/``params`` off the node instead.
+    expression's: the grouped pandas path reads ``func``/``params`` off the node
+    instead of compiling it.
     """
     __slots__ = ("func", "child", "params")
 
@@ -588,440 +338,105 @@ class AggExpr(ColumnExpr):
                           + [f"{k}={v!r}" for k, v in self.params.items()])
         return f"{self.func}({inner})"
 
-    def to_pandas(self, ctx):
-        obj = self.child.to_pandas(ctx)
-        # `numeric_only` picks columns out of a frame; the child is a single
-        # column by construction, so it never applies here.
-        params = {k: v for k, v in self.params.items() if k != "numeric_only"}
-        if self.func == "size":
-            return obj.size
-        if self.func in ("first", "last"):
-            # pandas 3.0 has no Series.first/last; they only exist on a groupby.
-            return obj.iloc[0 if self.func == "first" else -1]
-        return getattr(obj, self.func)(**params)
-
-    def _polars_unsupported_here(self):
-        return None if self.supports_polars() else f"no polars lowering for {self.func!r}"
-
-    def supports_polars(self):
-        # arg_min/arg_max return positions within a group, not index labels.
-        if self.func in {"idxmin", "idxmax", "sem"}:
-            return False
-        params = {k: v for k, v in self.params.items()
-                  if _AGG_POLARS_NOOP_DEFAULTS.get(k, object()) != v}
-        allowed = {"dropna"} if self.func == "nunique" else set(_AGG_POLARS_PARAMS)
-        return not (set(params) - allowed)
-
-    def to_polars(self, ctx):
-        if self.func in {"idxmin", "idxmax", "sem"}:
-            raise NotImplementedError(f"AggExpr({self.func!r}) has no equivalent Polars lowering")
-        obj = self.child.to_polars(ctx)
-        if self.func in {"first", "last"} and self.params.get("skipna", True):
-            obj = obj.drop_nulls()
-        params = {k: v for k, v in self.params.items()
-                  if _AGG_POLARS_NOOP_DEFAULTS.get(k, object()) != v}
-        if self.func == "nunique":
-            # polars counts null as a distinct value; pandas drops it by default.
-            if params.pop("dropna", True):
-                obj = obj.drop_nulls()
-            return obj.n_unique()
-        method = _AGG_POLARS_METHODS.get(self.func)
-        if method is None:
-            raise NotImplementedError(
-                f"AggExpr({self.func!r}) has no Polars equivalent")
-        unsupported = sorted(set(params) - set(_AGG_POLARS_PARAMS))
-        if unsupported:
-            raise NotImplementedError(
-                f"AggExpr({self.func!r}) parameters unsupported by Polars: "
-                f"{', '.join(unsupported)}")
-        if self.func == "quantile":
-            # pandas defaults q=0.5 / interpolation="linear"; polars defaults
-            # interpolation="nearest", so both are passed explicitly.
-            params.setdefault("q", 0.5)
-            params.setdefault("interpolation", "linear")
-        kwargs = {_AGG_POLARS_PARAMS[k]: v for k, v in params.items()}
-        kwargs.update(_AGG_POLARS_FIXED_KWARGS.get(self.func, {}))
-        return getattr(obj, method)(**kwargs)
-
-    def iter_operand_refs(self):
-        yield from self.child.iter_operand_refs()
-
-    def remap_operand_refs(self, mapping):
-        return AggExpr(self.func, self.child.remap_operand_refs(mapping),
-                       self.params)
-
     def has_aggregate(self):
         return True
 
 
-def _iter_value_refs(value):
-    if isinstance(value, ColumnExpr):
-        yield from value.iter_operand_refs()
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _iter_value_refs(item)
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from _iter_value_refs(item)
-
-
-def _value_has_aggregate(value) -> bool:
-    if isinstance(value, ColumnExpr):
-        return value.has_aggregate()
-    if isinstance(value, (list, tuple)):
-        return any(_value_has_aggregate(item) for item in value)
-    if isinstance(value, dict):
-        return any(_value_has_aggregate(item) for item in value.values())
-    return False
-
-
-def _remap_expr_value(value, mapping):
-    if isinstance(value, ColumnExpr):
-        return value.remap_operand_refs(mapping)
-    if isinstance(value, tuple):
-        return tuple(_remap_expr_value(item, mapping) for item in value)
-    if isinstance(value, list):
-        return [_remap_expr_value(item, mapping) for item in value]
-    if isinstance(value, dict):
-        return {key: _remap_expr_value(item, mapping)
-                for key, item in value.items()}
-    return value
-
-
-def _eval_expr_value(value, ctx, backend):
-    if isinstance(value, ColumnExpr):
-        return getattr(value, f"to_{backend}")(ctx)
-    if isinstance(value, tuple):
-        return tuple(_eval_expr_value(item, ctx, backend) for item in value)
-    if isinstance(value, list):
-        return [_eval_expr_value(item, ctx, backend) for item in value]
-    if isinstance(value, dict):
-        return {key: _eval_expr_value(item, ctx, backend)
-                for key, item in value.items()}
-    return value
-
-
-def _polars_expr_dtype(expr, ctx):
-    # FIXME(#216): this resolves only the two shapes it pattern-matches and returns
-    # None for every other operand, which is what makes the NaN handling in
-    # _polars_fillna / _polars_notna quietly backend-dependent. Asking polars
-    # for the expression's own output dtype (a schema-only resolve, e.g.
-    # ctx.frame.lazy().select(expr).collect_schema()) would answer for any expr.
-    if isinstance(expr, Col) and isinstance(ctx.frame, pl.DataFrame):
-        return ctx.frame.schema.get(expr.name)
-    if isinstance(expr, ColumnMethodExpr) and expr.method == "astype":
-        dtype = expr.args[0] if expr.args else expr.kwargs.get("dtype")
-        if not isinstance(dtype, ColumnExpr):
-            return polars_dtype(dtype)
-    return None
-
-
 class ColumnMethodExpr(ColumnExpr):
-    """A registry-backed, row-local Series method call."""
+    """Base of the row-local column methods, in pandas' spelling.
 
-    __slots__ = ("operand", "method", "args", "kwargs")
-
-    def __init__(self, operand: ColumnExpr, method: str, args=(), kwargs=None):
-        self.operand = operand
-        self.method = method
-        self.args = tuple(args or ())
-        self.kwargs = dict(kwargs or {})
+    Each subclass is one pandas method, named by ``method``. Its fields are the
+    ``operand`` followed by the fields of its
+    :class:`~stratum.optimizer.logical._column_methods.ColumnMethodOp`, under the
+    same names. Expression-valued fields are row-wise operands too, e.g. the other
+    side of ``a.where(cond, b)``.
+    """
+    __slots__ = ()
+    method: str = None
 
     def _key(self):
-        return (
-            self.operand,
-            self.method,
-            config_key(self.args),
-            config_key(self.kwargs),
-        )
+        return tuple(config_key(getattr(self, name)) for name in type(self).__slots__)
 
     def __repr__(self):
-        return f"{self.method}({self.operand!r})"
-
-    def to_pandas(self, ctx):
-        spec = get_column_method_spec(self.method)
-        assert spec is not None
-        obj = self.operand.to_pandas(ctx)
-        args = _eval_expr_value(self.args, ctx, "pandas")
-        kwargs = _eval_expr_value(self.kwargs, ctx, "pandas")
-        return spec.pandas_eval(obj, list(args), kwargs, None)
-
-    def to_polars(self, ctx):
-        spec = get_column_method_spec(self.method)
-        assert spec is not None
-        obj = self.operand.to_polars(ctx)
-        args = _eval_expr_value(self.args, ctx, "polars")
-        kwargs = _eval_expr_value(self.kwargs, ctx, "polars")
-        dtype = _polars_expr_dtype(self.operand, ctx)
-        return spec.polars_eval(obj, list(args), kwargs, dtype)
-
-    def iter_operand_refs(self):
-        yield from self.operand.iter_operand_refs()
-        yield from _iter_value_refs(self.args)
-        yield from _iter_value_refs(self.kwargs)
-
-    def remap_operand_refs(self, mapping):
-        return ColumnMethodExpr(
-            self.operand.remap_operand_refs(mapping),
-            self.method,
-            _remap_expr_value(self.args, mapping),
-            _remap_expr_value(self.kwargs, mapping),
-        )
-
-    def has_aggregate(self):
-        # Expression-valued arguments are row-wise operands too, e.g. the other
-        # side of `a.where(cond, b)`.
-        return (self.operand.has_aggregate() or _value_has_aggregate(self.args)
-                or _value_has_aggregate(self.kwargs))
+        return f"{self.method}({', '.join(repr(getattr(self, name)) for name in type(self).__slots__)})"
 
 
-# --- Conversion: op subgraph -> ColumnExpr -----------------------------------
+class AstypeExpr(ColumnMethodExpr):
+    """``astype(dtype)``; ``dtype`` is the pandas spelling."""
+    __slots__ = ("operand", "dtype")
+    method = "astype"
 
-class _Folder:
-    """Fold operator subgraphs into ``ColumnExpr`` trees.
-
-    Three passes: :meth:`_discover` collects the foldable subgraph,
-    :meth:`_absorbable` keeps nodes without external consumers, :meth:`_build`
-    materialises the tree (an :class:`OperandLeaf` for the rest). The new
-    operator's inputs are ``[src, *leaf_ops]``.
-
-    ``fold_many`` folds several roots against one shared cone and memo, so a
-    producer feeding two roots is absorbed once and both trees share the
-    sub-expression.
-    """
-
-    def __init__(self, src: Op):
-        self.src = src
-        self.absorbed: list[Op] = []
-        self._absorbed_ids: set[int] = set()
-        self.leaf_ops: list[Op] = []
-        self._leaf_index: dict[int, int] = {}
-
-    def fold(self, root: Op, root_consumer: Op) -> ColumnExpr:
-        return self.fold_many([root], root_consumer)[0]
-
-    def fold_many(self, roots: list[Op], root_consumer: Op) -> list[ColumnExpr]:
-        for root in roots:
-            assert any(o is root_consumer for o in root.outputs)
-        subgraph, child_ops = self._discover(roots)
-        absorbable = self._absorbable(roots, root_consumer, subgraph, child_ops)
-        memo: dict[int, ColumnExpr] = {}
-        return [self._build(root, absorbable, child_ops, memo) for root in roots]
-
-    # --- structural classification -------------------------------------------
-
-    def _is_foldable(self, node: Op) -> bool:
-        """Return whether ``node`` can be represented as a ``ColumnExpr``."""
-        if isinstance(node, ValueOp):
-            # A graph-fed constant (a Var resolved from env, or as_data_op(5)).
-            return isinstance(node.value, CONST_SCALAR_TYPES)
-        if isinstance(node, BinOp):
-            return node.op in BINARY_SYMBOLS
-        if isinstance(node, UnaryOp):
-            return node.op in UNARY_SYMBOLS
-        if isinstance(node, (GetItemOp, ColumnProjectionOp)):
-            # A single column of the source frame: df["col"] (a bare GetItem, or
-            # its rewritten ColumnProjectionOp form). Anything else (a chained
-            # getitem, a list/sub-frame key, a non-string key) is not a Col leaf.
-            return (isinstance(node.key, str) and bool(node.inputs)
-                    and node.inputs[0] is self.src)
-        if isinstance(node, StringMethodOp):
-            # A graph-fed arg isn't representable in the expr; such a call stays a leaf.
-            return self._has_literal_call_args(node)
-        if isinstance(node, DatetimeConversionOp):
-            # Only absorb calls whose pandas options have an equivalent Polars
-            # spelling. The unfused op handles the rest through pandas.
-            return (self._has_literal_call_args(node)
-                    and polars_datetime_kwargs(node.args, node.kwargs) is not None)
-        if isinstance(node, ColumnMethodOp):
-            return True
-        if isinstance(node, AccessorMapOp):
-            # Only the fused datetime accessor (.dt.<attr>); .str is already fused
-            # into StringMethodOp during frame extraction.
-            return len(node.attr_name) == 2 and node.attr_name[0] == "dt"
-        return False
-
-    @staticmethod
-    def _has_literal_call_args(node: Op) -> bool:
-        return (not any(isinstance(a, OperandRef) for a in (node.args or ()))
-                and not any(isinstance(v, OperandRef)
-                            for v in (node.kwargs or {}).values()))
-
-    def _producer_ops(self, node: Op) -> list[Op]:
-        """Return foldable operand producers for ``node``."""
-        if isinstance(node, BinOp):
-            return [node.inputs[r.k] for r in (node.left, node.right)
-                    if isinstance(r, OperandRef)]
-        if isinstance(node, UnaryOp):
-            if isinstance(node.operand, OperandRef):
-                return [node.inputs[node.operand.k]]
-            return []
-        if isinstance(node, (StringMethodOp, DatetimeConversionOp,
-                             AccessorMapOp)):
-            return [node.inputs[0]]
-        if isinstance(node, ColumnMethodOp):
-            # Every remaining input is referenced by args/kwargs. Returning all
-            # inputs lets expression-valued method arguments join the fold cone;
-            # non-foldable/external producers become OperandLeafs later.
-            return list(node.inputs)
-        return []
-
-    # --- pass 1: discover the foldable subgraph -----------------------------------
-
-    def _discover(self, roots: list[Op]) -> tuple[dict[int, Op], dict[int, list[Op]]]:
-        """Collect the foldable subgraph rooted at ``roots``."""
-        subgraph: dict[int, Op] = {}
-        child_ops: dict[int, list[Op]] = {}
-        stack = list(roots)
-        while stack:
-            node = stack.pop()
-            if id(node) in subgraph or not self._is_foldable(node):
-                continue
-            subgraph[id(node)] = node
-            children = [p for p in self._producer_ops(node)
-                        if p is not self.src and self._is_foldable(p)]
-            child_ops[id(node)] = children
-            stack.extend(children)
-        return subgraph, child_ops
-
-    # --- pass 2: which subgraph nodes have no external consumers ---------------
-
-    def _absorbable(self, roots: list[Op], root_consumer: Op,
-                    subgraph: dict[int, Op], child_ops: dict[int, list[Op]]) -> set[int]:
-        """Return foldable nodes with no external consumers."""
-        root_ids = {id(r) for r in roots}
-        dropped: set[int] = set()
-        stack: list[Op] = []
-        for nid, node in subgraph.items():
-            for consumer in node.outputs:
-                internal = (id(consumer) in subgraph
-                            or (nid in root_ids and consumer is root_consumer))
-                if not internal:
-                    dropped.add(nid)
-                    stack.append(node)
-                    break
-        while stack:
-            node = stack.pop()
-            for child in child_ops[id(node)]:
-                if id(child) not in dropped:
-                    dropped.add(id(child))
-                    stack.append(child)
-        return {nid for nid in subgraph if nid not in dropped}
-
-    # --- pass 3: materialise the expression bottom-up -------------------------
-
-    def _build(self, root: Op, absorbable: set[int], child_ops: dict[int, list[Op]],
-               memo: dict[int, ColumnExpr]) -> ColumnExpr:
-        """Build the expression tree from absorbable nodes."""
-        if id(root) not in absorbable:
-            return self._leaf(root)
-        if id(root) in memo:
-            return memo[id(root)]
-        # Iterative post-order over the absorbed sub-DAG: an operand is built (and
-        # memoised) before the node that consumes it, so shared nodes fold once --
-        # also across roots, since the memo is shared by ``fold_many``.
-        order: list[Op] = []
-        visited: set[int] = set(memo)
-        stack = [(root, False)]
-        while stack:
-            node, expanded = stack.pop()
-            if expanded:
-                order.append(node)
-                continue
-            if id(node) in visited:
-                continue
-            visited.add(id(node))
-            stack.append((node, True))
-            for child in child_ops[id(node)]:
-                if id(child) in absorbable and id(child) not in visited:
-                    stack.append((child, False))
-        for node in order:
-            memo[id(node)] = self._make_expr(node, absorbable, memo)
-            self._absorb(node)
-        return memo[id(root)]
-
-    def _make_expr(self, node: Op, absorbable: set[int],
-                   memo: dict[int, ColumnExpr]) -> ColumnExpr:
-        if isinstance(node, ValueOp):
-            return Const(node.value)
-        if isinstance(node, BinOp):
-            return BinOpExpr(node.op,
-                             self._operand(node.left, node, absorbable, memo),
-                             self._operand(node.right, node, absorbable, memo))
-        if isinstance(node, UnaryOp):
-            return UnaryOpExpr(node.op,
-                               self._operand(node.operand, node, absorbable, memo))
-        if isinstance(node, (GetItemOp, ColumnProjectionOp)):
-            return Col(node.key)
-        if isinstance(node, StringMethodOp):
-            # The .str accessor was fused away in frame extraction, so the column is
-            # just inputs[0]; args/kwargs are literals (checked in _is_foldable).
-            operand = self._resolve(node.inputs[0], absorbable, memo)
-            return StrExpr(operand, node.method,
-                           tuple(node.args or ()), dict(node.kwargs or {}))
-        if isinstance(node, DatetimeConversionOp):
-            operand = self._resolve(node.inputs[0], absorbable, memo)
-            return DatetimeExpr(operand, tuple(node.args or ()),
-                                dict(node.kwargs or {}))
-        if isinstance(node, ColumnMethodOp):
-            operand = self._resolve(node.inputs[0], absorbable, memo)
-            args = self._method_value(node.args or (), node, absorbable, memo)
-            kwargs = self._method_value(node.kwargs or {}, node, absorbable, memo)
-            return ColumnMethodExpr(operand, node.method, args, kwargs)
-        if isinstance(node, AccessorMapOp):
-            operand = self._resolve(node.inputs[0], absorbable, memo)
-            return DtExpr(operand, node.attr_name[1])
-        raise AssertionError(f"unfoldable node reached _make_expr: {node!r}")
-
-    def _operand(self, operand, parent: Op, absorbable: set[int],
-                 memo: dict[int, ColumnExpr]) -> ColumnExpr:
-        if isinstance(operand, OperandRef):
-            return self._resolve(parent.inputs[operand.k], absorbable, memo)
-        return Const(operand)
-
-    def _method_value(self, value, parent: Op, absorbable: set[int],
-                      memo: dict[int, ColumnExpr]):
-        if isinstance(value, OperandRef):
-            return self._resolve(parent.inputs[value.k], absorbable, memo)
-        if isinstance(value, tuple):
-            return tuple(self._method_value(item, parent, absorbable, memo)
-                         for item in value)
-        if isinstance(value, list):
-            return [self._method_value(item, parent, absorbable, memo)
-                    for item in value]
-        if isinstance(value, dict):
-            return {key: self._method_value(item, parent, absorbable, memo)
-                    for key, item in value.items()}
-        return value
-
-    def _resolve(self, node: Op, absorbable: set[int],
-                 memo: dict[int, ColumnExpr]) -> ColumnExpr:
-        """Return the folded expression or an ``OperandLeaf``."""
-        if id(node) in absorbable:
-            return memo[id(node)]
-        return self._leaf(node)
-
-    def _absorb(self, node: Op) -> None:
-        if id(node) not in self._absorbed_ids:
-            self._absorbed_ids.add(id(node))
-            self.absorbed.append(node)
-
-    def _leaf(self, node: Op) -> OperandLeaf:
-        if node is self.src:
-            return OperandLeaf(OperandRef(0))
-        idx = self._leaf_index.get(id(node))
-        if idx is None:
-            idx = len(self.leaf_ops)
-            self.leaf_ops.append(node)
-            self._leaf_index[id(node)] = idx
-        return OperandLeaf(OperandRef(1 + idx))
+    def __init__(self, operand: ColumnExpr, dtype):
+        self.operand = operand
+        self.dtype = dtype
 
 
-def fold_column_expr(root_node: Op, src: Op, root_consumer: Op):
-    """Fold an operator subgraph into a column expression.
+class FillnaExpr(ColumnMethodExpr):
+    """``fillna(value)``: a missing value (null, or NaN in a float column) becomes ``value``."""
+    __slots__ = ("operand", "value")
+    method = "fillna"
 
-    Returns ``(expr, absorbed_ops, leaf_ops)``.
-    """
-    folder = _Folder(src)
-    expr = folder.fold(root_node, root_consumer)
-    return expr, folder.absorbed, folder.leaf_ops
+    def __init__(self, operand: ColumnExpr, value):
+        self.operand = operand
+        self.value = value
+
+
+class ClipExpr(ColumnMethodExpr):
+    """``clip(lower, upper)``; a ``None`` bound is open."""
+    __slots__ = ("operand", "lower", "upper")
+    method = "clip"
+
+    def __init__(self, operand: ColumnExpr, lower=None, upper=None):
+        self.operand = operand
+        self.lower = lower
+        self.upper = upper
+
+
+class WhereExpr(ColumnMethodExpr):
+    """``where(cond, other)``: the operand where ``cond`` holds, ``other`` elsewhere."""
+    __slots__ = ("operand", "cond", "other")
+    method = "where"
+
+    def __init__(self, operand: ColumnExpr, cond, other):
+        self.operand = operand
+        self.cond = cond
+        self.other = other
+
+
+class IsinExpr(ColumnMethodExpr):
+    """``isin(values)``: whether each value is one of ``values``."""
+    __slots__ = ("operand", "values")
+    method = "isin"
+
+    def __init__(self, operand: ColumnExpr, values):
+        self.operand = operand
+        self.values = values
+
+
+class IsnaExpr(ColumnMethodExpr):
+    """``isna()``: whether each value is missing (null, or NaN in a float column)."""
+    __slots__ = ("operand",)
+    method = "isna"
+
+    def __init__(self, operand: ColumnExpr):
+        self.operand = operand
+
+
+class NotnaExpr(ColumnMethodExpr):
+    """``notna()``: the negation of :class:`IsnaExpr`."""
+    __slots__ = ("operand",)
+    method = "notna"
+
+    def __init__(self, operand: ColumnExpr):
+        self.operand = operand
+
+
+class MapValuesExpr(ColumnMethodExpr):
+    """``map(mapping, na_action)``: a dict lookup; a value it lacks becomes missing."""
+    __slots__ = ("operand", "mapping", "na_action")
+    method = "map"
+
+    def __init__(self, operand: ColumnExpr, mapping, na_action=None):
+        self.operand = operand
+        self.mapping = mapping
+        self.na_action = na_action

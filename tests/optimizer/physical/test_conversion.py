@@ -1,5 +1,7 @@
 """Explicit conversions between frame libraries and correctness-first selection (#227)."""
 import datetime
+import importlib
+import inspect
 
 import numpy as np
 import pandas as pd
@@ -11,6 +13,8 @@ import stratum as st
 from stratum._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
+from stratum.optimizer.logical._base import IRNode
+from stratum.optimizer.logical._ops import Op
 from stratum.optimizer.physical._conversion import ConversionOp, to_pandas, to_polars
 from stratum.optimizer.physical._representation import FrameLib, frame_lib
 
@@ -162,3 +166,19 @@ def test_a_row_dropped_column_is_aligned_by_label():
         result = evaluate(plan)
     expected = frame.assign(p=frame.drop([1])["x"])
     pd.testing.assert_frame_equal(_as_pandas(result), expected, check_dtype=False)
+
+
+_FRAME_MODULES = ["_aggregation_ops", "_column_methods", "_dataframe_ops", "_index_ops",
+                  "_join_ops", "_map_ops", "_metadata_ops", "_projection_ops",
+                  "_selection_ops", "_sort_ops", "_source_ops"]
+
+
+@pytest.mark.parametrize("name", _FRAME_MODULES)
+def test_every_frame_operator_declares_its_index_effect(name):
+    # Index lineage reads the declaration; an op that relied on the base
+    # default would have its effect decided by omission.
+    module = importlib.import_module(f"stratum.optimizer.logical.{name}")
+    undeclared = [cls.__name__ for _, cls in inspect.getmembers(module, inspect.isclass)
+                  if issubclass(cls, Op) and cls.__module__ == module.__name__
+                  and next(k for k in cls.__mro__ if "index_effect" in vars(k)) is IRNode]
+    assert not undeclared, f"operators without an index_effect: {undeclared}"

@@ -17,23 +17,17 @@ import polars as pl
 
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._base import OutputType
-from stratum.optimizer.logical._column_expr import AllCols, Col, EvalContext
+from stratum.optimizer.logical._column_expr import AllCols, Col
+from stratum.optimizer.physical._expressions import (
+    EvalContext, refuse_unsupported_exprs, to_pandas, to_polars)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
-from stratum.optimizer.physical._representation import refuse_unsupported_exprs
 from stratum.optimizer.physical._registry import physical_impl
 
 
-class AggregateExec(AggregateOp, PhysicalOp):
-    """Physical base: shares the evaluation context and the output naming rule."""
-
-    def _ctx(self, inputs: list, mode: str) -> EvalContext:
-        return EvalContext(frame=inputs[0], inputs=inputs, mode=mode)
-
-
 @physical_impl(of=AggregateOp, backend="pandas")
-class PandasAggregateOp(AggregateExec):
+class PandasAggregateOp(AggregateOp, PhysicalOp):
     def process(self, mode: str, inputs: list):
-        ctx = self._ctx(inputs, mode)
+        ctx = EvalContext.of(inputs, mode)
         if not self.grouped:
             return self._reduce_whole(ctx)
         return self._reduce_grouped(ctx)
@@ -42,38 +36,38 @@ class PandasAggregateOp(AggregateExec):
         """A bare reduction: ``df.sum()`` / ``series.mean()``."""
         if self._is_wildcard_only():
             _, agg = self.aggregations[0]
-            return agg.to_pandas(ctx)
-        results = {self.entry_name(i): agg.to_pandas(ctx)
+            return to_pandas(agg, ctx)
+        results = {self.entry_name(i): to_pandas(agg, ctx)
                    for i, (_, agg) in enumerate(self.aggregations)}
         if self.output_type is OutputType.SERIES:
             return pd.Series(results)
         return results
 
     def _reduce_grouped(self, ctx: EvalContext):
-        keys = [expr.to_pandas(ctx) for expr in self.grouping]
-        options = dict(self.options)
-        sort_categories = options.pop("sort_categories", False)
-        options.pop("level", None)  # a level-based grouping is carried by `keys`
+        keys = [to_pandas(expr, ctx) for expr in self.grouping]
+        # A level-based grouping is carried by `keys`, so `level` is not passed.
+        options = dict(sort=self.sort_keys, dropna=self.drop_null_keys,
+                       observed=self.observed)
         if self._is_wildcard_only():
             # `.agg(func)` on the grouped frame keeps pandas' own column naming
             # and its exclusion of the grouping keys.
             _, agg = self.aggregations[0]
-            grouped = ctx.frame.groupby(keys, **options)
+            grouped = ctx.frame.groupby(keys, as_index=not self.keys_as_columns,
+                                        **options)
             return getattr(grouped, agg.func)(**agg.params)
         # Materialise each entry's row-wise child, then reduce column by column.
         columns: dict = {}
         for index, (_, agg) in enumerate(self.aggregations):
             columns.setdefault(agg.child, f"_child{index}")
-        materialized = {child: child.to_pandas(ctx) for child in columns}
+        materialized = {child: to_pandas(child, ctx) for child in columns}
         work = pd.DataFrame({name: materialized[child]
                              for child, name in columns.items()})
-        as_index = options.pop("as_index", True)
         grouped = work.groupby(keys, as_index=True, **options)
         out = {}
         for index, (_, agg) in enumerate(self.aggregations):
             series = grouped[columns[agg.child]]
             reduced = getattr(series, agg.func)(**agg.params)
-            if sort_categories and isinstance(reduced.index, pd.CategoricalIndex):
+            if self.sort_categories and isinstance(reduced.index, pd.CategoricalIndex):
                 reduced = reduced.sort_index()
             out[self.entry_name(index)] = reduced
         if self.output_type is OutputType.SERIES and len(out) == 1:
@@ -85,7 +79,7 @@ class PandasAggregateOp(AggregateExec):
                 name = getattr(materialized[agg.child], "name", name)
             return series.rename(name)
         result = pd.DataFrame(out)
-        if as_index:
+        if not self.keys_as_columns:
             return result
         # pandas omits a grouping key when a reduction already produces that
         # label, rather than creating duplicate output columns.
@@ -102,7 +96,7 @@ class PandasAggregateOp(AggregateExec):
                 and isinstance(self.aggregations[0][1].child, AllCols))
 
 @physical_impl(of=AggregateOp, backend="polars")
-class PolarsAggregateOp(AggregateExec):
+class PolarsAggregateOp(AggregateOp, PhysicalOp):
 
     @classmethod
     def supports(cls, op: AggregateOp, ctx) -> bool:
@@ -118,7 +112,7 @@ class PolarsAggregateOp(AggregateExec):
         if op.inputs and op.inputs[0].output_type is OutputType.SERIES:
             return False
         # Polars has no pandas index labels or unobserved categorical groups.
-        if op.options.get("observed") is False or op.options.get("level") is not None:
+        if op.observed is False or op.level is not None:
             return False
         return refuse_unsupported_exprs(
             op, [*(agg for _, agg in op.aggregations), *op.grouping])
@@ -126,7 +120,7 @@ class PolarsAggregateOp(AggregateExec):
     def process(self, mode: str, inputs: list):
         # pandas treats floating NaN as missing for grouping and reductions.
         frame = inputs[0].with_columns(pl.col(pl.Float32, pl.Float64).fill_nan(None))
-        ctx = self._ctx([frame, *inputs[1:]], mode)
+        ctx = EvalContext.of([frame, *inputs[1:]], mode)
         if self.grouped and self.counts_group_rows():
             # The rows per group, not a count per column; pandas names it "size".
             exprs = [pl.len().alias("size")]
@@ -135,12 +129,12 @@ class PolarsAggregateOp(AggregateExec):
                      for index, (_, agg) in enumerate(self.aggregations)]
         if not self.grouped:
             return ctx.frame.select(exprs)
-        keys = [expr.to_polars(ctx) for expr in self.grouping]
+        keys = [to_polars(expr, ctx) for expr in self.grouping]
         # pandas sorts the group keys by default; polars neither sorts nor
         # preserves order unless asked, so both cases are made explicit.
-        sort = self.options.get("sort", True)
+        sort = self.sort_keys
         frame = ctx.frame
-        if self.options.get("dropna", True):
+        if self.drop_null_keys:
             frame = frame.filter(pl.all_horizontal([key.is_not_null() for key in keys]))
         result = frame.group_by(keys, maintain_order=not sort).agg(exprs)
         if sort:
@@ -148,7 +142,7 @@ class PolarsAggregateOp(AggregateExec):
         return result
 
     def _entry_expr(self, index: int, agg, ctx: EvalContext):
-        expr = agg.to_polars(ctx)
+        expr = to_polars(agg, ctx)
         # A wildcard keeps one output per source column, so it must not be
         # collapsed under a single alias.
         if not isinstance(agg.child, AllCols):

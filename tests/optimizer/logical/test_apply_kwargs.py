@@ -13,7 +13,7 @@ from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
 
-from stratum.optimizer.logical._op_cse import apply_op_cse
+from stratum.optimizer.logical.rewrites._cse import apply_op_cse
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
 from stratum.optimizer._optimize import convert_to_ops
 from stratum.optimizer.logical._ops import (ChoiceOp, OperandRef, PredictorOp,

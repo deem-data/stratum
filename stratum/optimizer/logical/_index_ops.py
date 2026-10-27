@@ -1,6 +1,6 @@
 """Logical operations for row labels and proven aggregation keys."""
 
-from stratum.optimizer.logical._base import OutputType
+from stratum.optimizer.logical._base import IndexEffect, OutputType
 from stratum.optimizer.logical._ops import Op
 
 
@@ -13,6 +13,7 @@ class IndexAccessOp(Op):
 
     logical_family = "IndexAccess"
     fields = []
+    index_effect = IndexEffect.NEW
 
     def __init__(self, inputs=None, outputs=None):
         super().__init__(inputs=inputs, outputs=outputs)
@@ -24,6 +25,7 @@ class GroupKeysOp(Op):
 
     logical_family = "GroupKeys"
     fields = ["key"]
+    index_effect = IndexEffect.NEW
 
     def __init__(self, key: str, inputs=None, outputs=None):
         super().__init__(name=key, inputs=inputs, outputs=outputs)

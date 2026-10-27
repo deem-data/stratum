@@ -48,10 +48,25 @@ def test_frame_fillna_matches_pandas(value, keyword, then):
                                   expected.reset_index(drop=True), check_dtype=False)
 
 
-@pytest.mark.parametrize("value", [{"i": "x"}, {"s": 0}, {"b": 1}, {"f": True}])
-def test_a_fill_value_of_another_kind_is_refused(value):
+@pytest.mark.parametrize("value", [{"i": "x"}, {"s": 0}, {"f": True}])
+def test_a_fill_value_of_another_kind_runs_on_pandas(value):
+    # The schema knows each column's dtype at plan time, so polars refuses the
+    # fill and pandas runs it, upcasting the column to object.
     with skrub.config_context(eager_data_ops=False):
         plan = skrub.var("frame", FRAME).fillna(value)
+    with stratum.config(scheduler=True, implementation_selector="greedy"):
+        ops, *_ = optimize(plan, env=get_data(plan))
+        [fillna] = [op for op in ops if isinstance(op, ColumnMethodOp)]
+        assert "mix types" in dict(fillna._refusals)["polars"]
+        result = evaluate(plan)
+    pd.testing.assert_frame_equal(result, FRAME.fillna(value))
+
+
+def test_an_unknown_dtype_is_checked_when_the_fill_runs():
+    # `b` holds bools and None, an object column whose dtype the schema leaves
+    # unknown, so only the run can tell the fill value does not fit.
+    with skrub.config_context(eager_data_ops=False):
+        plan = skrub.var("frame", FRAME).fillna({"b": 1})
     with stratum.config(scheduler=True, implementation_selector="greedy"):
         with pytest.raises((NotImplementedError, RuntimeError),
                            match="no exact polars translation"):

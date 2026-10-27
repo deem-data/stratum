@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
@@ -10,9 +11,9 @@ BackendName = str
 """Descriptor for one physical implementation of a plannable operator.
 
 ``op_type`` is the type the implementation is registered under: an *abstract
-physical* op type for families already compiled to the physical layer (e.g.
-``ReadCSV``), or a *logical* op type for families that still pass through
-lowering unchanged (e.g. ``TransformerOp``). ``supports``/``cost``/``exec_mem``
+physical* op type for families lowered to the physical layer first (e.g.
+``RandomForestOp``), or the *logical* op type itself (e.g. ``ReadCSVOp`` or
+``TransformerOp``). ``supports``/``cost``/``exec_mem``
 form the fixed selector-facing API; ``impl_class`` names the concrete
 ``PhysicalOp`` the op is swapped to when this impl is chosen (identity preserved),
 after which its ``on_impl_selected`` folds in any plan-time state.
@@ -31,7 +32,6 @@ class PhysicalImpl:
     supports: Callable[[IRNode, Any], bool]
     cost: Callable[[IRNode, Any], float]
     exec_mem: Callable[[IRNode, Any], int]
-    execute: Callable[[IRNode, str, list[Any]], Any]
     # Concrete PhysicalOp class the op is swapped to when this impl is chosen.
     impl_class: type | None = None
     # Stable algorithm identity within a backend (for example rf_exact/rf_hist).
@@ -62,26 +62,6 @@ class RustPhysicalImpl(PhysicalImpl):
     releases_gil: bool = False
     #: Kernel parallelizes internally; the planner should not also fan it out.
     data_parallel: bool = False
-
-
-def _unsupported_supports(op: IRNode, ctx: Any) -> bool:
-    return False
-
-
-def _unsupported_cost(op: IRNode, stats: Any) -> float:
-    raise NotImplementedError("No physical cost model has been registered for this operator yet.")
-
-
-def _unsupported_exec_mem(op: IRNode, stats: Any) -> int:
-    raise NotImplementedError("No execution-memory model has been registered for this operator yet.")
-
-
-def _unsupported_execute(op: IRNode, mode: str, inputs: list[Any]) -> Any:
-    raise NotImplementedError("No physical implementation has been registered for this operator yet.")
-
-
-def _current_process_execute(op: IRNode, mode: str, inputs: list[Any]) -> Any:
-    return op.process(mode, inputs)
 
 
 def _placeholder_cost(op: IRNode, stats: Any) -> float:
@@ -124,18 +104,8 @@ class PhysicalRegistry:
             candidates = [impl for impl in candidates if impl.backend_name == backend_name]
         return tuple(candidates)
 
-    def candidates_for_op(
-        self,
-        op: IRNode,
-        backend_name: BackendName | None = None,
-    ) -> tuple[PhysicalImpl, ...]:
-        return self.candidates_for(op, backend_name=backend_name)
-
     def backends_for(self, op: type[IRNode] | IRNode) -> tuple[BackendName, ...]:
         return tuple(impl.backend_name for impl in self.candidates_for(op))
-
-    def has_candidates(self, op: type[IRNode] | IRNode) -> bool:
-        return len(self.candidates_for(op)) > 0
 
     def candidates_by_backend(self, backend_name: BackendName) -> tuple[PhysicalImpl, ...]:
         return tuple(self._implementations_by_backend.get(backend_name, ()))
@@ -157,13 +127,13 @@ def physical_impl(of: type[IRNode], backend: BackendName,
 
     ``of`` is the (abstract) op type the class implements, e.g.::
 
-        @physical_impl(of=ReadCSV, backend="pandas", input_format="value")
-        class PandasReadCSV(ReadCSV): ...
+        @physical_impl(of=ReadCSVOp, backend="pandas", input_format="value")
+        class PandasReadCSV(ReadCSVOp, PhysicalOp): ...
 
     The selector-facing hooks (``supports``/``cost``/``exec_mem``) are taken from
-    the class (PhysicalOp provides placeholder defaults); ``execute`` delegates to
-    the op's own ``process``, which is concrete once the selection pass has swapped
-    the op to this class.
+    the class (PhysicalOp provides placeholder defaults). Execution is the op's own
+    ``process``, which is concrete once the selection pass has swapped the op to
+    this class.
 
     This builds a base :class:`PhysicalImpl`. Backends that carry extra scheduling
     metadata have their own decorator (:func:`rust_impl`) that builds the matching
@@ -182,7 +152,6 @@ def physical_impl(of: type[IRNode], backend: BackendName,
             supports=cls.supports,
             cost=cls.cost,
             exec_mem=cls.exec_mem,
-            execute=_current_process_execute,
             impl_class=cls,
             implementation_name=implementation_name,
         ))
@@ -210,7 +179,6 @@ def rust_impl(of: type[IRNode], input_format: str = "frame",
             supports=cls.supports,
             cost=cls.cost,
             exec_mem=cls.exec_mem,
-            execute=_current_process_execute,
             impl_class=cls,
             implementation_name=implementation_name,
             releases_gil=cls.releases_gil,
@@ -239,29 +207,31 @@ numpy_impl = _backend_impl("numpy")
 sklearn_skrub_impl = _backend_impl("sklearn-skrub")
 
 
+#: Every module that registers physical impls or lowering rules.
+EXEC_MODULES = (
+    "_source_execs", "_transform_execs", "_predictor_execs", "_generic_execs",
+    "_concat_execs", "_join_execs", "_aggregation_execs", "_projection_execs",
+    "_metadata_execs", "_index_execs", "_selection_execs", "_sort_execs",
+    "_map_execs", "_getitem_execs",
+)
+
+
+def import_exec_modules() -> None:
+    """Import every exec module, running its ``@physical_impl``/``@rust_impl``
+    registrations and its lowering rules.
+
+    Imported on demand: the exec modules import back into this module (the
+    decorator / PhysicalImpl), so pulling them in at module level would cycle.
+    """
+    for name in EXEC_MODULES:
+        importlib.import_module(f"stratum.optimizer.physical.{name}")
+
+
 """Create the default registry with every known implementation registered."""
 def build_default_physical_registry() -> PhysicalRegistry:
     registry = PhysicalRegistry()
 
-    # Imported lazily: the exec modules import back into this module (the
-    # decorator / PhysicalImpl), so pulling them in at module level would cycle.
-    # Importing each exec module triggers its lowering rules and
-    # @physical_impl/@rust_impl registrations. Keep this list complete so a
-    # standalone registry construction does not depend on optimizer imports.
-    from stratum.optimizer.physical import _source_execs  # noqa: F401
-    from stratum.optimizer.physical import _transform_execs  # noqa: F401
-    from stratum.optimizer.physical import _predictor_execs  # noqa: F401
-    from stratum.optimizer.physical import _concat_execs  # noqa: F401
-    from stratum.optimizer.physical import _join_execs  # noqa: F401
-    from stratum.optimizer.physical import _aggregation_execs  # noqa: F401
-    from stratum.optimizer.physical import _projection_execs  # noqa: F401
-    from stratum.optimizer.physical import _metadata_execs  # noqa: F401
-    from stratum.optimizer.physical import _index_execs  # noqa: F401
-    from stratum.optimizer.physical import _selection_execs  # noqa: F401
-    from stratum.optimizer.physical import _sort_execs  # noqa: F401
-    from stratum.optimizer.physical import _map_execs  # noqa: F401
-    from stratum.optimizer.physical import _getitem_execs  # noqa: F401
-
+    import_exec_modules()
     for impl in _DECORATED_IMPLS:
         registry.register(impl)
     return registry

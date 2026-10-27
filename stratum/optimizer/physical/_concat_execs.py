@@ -1,10 +1,12 @@
-"""Physical implementations of the ``ConcatOp`` frame concatenation.
+"""Physical implementations of the concat family.
 
 ``ConcatOp`` is a same-shape backend-variant family: the logical op is a pure
 backend refinement of itself, so the concrete impls subclass it (``PandasConcatOp
 (ConcatOp, PhysicalOp)``) rather than being a separate hierarchy. Implementation
 selection swaps a logical ``ConcatOp`` to one of these in place; ``isinstance(op,
 ConcatOp)`` therefore still identifies a concat anywhere in the plan.
+
+``ArrayConcatOp`` has a single, backend-agnostic numpy impl.
 """
 from __future__ import annotations
 
@@ -12,36 +14,36 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.logical._base import OperandRef
-from stratum.optimizer.logical._dataframe_ops import ConcatOp
+from stratum.optimizer.logical._base import OperandRef, _resolve_operand
+from stratum.optimizer.logical._dataframe_ops import ArrayConcatOp, ConcatOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 
 
-class ConcatExec(ConcatOp, PhysicalOp):
-    """Physical base: resolves the concat operands copied from the logical op."""
+def _operands(op: ConcatOp, inputs: list) -> tuple[list, object]:
+    """The values to concatenate, in order, and the resolved axis."""
+    return [inputs[ref.k] for ref in op.operands], _resolve_operand(op.axis, inputs)
 
-    def _resolve(self, inputs: list):
-        first = inputs[self.first.k] if isinstance(self.first, OperandRef) else self.first
-        others = [inputs[o.k] if isinstance(o, OperandRef) else o for o in self.others]
-        axis = inputs[self.axis.k] if isinstance(self.axis, OperandRef) else self.axis
-        return first, others, axis
+
+class ConcatExec(ConcatOp, PhysicalOp):
+    """Physical base of the frame concats."""
 
     def process(self, mode: str, inputs: list):
-        first, others, axis = self._resolve(inputs)
-        if isinstance(first, np.ndarray):
-            # skrub concatenates arrays too (since 0.10), whatever the frame backend.
-            return np.concatenate([first, *others], axis=axis)
-        return self._concat_frames(first, others, axis)
+        operands, axis = _operands(self, inputs)
+        if isinstance(operands[0], np.ndarray):
+            # skrub concatenates arrays too (since 0.10), whatever the frame
+            # backend; extraction could not tell this operand was one.
+            return np.concatenate(operands, axis=axis)
+        return self._concat_frames(operands, axis)
 
-    def _concat_frames(self, first, others: list, axis):
+    def _concat_frames(self, operands: list, axis):
         raise NotImplementedError
 
 
 @physical_impl(of=ConcatOp, backend="pandas")
 class PandasConcatOp(ConcatExec):
-    def _concat_frames(self, first, others: list, axis):
-        return pd.concat([first, *others], axis=axis)
+    def _concat_frames(self, operands: list, axis):
+        return pd.concat(operands, axis=axis)
 
 
 @physical_impl(of=ConcatOp, backend="polars")
@@ -49,5 +51,19 @@ class PolarsConcatOp(ConcatExec):
     # pandas concat axis (0=rows, 1=cols) -> polars `how`.
     axis_map = {0: "diagonal_relaxed", 1: "horizontal"}
 
-    def _concat_frames(self, first, others: list, axis):
-        return pl.concat([first, *others], how=self.axis_map[axis])
+    @classmethod
+    def supports(cls, op: ConcatOp, ctx) -> bool:
+        if not isinstance(op.axis, OperandRef) and op.axis not in cls.axis_map:
+            op._unsupported_reason = f"axis={op.axis!r}"
+            return False
+        return True
+
+    def _concat_frames(self, operands: list, axis):
+        return pl.concat(operands, how=self.axis_map[axis])
+
+
+@physical_impl(of=ArrayConcatOp, backend="numpy")
+class NumpyConcatOp(ArrayConcatOp, PhysicalOp):
+    def process(self, mode: str, inputs: list):
+        operands, axis = _operands(self, inputs)
+        return np.concatenate(operands, axis=axis)

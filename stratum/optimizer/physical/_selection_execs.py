@@ -16,7 +16,6 @@ from __future__ import annotations
 from numbers import Integral
 
 from stratum.optimizer.logical._base import OutputType, _resolve_kwargs, _resolve_operand
-from stratum.optimizer.logical._column_expr import EvalContext
 from stratum.optimizer.logical._selection_ops import (
     DropDuplicatesSelectionOp,
     DropLabelsSelectionOp,
@@ -25,8 +24,9 @@ from stratum.optimizer.logical._selection_ops import (
     SampleSelectionOp,
     SliceSelectionOp,
 )
+from stratum.optimizer.physical._expressions import (
+    EvalContext, refuse_unsupported_exprs, to_pandas, to_pandas_query, to_polars)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
-from stratum.optimizer.physical._representation import refuse_unsupported_exprs
 from stratum.optimizer.physical._registry import physical_impl
 
 
@@ -44,7 +44,7 @@ def _query_selectable(op: MaskSelectionOp) -> bool:
     """
     return (op.output_type is OutputType.FRAME
             and op.predicate is not None
-            and op.predicate.to_pandas_query({}) is not None)
+            and to_pandas_query(op.predicate, {}) is not None)
 
 
 @physical_impl(of=MaskSelectionOp, backend="pandas")
@@ -63,7 +63,7 @@ class PandasQuerySelectionOp(MaskSelectionOp, PhysicalOp):
         # Compile the query string and bind its literals at plan time; supports()
         # guarantees the predicate is expressible, so this never yields None.
         params: dict = {}
-        self.query = self.predicate.to_pandas_query(params)
+        self.query = to_pandas_query(self.predicate, params)
         self.query_params = params
 
     def process(self, mode: str, inputs: list):
@@ -79,9 +79,7 @@ class PandasIndexSelectionOp(MaskSelectionOp, PhysicalOp):
         return not (ctx.pandas_query and _query_selectable(op))
 
     def process(self, mode: str, inputs: list):
-        _obj = inputs[0]
-        ctx = EvalContext(frame=_obj, inputs=inputs, mode=mode)
-        return _obj[self.predicate.to_pandas(ctx)]
+        return inputs[0][to_pandas(self.predicate, EvalContext.of(inputs, mode))]
 
 
 @physical_impl(of=MaskSelectionOp, backend="polars")
@@ -93,9 +91,7 @@ class PolarsMaskSelectionOp(MaskSelectionOp, PhysicalOp):
         return op.predicate is None or refuse_unsupported_exprs(op, [op.predicate])
 
     def process(self, mode: str, inputs: list):
-        _obj = inputs[0]
-        ctx = EvalContext(frame=_obj, inputs=inputs, mode=mode)
-        return _obj.filter(self.predicate.to_polars(ctx))
+        return inputs[0].filter(to_polars(self.predicate, EvalContext.of(inputs, mode)))
 
 
 # --- SliceSelectionOp -----------------------------------------------------------

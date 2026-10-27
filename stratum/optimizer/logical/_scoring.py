@@ -33,9 +33,6 @@ from sklearn.metrics import get_scorer
 import logging
 logger = logging.getLogger(__name__)
 
-#: Responses a metric can read. The plan produces exactly one of them per pass.
-RESPONSE_METHODS = ("predict", "predict_proba", "predict_log_proba", "decision_function")
-
 _PROBABILITY_RESPONSES = ("predict_proba", "predict_log_proba")
 
 

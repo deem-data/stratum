@@ -14,11 +14,10 @@ that runs on pandas as recorded.
 """
 from __future__ import annotations
 
-import inspect
-
 import pandas as pd
 
-from stratum.optimizer.logical._ops import MethodCallOp, Op, OutputType
+from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._ops import MethodCallOp, Op, OutputType, substitute_op
 from stratum.optimizer.logical import _schema
 
 
@@ -28,6 +27,8 @@ class MetadataOp(Op):
     Each subclass sets its own ``output_type``.
     """
     logical_family = "Metadata"
+    # A structure read is not a frame; a relabelling says how it relabels.
+    index_effect = IndexEffect.NEW
 
 
 class RenameOp(MetadataOp):
@@ -38,6 +39,7 @@ class RenameOp(MetadataOp):
     ``errors``: ``"raise"`` when a mapped label is absent, ``"ignore"`` to skip it.
     """
     fields = ["columns", "index", "errors"]
+    index_effect = IndexEffect.KEEP
 
     def __init__(self, columns=None, index=None, errors="ignore",
                  inputs: list[Op] = None, outputs: list[Op] = None):
@@ -60,6 +62,7 @@ class ResetIndexOp(MetadataOp):
     Libraries whose rows carry no labels have nothing to do.
     """
     fields = []
+    index_effect = IndexEffect.DEFAULT
 
     def __init__(self, inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name="reset_index", inputs=inputs, outputs=outputs)
@@ -108,10 +111,8 @@ def make_rename_op(op: MethodCallOp) -> RenameOp | None:
     """
     if op.inputs[0].output_type is not OutputType.FRAME:
         return None
-    try:
-        call = inspect.signature(pd.DataFrame.rename).bind(
-            None, *(op.args or ()), **(op.kwargs or {})).arguments
-    except TypeError:
+    call = op.bind_pandas(owner=pd.DataFrame)
+    if call is None:
         return None
     if (call.get("inplace", False) is not False or call.get("level") is not None
             or "copy" in call):
@@ -133,10 +134,8 @@ def make_rename_op(op: MethodCallOp) -> RenameOp | None:
         return None
     if not all(_is_label_map(m) for m in (index, columns) if m is not None):
         return None
-    new_op = RenameOp(columns=columns, index=index, errors=call.get("errors", "ignore"),
-                      inputs=op.inputs, outputs=op.outputs)
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    return substitute_op(op, RenameOp(columns=columns, index=index,
+                                      errors=call.get("errors", "ignore")))
 
 
 def _is_label_map(value) -> bool:
@@ -155,11 +154,8 @@ def make_reset_index_op(op: MethodCallOp) -> ResetIndexOp | None:
     kwargs = dict(op.kwargs or {})
     if op.args or kwargs.pop("drop", False) is not True or kwargs:
         return None
-    new_op = ResetIndexOp(inputs=op.inputs, outputs=op.outputs)
     # reset_index keeps the container kind: a series stays a series.
-    new_op.output_type = op.inputs[0].output_type
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    return substitute_op(op, ResetIndexOp(), keep_kind=True)
 
 
 def make_structure_read_op(op) -> MetadataOp | None:
@@ -175,6 +171,4 @@ def make_structure_read_op(op) -> MetadataOp | None:
         cls = ColumnNamesOp
     else:
         return None
-    new_op = cls(inputs=op.inputs, outputs=op.outputs)
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    return substitute_op(op, cls())

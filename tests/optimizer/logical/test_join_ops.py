@@ -5,10 +5,22 @@ import polars as pl
 import pytest
 import stratum as st
 from stratum.optimizer._optimize import OptConfig
-from stratum.optimizer.logical._join_ops import JoinOp
+from stratum.optimizer.logical._join_ops import JoinOp, make_join_op
+from stratum.optimizer.logical._ops import MethodCallOp, OperandRef
+from stratum.optimizer.physical._impl_selection import get_implementation_selector
+from stratum.optimizer.physical._join_execs import PandasJoinOp, PolarsJoinOp
 from stratum.runtime._buffer_pool import BufferPool
 from .test_dataframe_ops import (
-    force_polars, optimize, run_op)
+    _inp, force_polars, optimize, plan_context, run_op)
+
+
+def _evaluate(ops):
+    """Execute a linearized DAG and return the last op's output."""
+    pool = BufferPool()
+    for op in ops:
+        inputs = [pool.pin(key) for key in op.inputs]
+        pool.put(op, op.process("fit_transform", inputs))
+    return pool.pin(ops[-1])
 
 
 def to_list(obj):
@@ -169,38 +181,37 @@ class TestJoinOpPandas(unittest.TestCase):
         result = run_op(op, left, right)
         self.assertEqual({"x", "y", "z"}, set(result.index.tolist()))
 
-    def test_polars_index_based_join_raises(self):
-        with force_polars():
-            op = JoinOp(how="left", left_index=True, right_index=True)
-            with self.assertRaises(NotImplementedError):
-                run_op(op, pl.DataFrame({"k": [1]}), pl.DataFrame({"k": [1]}))
-
-    def test_polars_unsupported_how_raises(self):
+    def test_polars_refuses_what_it_cannot_express(self):
         # Only inner/left/outer are known to match the pandas backend; other
-        # `how` values (e.g. cross/right) are rejected rather than diverging.
-        for how in ("cross", "right"):
-            with force_polars():
-                op = JoinOp(how=how, left_on="k", right_on="k")
-                with self.assertRaises(NotImplementedError):
+        # `how` values (e.g. cross/right) are refused rather than diverging.
+        cases = [
+            (JoinOp(how="left", left_index=True, right_index=True), "index labels"),
+            (JoinOp(how="cross"), "how='cross'"),
+            (JoinOp(how="right", left_on="k", right_on="k"), "how='right'"),
+            (JoinOp(how="inner", left_on=0, right_on=0), "left_on of type int"),
+        ]
+        for op, reason in cases:
+            with self.subTest(reason=reason):
+                self.assertFalse(PolarsJoinOp.supports(op, plan_context()))
+                self.assertIn(reason, op._unsupported_reason)
+                with force_polars(), self.assertRaises(NotImplementedError):
                     run_op(op, pl.DataFrame({"k": [1]}), pl.DataFrame({"k": [1]}))
 
-    def test_polars_non_str_list_key_raises(self):
-        with force_polars():
-            op = JoinOp(how="inner", left_on=0, right_on=0)
-            with self.assertRaises(NotImplementedError):
-                run_op(op, pl.DataFrame({"k": [1]}), pl.DataFrame({"k": [1]}))
+    def test_greedy_runs_a_refused_join_on_pandas(self):
+        left = pd.DataFrame({"k": [1, 2]})
+        right = pd.DataFrame({"j": [3]})
+        data = st.as_data_op(left).merge(st.as_data_op(right), how="cross")
+        ops = optimize(data, OptConfig(selector=get_implementation_selector("greedy")))
+        [join] = [o for o in ops if isinstance(o, JoinOp)]
+        self.assertIsInstance(join, PandasJoinOp)
+        pd.testing.assert_frame_equal(left.merge(right, how="cross"), _evaluate(ops))
 
 
 class TestJoinRewrites(unittest.TestCase):
     """End-to-end: skrub DataOp expressions get rewritten to JoinOp(s)."""
 
     def _run_plan(self, ops):
-        """Execute a linearized DAG and return the last op's output."""
-        pool = BufferPool()
-        for op in ops:
-            inputs = [pool.pin(key) for key in op.inputs]
-            pool.put(op, op.process("fit_transform", inputs))
-        return pool.pin(ops[-1])
+        return _evaluate(ops)
 
     def test_merge_on_key_rewrites_and_executes(self):
         df1 = pd.DataFrame({"k": [1, 2, 3], "a": [10, 20, 30]})
@@ -232,13 +243,39 @@ class TestJoinRewrites(unittest.TestCase):
         self.assertEqual("rk", join_ops[0].right_on)
         self.assertEqual("outer", join_ops[0].how)
 
-    def test_merge_sort_true_raises(self):
-        df1 = pd.DataFrame({"k": [1, 2]})
+    def _assert_opaque(self, data, expected):
+        """``data`` stays an opaque call that runs on pandas as recorded."""
+        ops = optimize(data, OptConfig(dataframe_ops=True))
+        self.assertFalse([o for o in ops if isinstance(o, JoinOp)])
+        self.assertTrue([o for o in ops if isinstance(o, MethodCallOp)])
+        pd.testing.assert_frame_equal(expected, self._run_plan(ops))
+
+    def test_merge_sort_true_stays_opaque(self):
+        df1 = pd.DataFrame({"k": [2, 1]})
         df2 = pd.DataFrame({"k": [1, 2]})
         data = st.as_data_op(df1).merge(
             st.as_data_op(df2), on="k", sort=True)
-        with self.assertRaises(NotImplementedError):
-            optimize(data, OptConfig(dataframe_ops=True))
+        self._assert_opaque(data, df1.merge(df2, on="k", sort=True))
+
+    def test_self_merge_stays_opaque(self):
+        # The right side is the left one, so the call has a single input edge.
+        df = pd.DataFrame({"k": [1, 2], "a": [3, 4]})
+        data = st.as_data_op(df)
+        self._assert_opaque(data.merge(data, on="k"), df.merge(df, on="k"))
+
+    def test_graph_fed_option_stays_opaque(self):
+        df1 = pd.DataFrame({"k": [1, 2], "a": [3, 4]})
+        df2 = pd.DataFrame({"k": [1, 2], "b": [5, 6]})
+        key = st.as_data_op("K").skb.apply_func(lambda name: name.lower())
+        data = st.as_data_op(df1).merge(st.as_data_op(df2), on=key)
+        self._assert_opaque(data, df1.merge(df2, on="k"))
+
+    def test_merge_on_next_to_left_on_stays_opaque(self):
+        op = MethodCallOp("merge", args=(OperandRef(1),), kwargs={"on": "k", "left_on": "k"})
+        op.inputs = [_inp(None), _inp(None)]
+        for in_ in op.inputs:
+            in_.outputs = [op]
+        self.assertIsNone(make_join_op(op))
 
     def test_merge_sort_false_is_accepted(self):
         df1 = pd.DataFrame({"k": [1, 2], "a": [10, 20]})
@@ -353,14 +390,12 @@ class TestJoinRewrites(unittest.TestCase):
         expected = df1.join([df2, df3])
         pd.testing.assert_frame_equal(result, expected)
 
-    def test_chained_join_with_duplicate_inputs_raises_error(self):
+    def test_chained_join_with_duplicate_inputs_stays_opaque(self):
         df1 = pd.DataFrame({"a": [1, 2, 3]}, index=["x", "y", "z"])
         df2 = pd.DataFrame(index=["x", "y", "z"])
 
         df2_op = st.as_data_op(df2)
-        data = st.as_data_op(df1).join([df2_op, df2_op])
-        with self.assertRaisesRegex(ValueError, "Duplicate right-hand frames in chained joins are not supported"):
-            optimize(data, OptConfig(dataframe_ops=True))
+        self._assert_opaque(st.as_data_op(df1).join([df2_op, df2_op]), df1.join([df2, df2]))
 
     def test_join_with_other_kwarg(self):
         df1 = pd.DataFrame({"a": [1, 2]}, index=["x", "y"])
@@ -375,23 +410,21 @@ class TestJoinRewrites(unittest.TestCase):
         expected = df1.join(df2)
         pd.testing.assert_frame_equal(result, expected)
 
-    def test_merge_unsupported_arguments_raises(self):
+    def test_merge_unsupported_arguments_stay_opaque(self):
         df1 = pd.DataFrame({"k": [1, 2]})
         df2 = pd.DataFrame({"k": [1, 2]})
         data = st.as_data_op(df1).merge(
             st.as_data_op(df2), on="k", indicator=True
         )
-        with self.assertRaisesRegex(NotImplementedError, "Unsupported arguments for merge"):
-            optimize(data, OptConfig(dataframe_ops=True))
+        self._assert_opaque(data, df1.merge(df2, on="k", indicator=True))
 
-    def test_join_unsupported_arguments_raises(self):
+    def test_join_unsupported_arguments_stay_opaque(self):
         df1 = pd.DataFrame({"a": [1, 2]})
         df2 = pd.DataFrame({"b": [1, 2]})
         data = st.as_data_op(df1).join(
             st.as_data_op(df2), validate="one_to_one"
         )
-        with self.assertRaisesRegex(NotImplementedError, "Unsupported arguments for join"):
-            optimize(data, OptConfig(dataframe_ops=True))
+        self._assert_opaque(data, df1.join(df2, validate="one_to_one"))
 
 
 if __name__ == "__main__":

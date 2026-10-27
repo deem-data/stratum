@@ -15,211 +15,60 @@ Two kinds of map:
   ``.str``/``.dt`` accessors, datetime parsing); on polars all entries compile
   into one ``with_columns`` kernel. Anything outside the grammar stays in the
   graph and feeds the map through an ``OperandLeaf`` input.
-* Call-based maps (:class:`CallMapOp` and its subclasses, :class:`AccessorMapOp`,
-  and ``ColumnMethodOp``) replay one recorded pandas call. They are what the
-  folder lifts into ``ColumnExpr`` nodes, and the fallback where it cannot.
+* Call-based maps (:class:`CallMapOp` and its subclasses) replay one recorded
+  pandas call; :class:`StringMethodOp`, :class:`DatetimeFieldOp`,
+  :class:`DatetimeConversionOp` and the ``ColumnMethodOp`` family hold one parsed
+  call. They are what the folder lifts
+  into ``ColumnExpr`` nodes, and the fallback where it cannot.
 """
 from __future__ import annotations
-
-import re
-from typing import TYPE_CHECKING, Callable
 
 import pandas as pd
 import polars as pl
 
+from stratum.optimizer.logical._base import IndexEffect
 from stratum.optimizer.logical._ops import (CallOp, GetAttrOp, MethodCallOp, Op,
-                                            OperandRef, OutputType, _resolve_args,
-                                            _resolve_kwargs)
+                                            OperandRef, OutputType, substitute_op)
+from stratum.optimizer.logical._column_expr import ColumnExpr, Const
 from stratum.optimizer.logical._index_ops import IndexAccessOp
 from stratum.optimizer.logical._metadata_ops import make_structure_read_op
+from stratum.frontend._pandas_calls import bind_pandas_function
 from stratum.optimizer.logical import _schema
-
-# ``_column_expr`` imports the map ops below to lift them into expressions, so
-# this module imports it lazily (in ``make_context`` and the assign folding).
-if TYPE_CHECKING:
-    from stratum.optimizer.logical._column_expr import ColumnExpr, _Folder
-
-
-# pandas ``.str.<method>`` name -> polars ``.str.<method>`` name, for the methods
-# whose names differ between backends. Methods that match (contains, ...) need no
-# entry; methods whose *arguments* differ are translated in
-# :func:`polars_string_method`. A method absent from a backend's str namespace
-# simply won't run there. Shared by :class:`StringMethodOp` and the
-# column-expression ``StrExpr``.
-STR_POLARS_METHODS = {
-    "count": "count_matches",
-    "lower": "to_lowercase",
-    "upper": "to_uppercase",
-    "startswith": "starts_with",
-    "endswith": "ends_with",
-    "len": "len_chars",
-    "strip": "strip_chars",
-    "lstrip": "strip_chars_start",
-    "rstrip": "strip_chars_end",
-}
-
-
-def polars_string_method(obj, method: str, args=(), kwargs=None):
-    """Run a pandas-spelled ``.str.<method>`` call on a polars Series or expression."""
-    kwargs = kwargs or {}
-    if method == "replace":
-        return _polars_str_replace(obj, *args, **kwargs)
-    name = STR_POLARS_METHODS.get(method, method)
-    return getattr(obj.str, name)(*args, **kwargs)
-
-
-# A regex construct the Rust regex engine lacks (lookaround, inline groups and
-# flags) or that means something else there (a numbered backreference).
-_UNPORTABLE_REGEX = re.compile(r"\(\?|\\[1-9]")
-
-
-def polars_str_replace_unsupported(pat, repl=None, n=-1, case=None, flags=0,
-                                   regex=False) -> str | None:
-    """Why a pandas ``str.replace`` call has no exact polars translation, or None.
-
-    Only literal string patterns and replacements translate. Refused:
-    compiled patterns and callable replacements (pandas-only), ``case``/``flags``,
-    an empty pattern, lookarounds and backreferences (unsupported by Rust regex),
-    and a regex replacement containing ``\\`` or ``$`` (the two engines spell
-    group references differently).
-
-    Accepted divergence: on an *object*-dtype column, Python's ``$`` also
-    matches before a trailing newline, Rust's does not. pandas 3's default
-    ``str`` dtype already uses pyarrow's RE2, whose ``$`` is end-of-text like
-    Rust's, so a pipeline reading strings from files sees no difference.
-    """
-    if not isinstance(pat, str) or not isinstance(repl, str):
-        return "only string patterns and replacements translate"
-    if case not in (None, True) or flags:
-        return "case=/flags= are not translated"
-    if not isinstance(n, int) or isinstance(n, bool):
-        return f"n={n!r} is not an integer"
-    if regex:
-        if pat == "":
-            return "an empty regex pattern is not translated"
-        try:
-            re.compile(pat)
-        except re.error as exc:
-            return f"invalid regex: {exc}"
-        if _UNPORTABLE_REGEX.search(pat):
-            return "lookarounds, inline groups/flags and backreferences are not portable"
-        if "\\" in repl or "$" in repl:
-            return "group references in the replacement are not portable"
-    return None
-
-
-def polars_str_method_unsupported(method: str, args=(), kwargs=None) -> str | None:
-    """Why a pandas ``.str.<method>`` call has no exact polars translation, or None."""
-    if method == "replace":
-        return polars_str_replace_unsupported(*args, **(kwargs or {}))
-    name = STR_POLARS_METHODS.get(method, method)
-    if not hasattr(pl.col("_").str, name):
-        return f"polars has no .str.{name}"
-    return None
-
-
-def _polars_str_replace(obj, pat, repl=None, n=-1, case=None, flags=0, regex=False):
-    reason = polars_str_replace_unsupported(pat, repl, n, case, flags, regex)
-    if reason is not None:
-        # FIXME(#227): fall back to the recorded pandas call instead of failing.
-        raise NotImplementedError(
-            f"str.replace({pat!r}, {repl!r}, n={n}, case={case}, flags={flags}, "
-            f"regex={regex}) has no exact polars translation: {reason}.")
-    if n == 0:  # pandas makes no replacement for n=0
-        return obj
-    if n < 0:  # pandas replaces every match for any negative n
-        return obj.str.replace_all(pat, repl, literal=not regex)
-    return obj.str.replace(pat, repl, literal=not regex, n=n)
-
-
-_POLARS_DATETIME_KWARGS = frozenset({"format", "errors", "exact", "cache"})
-
-
-def polars_datetime_kwargs(args, kwargs) -> dict | None:
-    """Translate the pandas datetime options supported by Polars string parsing.
-
-    ``None`` means the call must stay unfused and use the pandas compatibility
-    path. Positional options are deliberately kept there because their ordering
-    differs between ``pd.to_datetime`` and ``Expr.str.to_datetime``.
-    """
-    if args:
-        return None
-    kwargs = dict(kwargs or {})
-    if not kwargs.keys() <= _POLARS_DATETIME_KWARGS:
-        return None
-    errors = kwargs.pop("errors", "raise")
-    if errors not in ("raise", "coerce"):
-        return None
-    translated = {key: kwargs[key] for key in ("format", "exact", "cache")
-                  if key in kwargs}
-    translated["strict"] = errors == "raise"
-    return translated
 
 
 class MapOp(Op):
     """Base for column-map operators: row-preserving, computes column values."""
     logical_family = "Map"
+    index_effect = IndexEffect.KEEP
 
     def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)
         self.output_type = OutputType.FRAME
 
-    def make_context(self, mode: str, inputs: list):
-        from stratum.optimizer.logical._column_expr import EvalContext
-        return EvalContext(frame=inputs[0], inputs=inputs, mode=mode)
-
 
 class CallMapOp(MapOp):
-    """A map that replays a recorded ``func(obj, ...)`` or ``obj.<method>(...)``."""
-    fields = ["func", "method", "args", "kwargs", "columns"]
+    """Base for the maps that replay a recorded pandas call on their receiver.
 
-    def __init__(self, func: Callable | None = None, method: str | None = None,
-        args: tuple | list = None, kwargs: dict = None,
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        if func is not None and method is not None:
-            raise ValueError("`func` and `method` are mutually exclusive; set exactly one (or neither for subclasses that override `process`).")
-        if method is not None:
-            name = method.upper()
-        elif func is not None:
-            name = func.__name__.upper()
-        else:
-            name = ""
-        super().__init__(name=name, inputs=inputs, outputs=outputs)
+    ``args``/``kwargs`` are the call's arguments after the receiver, which is
+    operand 0. Only the subclasses are built; each says which call it replays.
+    """
+    fields = ["args", "kwargs"]
+
+    def __init__(self, args: tuple | list = (), kwargs: dict | None = None,
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(inputs=inputs, outputs=outputs)
         if kwargs is not None:
             self.check_kwargs(kwargs)
-        self.func = func
-        self.method = method
         self.args = args
-        self.columns = columns
         self.kwargs = kwargs
-
-    def _extract_args_and_kwargs(self, inputs: list):
-        """Extract and process arguments and kwargs from inputs."""
-        # The object is the implicit primary operand (index 0). For func-based ops
-        # the first positional arg is that object slot, so skip it here.
-        _obj = inputs[0]
-        args = self.args[1:] if self.func is not None else self.args
-        _args = _resolve_args(args, inputs)
-        _kwargs = _resolve_kwargs(self.kwargs, inputs)
-        return _obj, _args, _kwargs
-
-    # Execution lives in the physical impls (physical/_map_execs.py); the logical
-    # op only carries config + the backend-agnostic operand plumbing
-    # (`_extract_args_and_kwargs`).
 
 
 class ApplyUDFOp(CallMapOp):
-    fields = ["args", "kwargs", "columns"]
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
+    """``df.apply(func, ...)`` or ``series.apply(func, ...)``."""
 
 
 class AssignOp(CallMapOp):
     """``df.assign(...)`` that does not fold into an :class:`AssignMapOp`."""
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=kwargs, inputs=inputs, outputs=outputs, columns=columns)
 
     def propagate_output_schema(self):
         """``df.assign(a=..., b=...)`` adds/overwrites the kwargs-named columns,
@@ -228,11 +77,28 @@ class AssignOp(CallMapOp):
         self.output_schema = _schema.add_columns(self.inputs[0].output_schema, new_columns)
 
 
-class DatetimeConversionOp(CallMapOp):
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(args=args, kwargs=dict(kwargs or {}), inputs=inputs,
-                         outputs=outputs, columns=columns)
+class DatetimeConversionOp(MapOp):
+    """Parses a column of strings into datetimes (``pd.to_datetime``).
+
+    ``format``: the ``strftime`` pattern, ``None`` to infer it. ``exact``: whether
+    the pattern must match the whole string (``None``: pandas' default).
+    ``cache``: reuse the result for repeated strings. ``errors``: ``"raise"`` on
+    an unparseable string, or ``"coerce"`` it to a missing value. Each may be an
+    ``OperandRef`` when graph-fed.
+    """
+    fields = ["format", "exact", "cache", "errors"]
+
+    ERRORS = ("raise", "coerce")
+
+    def __init__(self, format=None, exact=None, cache=True, errors="raise",
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="TO_DATETIME", inputs=inputs, outputs=outputs)
+        if not isinstance(errors, OperandRef) and errors not in self.ERRORS:
+            raise ValueError(f"errors must be one of {self.ERRORS}, got {errors!r}")
+        self.format = format
+        self.exact = exact
+        self.cache = cache
+        self.errors = errors
 
     def propagate_output_schema(self):
         """Converting a column keeps its name and leaves the dtype Unknown.
@@ -246,7 +112,7 @@ class DatetimeConversionOp(CallMapOp):
         Only a column operand is column-preserving. Given a *frame*,
         ``pd.to_datetime`` is the assembly form: it reads year/month/day columns
         and fans them in to one unnamed Series (any other frame raises), so the
-        input's names are not the output's.
+        input's names are not the output's. Extraction leaves that form opaque.
         """
         if self.inputs[0].output_type is not OutputType.SERIES:
             self.output_schema = None
@@ -254,25 +120,29 @@ class DatetimeConversionOp(CallMapOp):
         self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
 
 
-class StringMethodOp(CallMapOp):
+class StringMethodOp(MapOp):
     """A ``col.str.<method>(...)`` accessor call on a (string) column expression.
 
-    Produced by fusing ``AccessorMapOp(["str"]) + MethodCallOp`` during frame
+    Produced by fusing ``AttributeReadOp(["str"]) + MethodCallOp`` during frame
     extraction (see :func:`make_string_method_op`), so the ``.str`` accessor never
     survives as its own op. Making the str call a first-class map lets
     selection folding match it directly -- lifting it into a
     :class:`~stratum.optimizer.logical._column_expr.StrExpr` predicate -- instead of
     re-discovering the accessor+call shape inside the mask folder.
 
-    polars exposes the same call on its ``.str`` namespace, with a few methods
-    renamed (see :data:`STR_POLARS_METHODS`).
+    ``method`` keeps pandas' name and ``params`` holds the arguments passed, by
+    pandas' parameter names, in the signature's order; a graph-fed one is an
+    ``OperandRef``. The polars impl translates both (see
+    ``physical/_polars_translate.py``).
     """
-    fields = ["method", "args", "kwargs", "columns"]
+    fields = ["method", "params"]
 
-    def __init__(self, method: str, args: tuple | list = (), kwargs: dict = None,
-                 inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
-        super().__init__(method=method, args=args, kwargs=kwargs or {},
-                         inputs=inputs, outputs=outputs, columns=columns)
+    def __init__(self, method: str = None, params: dict = None,
+                 inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name=method.upper() if method is not None else "",
+                         inputs=inputs, outputs=outputs)
+        self.method = method
+        self.params = dict(params or {})
 
     # `.str` methods that map one input element to one output element, so the call
     # keeps its operand's columns and only changes their dtype. Extraction fuses
@@ -282,11 +152,8 @@ class StringMethodOp(CallMapOp):
     # collapses the column to a single string. Every member below was checked to
     # return a Series.
     ONE_TO_ONE_METHODS = frozenset({
-        # fused into polars expressions, see STR_POLARS_METHODS
         "count", "lower", "upper", "startswith", "endswith", "len",
-        "strip", "lstrip", "rstrip",
-        # scalar on the pandas compatibility path
-        "capitalize", "casefold", "contains", "find", "fullmatch", "match",
+        "strip", "lstrip", "rstrip", "capitalize", "casefold", "contains", "find", "fullmatch", "match",
         "pad", "removeprefix", "removesuffix", "repeat", "replace", "rfind",
         "slice", "swapcase", "title", "zfill",
         "isalnum", "isalpha", "isdecimal", "isdigit", "islower", "isnumeric",
@@ -303,101 +170,56 @@ class StringMethodOp(CallMapOp):
             self.output_schema = None
 
 
-class AccessorMapOp(MapOp):
-    """An attribute read off a frame or column, e.g. ``col.dt.year``.
+class DatetimeFieldOp(MapOp):
+    """Reads one field of each datetime, ``col.dt.<field>`` (``year``, ``hour``, ...).
 
-    Extraction wraps *any* attribute of a frame-like input (see
-    :func:`make_frame_get_attr`), so only the attributes listed in
-    :data:`ELEMENTWISE_ACCESSORS` are known to map column values one to one;
-    anything else (``.T``, ``.values``, ``.shape``) is opaque to the optimizer.
+    ``field`` keeps pandas' name and meaning; the polars impl translates it (see
+    ``physical/_polars_translate.py``).
     """
-    fields = ["attr_name"]
+    fields = ["field"]
 
-    # pandas `.dt.<attr>` -> polars `.dt.<method>`, for the attributes whose names
-    # differ between backends. Some also differ in *values*; those are corrected
-    # in :func:`polars_dt_attribute`.
-    POLARS_ATTR_NAME_MAP = {
-        "dayofweek": "weekday", "day_of_week": "weekday",
-        "dayofyear": "ordinal_day", "day_of_year": "ordinal_day",
-        "daysinmonth": "days_in_month",
-    }
+    # The `.dt` properties that yield one value per datetime, so the read keeps
+    # the input's columns and only changes their dtype. Extraction sees *any*
+    # attribute read, so this is an allow-list: `.dt.components` and
+    # `.dt.isocalendar` fan one column out into several (7 and 3 respectively),
+    # `.dt.tz` and `.dt.freq` are a single value, and a `.dt` method read without
+    # its call is a bound method. Those stay an AttributeReadOp.
+    FIELDS = frozenset({
+        "date", "day", "day_of_week", "day_of_year", "dayofweek", "dayofyear",
+        "days", "days_in_month", "daysinmonth", "hour", "is_leap_year",
+        "is_month_end", "is_month_start", "is_quarter_end", "is_quarter_start",
+        "is_year_end", "is_year_start", "microsecond", "microseconds",
+        "minute", "month", "nanosecond", "nanoseconds", "quarter", "second",
+        "seconds", "time", "timetz", "weekday", "year",
+    })
 
-    def __init__(self, attr_name: list[str] | str = None, inputs: list[Op] = None, outputs: list[Op] = None):
-        if attr_name is None:
-            self.attr_name = []
-        elif isinstance(attr_name, str):
-            self.attr_name = [attr_name]
-        else:
-            self.attr_name = attr_name
-        attr_name_str = ".".join(self.attr_name) if self.attr_name else '?'
-        super().__init__(name=attr_name_str, inputs=inputs, outputs=outputs)
-
-    # Accessor attributes whose `<ns>.<attr>` read keeps the input's columns
-    # and only changes their dtype, keyed by namespace. `make_frame_get_attr` wraps
-    # *any* attribute of a frame-like input, so this must be an allow-list: `.T`
-    # transposes, `.values` is an ndarray, `.shape` a tuple, and
-    # `.iloc`/`.loc`/`.index`/`.columns` are not column-preserving either. Only
-    # `.dt` reaches here (`.str` is fused into a `StringMethodOp` during
-    # extraction), and the mask folder gates on the same set (see
-    # `_column_expr._is_foldable`).
-    #
-    # The gate is per *attribute*, not per namespace: `.dt.components` and
-    # `.dt.isocalendar` fan one column out into several (7 and 3 respectively), so
-    # a namespace-level allow-list would report the input's single column for them.
-    # Listed below are the `.dt` properties that yield a Series; a `.dt` *method*
-    # is deliberately absent, since the schema of a bound method is meaningless
-    # (the enclosing call has no rule and stays unknown).
-    ELEMENTWISE_ACCESSORS = {
-        "dt": frozenset({
-            "date", "day", "day_of_week", "day_of_year", "dayofweek", "dayofyear",
-            "days", "days_in_month", "daysinmonth", "hour", "is_leap_year",
-            "is_month_end", "is_month_start", "is_quarter_end", "is_quarter_start",
-            "is_year_end", "is_year_start", "microsecond", "microseconds",
-            "minute", "month", "nanosecond", "nanoseconds", "quarter", "second",
-            "seconds", "time", "timetz", "weekday", "year",
-        }),
-    }
+    def __init__(self, field: str = None, inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name=f"dt.{field}", inputs=inputs, outputs=outputs)
+        self.field = field
 
     def propagate_output_schema(self):
-        """An accessor (``.dt.year``) keeps the column names, dtype Unknown.
-        Anything else, including a ``.dt`` attribute that fans out into several
-        columns, is unknown; see :data:`ELEMENTWISE_ACCESSORS`."""
-        allowed = (self.ELEMENTWISE_ACCESSORS.get(self.attr_name[0], ())
-                   if len(self.attr_name) == 2 else ())
-        if self.attr_name and self.attr_name[-1] in allowed:
-            self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
-        else:
-            self.output_schema = None
+        """A field read keeps the column names, dtype Unknown."""
+        self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
 
 
-def polars_dt_attribute(obj, attr: str):
-    """Read pandas' ``.dt.<attr>`` off a polars Series or expression.
+class AttributeReadOp(Op):
+    """An attribute read off a frame or column that the optimizer does not model:
+    ``.loc``, ``.T``, ``.values``, the ``.str``/``.dt``/``.cat`` namespaces, a ``.dt``
+    property that is not one value per datetime, ...
 
-    polars exposes the attributes as methods, some under other names (see
-    :data:`AccessorMapOp.POLARS_ATTR_NAME_MAP`), and counts two of them
-    differently: weekdays from Monday=1 (ISO 8601, pandas: Monday=0) and
-    nanoseconds past the second (pandas: past the microsecond, 0..999). The
-    result carries pandas' values in polars' integer dtype.
+    ``attr_name`` is the chain of names read, e.g. ``["cat", "codes"]``. Opaque and
+    pandas-only: it reads pandas' attributes as recorded. Not a map, since most of
+    these change the shape (``.T``) or leave the frame world (``.values``).
     """
-    if attr == "is_month_end":
-        return obj.dt.month_end() == obj
-    name = AccessorMapOp.POLARS_ATTR_NAME_MAP.get(attr, attr)
-    result = getattr(obj.dt, name)()
-    if name == "weekday":
-        return result - 1
-    if name == "nanosecond":
-        return result % 1000
-    return result
+    logical_family = "Attribute"
+    fields = ["attr_name"]
+    # `.T` turns the columns into rows and `.values` drops the labels.
+    index_effect = IndexEffect.NEW
 
-
-def polars_dt_attribute_unsupported(attr: str) -> str | None:
-    """Why pandas' ``.dt.<attr>`` has no polars translation, or None."""
-    if attr == "is_month_end":
-        return None
-    name = AccessorMapOp.POLARS_ATTR_NAME_MAP.get(attr, attr)
-    if not hasattr(pl.col("_").dt, name):
-        return f"polars has no .dt.{name}"
-    return None
+    def __init__(self, attr_name: list[str] = None, inputs: list[Op] = None,
+                 outputs: list[Op] = None):
+        self.attr_name = list(attr_name or [])
+        super().__init__(name=".".join(self.attr_name) or "?", inputs=inputs, outputs=outputs)
 
 
 class AssignMapOp(MapOp):
@@ -423,86 +245,92 @@ class AssignMapOp(MapOp):
 
 # --- Extraction: recorded calls -> call-based maps ----------------------------
 
-def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp:
-    # arg[0] is the input
-    if len(op.args) > 1:
-        args = op.args[1:]
-    else:
-        args = ()
-
-    new_op = DatetimeConversionOp(args=args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-    # Converting a column yields a column and a frame yields a frame: keep the
-    # input's kind (MapOp defaults to FRAME).
-    if op.inputs:
-        new_op.output_type = op.inputs[0].output_type
-    op.replace_output_of_inputs(new_op)
-    return new_op
+#: The ``pd.to_datetime`` arguments a :class:`DatetimeConversionOp` holds.
+_DATETIME_OPTIONS = frozenset({"format", "exact", "cache", "errors"})
 
 
-def _get_attr_output_type(attr_name: list, container: Op) -> OutputType:
-    """The kind an attribute access produces.
+def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp | None:
+    """Parse ``pd.to_datetime(column, ...)`` into a :class:`DatetimeConversionOp`.
 
-    ``.index`` is a sequence of labels whatever it is read off, so it is a SERIES
-    even when the container is a frame. There is no ``Index`` member in the
-    lattice and it would have no readers: every consumer we have treats an index
-    as a sequence of values. Every other accessor (``.dt.year``, ``.str``, ...)
-    keeps the container's own kind.
+    Returns ``None`` (the call stays opaque and runs on pandas as recorded) for
+    anything else: options other than ``format``, ``exact``, ``cache`` and
+    ``errors="raise"``/``"coerce"``, and a frame operand, which is the assembly
+    form. An option's value may be graph-fed.
     """
-    if attr_name == ["index"]:
-        return OutputType.SERIES
-    return container.output_type
+    call = bind_pandas_function(pd.to_datetime, op.args, op.kwargs)
+    if call is None:
+        return None
+    arg = call.pop("arg", None)
+    if (not isinstance(arg, OperandRef) or arg.k != 0
+            or op.inputs[0].output_type is not OutputType.SERIES
+            or set(call) - _DATETIME_OPTIONS):
+        return None
+    errors = call.get("errors", "raise")
+    if not isinstance(errors, OperandRef) and errors not in DatetimeConversionOp.ERRORS:
+        return None
+    return substitute_op(op, DatetimeConversionOp(
+        format=call.get("format"), exact=call.get("exact"),
+        cache=call.get("cache", True), errors=errors), keep_kind=True)
 
 
-def make_frame_get_attr(new_op: AccessorMapOp, op: GetAttrOp) -> Op:
-    input_ = op.inputs[0]
+def make_frame_get_attr(op: GetAttrOp) -> Op:
+    """Parse an attribute read off frame-world data.
+
+    ``.index`` reads the row labels, ``.shape`` and ``.columns`` the structure, and
+    ``.dt.<field>`` a datetime field. Any other read becomes an opaque
+    :class:`AttributeReadOp`; a read off one extends its chain of names.
+    """
     if op.attr_name == "index" or op.attr_name == ["index"]:
-        index_op = IndexAccessOp(inputs=op.inputs, outputs=op.outputs)
-        op.replace_output_of_inputs(index_op)
-        return index_op
+        return substitute_op(op, IndexAccessOp())
     structure_op = make_structure_read_op(op)
     if structure_op is not None:
         return structure_op
-    if isinstance(input_, AccessorMapOp):
-        # Fuse chained GetAttr operations
-        concat_attr_name = input_.attr_name.copy()
-        attr_to_add = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
-        concat_attr_name.extend(attr_to_add)
+    input_ = op.inputs[0]
+    attr_name = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
+    if not isinstance(input_, AttributeReadOp):
+        new_op = substitute_op(op, AttributeReadOp(attr_name=attr_name))
+        # An attribute read keeps the container's kind.
+        new_op.output_type = input_.output_type
+        return new_op
 
-        new_input = input_.inputs[0]
-        new_op = AccessorMapOp(attr_name=concat_attr_name, inputs=[new_input], outputs=op.outputs)
-        new_op.output_type = _get_attr_output_type(concat_attr_name, new_input)
-
-        if len(input_.outputs) > 1:
-            input_.outputs.remove(op)
-            new_input.add_output(new_op)
-        else:
-            new_input.replace_output(input_, new_op)
-
+    # Fuse the chained read with the one it reads off.
+    chain = [*input_.attr_name, *attr_name]
+    source = input_.inputs[0]
+    if len(chain) == 2 and chain[0] == "dt" and chain[1] in DatetimeFieldOp.FIELDS:
+        new_op = DatetimeFieldOp(field=chain[1], inputs=[source], outputs=op.outputs)
     else:
-        # Convert single GetAttrOp to AccessorMapOp
-        attr_name = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
-        new_op = AccessorMapOp(attr_name=attr_name, inputs=op.inputs, outputs=op.outputs)
-        new_op.output_type = _get_attr_output_type(attr_name, input_)
-        op.replace_output_of_inputs(new_op)
+        new_op = AttributeReadOp(attr_name=chain, inputs=[source], outputs=op.outputs)
+    new_op.output_type = input_.output_type
+    if len(input_.outputs) > 1:
+        input_.outputs.remove(op)
+        source.add_output(new_op)
+    else:
+        source.replace_output(input_, new_op)
     return new_op
 
 
-def make_string_method_op(op: MethodCallOp) -> StringMethodOp:
+def make_string_method_op(op: MethodCallOp) -> StringMethodOp | None:
     """Fuse ``col.str.<method>(...)`` into a single :class:`StringMethodOp`.
 
-    ``op.inputs[0]`` is the ``AccessorMapOp(["str"])`` accessor; the new op
+    ``op.inputs[0]`` is the ``AttributeReadOp(["str"])`` accessor; the new op
     takes the *column* (the accessor's source) as its primary operand instead, so
-    the accessor drops out of the graph. The method's ``args``/``kwargs`` (which may
-    carry ``OperandRef``s into the remaining inputs) and those inputs are unchanged,
-    so operand indices stay valid without renumbering.
+    the accessor drops out of the graph. The call is bound against pandas'
+    ``.str`` method; its arguments (which may carry ``OperandRef``s into the
+    remaining inputs) and those inputs are unchanged, so operand indices stay
+    valid without renumbering. A call pandas would reject stays opaque.
 
     The accessor is only detached when this was its last consumer -- a ``.str``
     accessor shared by several method calls (not the common case) stays in the graph
     until the final call is fused.
     """
+    if not hasattr(pd.Series.str, op.method_name):
+        return None
+    params = op.bind_pandas(owner=pd.Series.str)
+    if params is None:
+        return None
     accessor = op.inputs[0]
     column = accessor.inputs[0]
-    new_op = StringMethodOp(method=op.method_name, args=op.args, kwargs=op.kwargs,
+    new_op = StringMethodOp(method=op.method_name, params=params,
                             inputs=[column, *op.inputs[1:]], outputs=list(op.outputs))
     # `.str.<method>` keeps the column's tabular kind (a series stays a series).
     new_op.output_type = accessor.output_type
@@ -519,21 +347,6 @@ def make_string_method_op(op: MethodCallOp) -> StringMethodOp:
 
 
 # --- Folding: assign subgraphs -> AssignMapOp ---------------------------------
-
-def _detach_absorbed_and_rewire(op: Op, new_op: MapOp, folder: _Folder) -> None:
-    """Detach absorbed ops and rewire kept producers to ``new_op``.
-
-    Absorbed nodes are unlinked from their inputs and cleared; the source and
-    each kept leaf op feed ``new_op`` in place of the folded consumer.
-    Downstream consumers of ``op`` are rewired by the caller.
-    """
-    for node in folder.absorbed:
-        node.detach()
-    for producer in new_op.inputs:
-        producer.outputs = [o for o in producer.outputs if o is not op]
-        producer.add_output(new_op)
-    op.inputs = []
-
 
 def _is_scalar_constant(value) -> bool:
     """Whether an assign kwarg constant can fold to a ``Const`` entry.
@@ -554,7 +367,9 @@ def make_assign_map_op(op: MethodCallOp) -> AssignMapOp | None:
     folds once. Returns ``None`` for non-foldable calls (positional args or a
     sequence-valued constant kwarg), leaving the plain ``AssignOp`` in place.
     """
-    from stratum.optimizer.logical._column_expr import Const, _Folder
+    # The folder absorbs the call-based maps defined above, so it imports this
+    # module and has to be imported lazily here.
+    from stratum.optimizer.logical._expr_folding import _Folder
     if op.args:
         return None
     kwargs = op.kwargs or {}
@@ -580,5 +395,5 @@ def make_assign_map_op(op: MethodCallOp) -> AssignMapOp | None:
 
     new_op = AssignMapOp(entries=entries,
                          inputs=[src, *folder.leaf_ops], outputs=list(op.outputs))
-    _detach_absorbed_and_rewire(op, new_op, folder)
+    folder.install(new_op, replaced=[op])
     return new_op

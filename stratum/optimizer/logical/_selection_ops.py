@@ -12,13 +12,11 @@ which leaves it an opaque method call that runs on pandas exactly as recorded.
 """
 from __future__ import annotations
 
-import inspect
-
-import pandas as pd
-
+from stratum.optimizer.logical._base import IndexEffect
 from stratum.optimizer.logical._ops import (
-    FRAME_TYPES, OperandRef, OutputType, GetItemOp, MethodCallOp, Op)
-from stratum.optimizer.logical._column_expr import ColumnExpr, fold_column_expr
+    FRAME_TYPES, OperandRef, OutputType, GetItemOp, MethodCallOp, Op, substitute_op)
+from stratum.optimizer.logical._column_expr import ColumnExpr
+from stratum.optimizer.logical._expr_folding import _Folder
 
 
 class SelectionOp(Op):
@@ -38,6 +36,13 @@ class SelectionOp(Op):
         """Rows go, columns stay: the source schema passes through unchanged."""
         # A selection with no source edge has nothing to pass through.
         self.output_schema = self.inputs[0].output_schema if self.inputs else None
+
+    @property
+    def index_effect(self):
+        """The surviving rows keep their labels, unless they are renumbered."""
+        if getattr(self, "ignore_index", False) is True:
+            return IndexEffect.DEFAULT
+        return IndexEffect.NEW
 
     # No custom __str__: the base IRNode renders ``<class>(<name>) [df]``. While
     # logical it shows the ``Selection`` family; once lowered, the bound impl
@@ -101,6 +106,11 @@ class SliceSelectionOp(SelectionOp):
     """
     fields = ["n", "from_end"]
 
+    @property
+    def index_effect(self):
+        # The first rows of 0..n-1 are 0..k-1; the last ones are not.
+        return IndexEffect.NEW if self.from_end else IndexEffect.PREFIX
+
     def __init__(self, n=5, from_end: bool = False,
                  inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name="tail" if from_end else "head", inputs=inputs, outputs=outputs)
@@ -148,25 +158,6 @@ class DropLabelsSelectionOp(SelectionOp):
 # --- Extraction: recorded pandas call -> selection fields ----------------------
 
 _ROW_AXES = (0, "index", "rows")
-
-
-def _bind_call(op: MethodCallOp) -> dict | None:
-    """The recorded call's arguments by parameter name, or ``None`` when pandas
-    would reject them (unknown keyword, too many positionals, ...).
-
-    Binds against the signature of the receiver's own class, since a Series and
-    a DataFrame method can take different parameters. Only the arguments actually
-    passed are returned; pandas defaults stay implicit.
-    """
-    owner = pd.Series if op.inputs[0].output_type is OutputType.SERIES else pd.DataFrame
-    try:
-        bound = inspect.signature(getattr(owner, op.method_name)).bind(
-            None, *(op.args or ()), **(op.kwargs or {}))
-    except TypeError:
-        return None
-    arguments = dict(bound.arguments)
-    arguments.pop("self")
-    return arguments
 
 
 def _is_static(value) -> bool:
@@ -255,16 +246,13 @@ def make_selection_op(op: MethodCallOp) -> SelectionOp | None:
     selection we can model; see the module docstring.
     """
     cls, parse = _SELECTION_PARSERS[op.method_name]
-    call = _bind_call(op)
+    call = op.bind_pandas()
     if call is None:
         return None
     fields = parse(call, op.inputs[0].output_type is OutputType.SERIES)
     if fields is None:
         return None
-    new_op = cls(**fields, inputs=op.inputs, outputs=op.outputs)
-    new_op.output_type = op.inputs[0].output_type
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    return substitute_op(op, cls(**fields), keep_kind=True)
 
 
 # --- Mask selection: df[bool_series] -> MaskSelectionOp(predicate) -------------
@@ -297,27 +285,16 @@ def make_mask_selection_op(op: GetItemOp) -> MaskSelectionOp:
 
     Nodes consumed only by the mask are absorbed into the predicate and detached; the
     rest stay in the graph as ``OperandLeaf`` inputs (``inputs = [src, *leaf_ops]``).
+    Downstream consumers of the mask are rewired by the caller via
+    ``op.replace_input_of_outputs(sel)``.
     """
     src = op.inputs[0]
-    key_op = op.inputs[op.key.k]
+    folder = _Folder(src)
+    predicate = folder.fold(op.inputs[op.key.k], root_consumer=op)
 
-    predicate, absorbed, leaf_ops = fold_column_expr(key_op, src, root_consumer=op)
-
-    sel = MaskSelectionOp(predicate=predicate, inputs=[src, *leaf_ops],
+    sel = MaskSelectionOp(predicate=predicate, inputs=[src, *folder.leaf_ops],
                           outputs=list(op.outputs))
     # Filtering rows keeps the container's kind: a masked series is still a series.
     sel.output_type = src.output_type
-
-    # Detach every absorbed op from the graph.
-    for node in absorbed:
-        node.detach()
-
-    # The source and each kept leaf op now feed the selection in place of the mask
-    # GetItem / the detached expression nodes they used to feed. Other (external)
-    # consumers of a leaf op are left untouched. Downstream consumers of the mask
-    # are rewired by the caller via ``op.replace_input_of_outputs(sel)``.
-    for producer in (src, *leaf_ops):
-        producer.outputs = [o for o in producer.outputs if o is not op]
-        producer.add_output(sel)
-    op.inputs = []
+    folder.install(sel, replaced=[op])
     return sel

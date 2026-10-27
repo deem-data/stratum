@@ -10,7 +10,7 @@ import stratum
 from stratum._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
-from stratum.optimizer.logical._map_ops import polars_string_method
+from stratum.optimizer.physical._polars_translate import polars_string_method
 from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._map_execs import PolarsAssignMapOp, PolarsStringMethodOp
 from stratum.optimizer.physical._selection_execs import PolarsMaskSelectionOp
@@ -116,7 +116,7 @@ def test_common_regex_replacement_stays_native(monkeypatch, expression):
     monkeypatch.setattr(pl.Series, "to_pandas", reject_pandas_conversion)
     series = pl.Series("bbl", ["1000010001.0", "2000020002", None])
     obj = pl.col("bbl") if expression else series
-    result = polars_string_method(obj, "replace", (r"\.0$", ""), {"regex": True})
+    result = polars_string_method(obj, "replace", {"pat": r"\.0$", "repl": "", "regex": True})
     if expression:
         result = series.to_frame().select(result).to_series()
     assert result.to_list() == ["1000010001", "2000020002", None]

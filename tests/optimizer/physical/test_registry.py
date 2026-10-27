@@ -8,11 +8,9 @@ from stratum.optimizer.physical import (
     RustPhysicalImpl,
     build_default_physical_registry,
 )
+from stratum.optimizer.logical._source_ops import (
+    InMemoryFrameOp, LoadNumpyOp, ReadCSVOp, ReadParquetOp)
 from stratum.optimizer.physical._source_execs import (
-    InMemoryFrame,
-    NumpyLoad,
-    ReadCSV,
-    ReadParquet,
     PandasInMemoryFrame,
     PandasReadCSV,
     PandasReadParquet,
@@ -55,9 +53,9 @@ def test_default_registry_discovers_registered_operator_types():
     assert ConcatOp in registry.op_types()
     assert NumericOp not in registry.op_types()
 
-    # Standalone construction imports source and transformer modules, so the
-    # already-migrated abstract physical operators are discoverable directly.
-    for op_type in (ReadCSV, ReadParquet, InMemoryFrame, NumpyLoad,
+    # Standalone construction imports source and transformer modules, so their
+    # operators are discoverable directly.
+    for op_type in (ReadCSVOp, ReadParquetOp, InMemoryFrameOp, LoadNumpyOp,
                     StringEncoderOp):
         assert op_type in registry.op_types()
 
@@ -90,9 +88,9 @@ def test_default_registry_discovers_registered_operator_types():
         assert candidate.backend_name == "sklearn-skrub"
 
     source_candidates = {
-        ReadCSV: {PandasReadCSV, PolarsReadCSV},
-        ReadParquet: {PandasReadParquet, PolarsReadParquet},
-        InMemoryFrame: {PandasInMemoryFrame, PolarsInMemoryFrame},
+        ReadCSVOp: {PandasReadCSV, PolarsReadCSV},
+        ReadParquetOp: {PandasReadParquet, PolarsReadParquet},
+        InMemoryFrameOp: {PandasInMemoryFrame, PolarsInMemoryFrame},
     }
     for op_type, impl_classes in source_candidates.items():
         assert {candidate.impl_class for candidate in registry.candidates_for(op_type)} == impl_classes
@@ -150,7 +148,6 @@ def test_registry_registers_and_queries_impls_by_registered_type():
         supports=lambda op, ctx: isinstance(op, DummyPhysicalOp),
         cost=lambda op, stats: 1.0,
         exec_mem=lambda op, stats: 1,
-        execute=lambda op, mode, inputs: ("concat", mode, len(inputs)),
     )
     rust_impl = PhysicalImpl(
         op_type=DummyPhysicalOp,
@@ -160,14 +157,13 @@ def test_registry_registers_and_queries_impls_by_registered_type():
         supports=lambda op, ctx: isinstance(op, DummyPhysicalOp),
         cost=lambda op, stats: 0.5,
         exec_mem=lambda op, stats: 1,
-        execute=lambda op, mode, inputs: ("rust-concat", mode, len(inputs)),
     )
 
     registry.register(pandas_impl)
     registry.register(rust_impl)
 
     assert registry.candidates_for(DummyPhysicalOp) == (pandas_impl, rust_impl)
-    assert registry.candidates_for_op(DummyPhysicalOp()) == (pandas_impl, rust_impl)
+    assert registry.candidates_for(DummyPhysicalOp()) == (pandas_impl, rust_impl)
     assert registry.candidates_for(DummyPhysicalOp, backend_name="rust") == (rust_impl,)
     assert registry.backends_for(DummyPhysicalOp) == ("pandas", "rust")
     assert registry.candidates_by_backend("pandas") == (pandas_impl,)

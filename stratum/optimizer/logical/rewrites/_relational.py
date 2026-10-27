@@ -14,7 +14,7 @@ import operator
 from stratum.optimizer._op_utils import rewrite_pass
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import (
-    AggExpr, BinOpExpr, Col, ColumnMethodExpr, Const, OperandLeaf, UnaryOpExpr)
+    AggExpr, BinOpExpr, Col, Const, IsinExpr, OperandLeaf, UnaryOpExpr)
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._join_ops import FilteringJoinOp
 from stratum.optimizer.logical._map_ops import AssignMapOp
@@ -25,20 +25,14 @@ from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 
 
-def _is_isin(expr) -> bool:
-    """``col.isin(values)`` with the single positional the column method admits."""
-    return (isinstance(expr, ColumnMethodExpr) and expr.method == "isin"
-            and len(expr.args) == 1 and not expr.kwargs)
-
-
 def _membership_predicate(predicate):
     """``(anti, (child, values))`` for a membership test, else ``None``."""
     anti = False
     if isinstance(predicate, UnaryOpExpr) and predicate.op is operator.invert:
         anti, predicate = True, predicate.operand
-    if not _is_isin(predicate):
+    if not isinstance(predicate, IsinExpr):
         return None
-    return anti, (predicate.operand, predicate.args[0])
+    return anti, (predicate.operand, predicate.values)
 
 
 def _left_key(op: MaskSelectionOp, child) -> str | None:
@@ -155,8 +149,8 @@ def _match_counted_group_keys(op: Op):
             or agg.output_type is not OutputType.SERIES
             or agg.outputs != [sort or selection]
             or len(agg.inputs) != 1
-            or agg.options != {"sort": False, "dropna": True,
-                               "observed": False, "sort_categories": True}):
+            or (agg.sort_keys, agg.drop_null_keys, agg.observed, agg.keys_as_columns,
+                agg.level, agg.sort_categories) != (False, True, False, False, None, True)):
         return None
     values = OperandLeaf(OperandRef(0))
     if (agg.grouping != (values,)
@@ -181,7 +175,7 @@ def _replace_counted_group_keys(op: IndexAccessOp, selection: MaskSelectionOp,
     count = AggregateOp(
         grouped=True, grouping=(Col(key),),
         aggregations=((count_name, AggExpr("size", Col(key))),),
-        options={"sort": False, "dropna": agg.options["dropna"]},
+        sort_keys=False, drop_null_keys=agg.drop_null_keys,
         output_type=OutputType.FRAME, inputs=[source])
     filtered = MaskSelectionOp(
         predicate=BinOpExpr(operator.ge, Col(count_name),
@@ -223,12 +217,10 @@ def _kept_columns(projection: Op) -> list[str] | None:
         return names
     if isinstance(projection, DropOp):
         source = projection.inputs[0].output_schema
-        dropped = _schema.as_column_list(projection._dropped_columns())
-        kwargs = projection.kwargs or {}
+        dropped = _schema.as_column_list(projection.columns)
         if (not _schema.is_known(source) or dropped is None
                 or not set(dropped) <= set(source)
-                or not set(kwargs) <= {"columns", "axis"}
-                or projection.args and "columns" in kwargs):
+                or projection.level is not None or projection.errors != "raise"):
             return None
         return [name for name in source if name not in dropped]
     return None

@@ -5,8 +5,8 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 from stratum.optimizer._optimize import  optimize
 from stratum.optimizer._optimize import OptConfig
-from stratum.optimizer.logical._algebraic_rewrites import AlgebraicRewritesConfig
-from stratum.optimizer.logical._numeric_rewrites import match_self_operation
+from stratum.optimizer.logical.rewrites._algebraic import AlgebraicRewritesConfig
+from stratum.optimizer.logical.rewrites._numeric import match_self_operation
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer.logical._ops import OperandRef, ValueOp
 

@@ -6,9 +6,9 @@ import pandas as pd
 import stratum as st
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._dataframe_ops import (
-    ApplyUDFOp, ColumnProjectionOp, DatetimeConversionOp, AccessorMapOp)
+    ApplyUDFOp, AttributeReadOp, ColumnProjectionOp, DatetimeConversionOp, DatetimeFieldOp)
 from stratum.optimizer.logical._ops import GetItemOp, OutputType, BinOp
-from stratum.optimizer.physical._source_execs import NumpyLoad
+from stratum.optimizer.logical._source_ops import LoadNumpyOp
 from tests._helpers import npy_file
 from .test_dataframe_ops import optimize
 
@@ -55,11 +55,11 @@ class TestOutputTypeInference(unittest.TestCase):
         self.assertIs(OutputType.SERIES, binops[0].output_type)
 
     def test_npy_source_is_matrix(self):
-        # An npy read lowers to the physical NumpyLoad source, which is a MATRIX.
+        # An npy read is a LoadNumpyOp, which is a MATRIX.
         with npy_file(np.array([1, 2, 3])) as path:
             data = st.as_data_op(path).skb.apply_func(np.load)
             ops = optimize(data, OptConfig(dataframe_ops=True))
-        sources = [o for o in ops if isinstance(o, NumpyLoad)]
+        sources = [o for o in ops if isinstance(o, LoadNumpyOp)]
         self.assertEqual(1, len(sources))
         self.assertIs(OutputType.MATRIX, sources[0].output_type)
 
@@ -79,17 +79,17 @@ class TestOutputTypeInference(unittest.TestCase):
 
     def test_getattr_after_datetime_conversion_is_series(self):
         # date.dt.year : a `.dt` accessor only exists on a SERIES, and `.year`
-        # keeps it a SERIES -> the fused AccessorMapOp is a SERIES.
+        # keeps it a SERIES -> the fused DatetimeFieldOp is a SERIES.
         date = st.as_data_op(self.dt_df)["datetime"].skb.apply_func(
             pd.to_datetime, format="%Y-%m-%d %H:%M:%S")
         ops = optimize(date.dt.year, OptConfig(dataframe_ops=True))
-        self.assertIs(OutputType.SERIES, self._one(ops, AccessorMapOp).output_type)
+        self.assertIs(OutputType.SERIES, self._one(ops, DatetimeFieldOp).output_type)
 
     def test_getattr_on_frame_stays_frame(self):
         # `.T` is a frame-level attribute (unlike `.str`/`.dt`, which are
         # series-only), so a GetAttr on a frame stays a FRAME.
         ops = optimize(st.as_data_op(self.df).T, OptConfig(dataframe_ops=True))
-        self.assertIs(OutputType.FRAME, self._one(ops, AccessorMapOp).output_type)
+        self.assertIs(OutputType.FRAME, self._one(ops, AttributeReadOp).output_type)
 
     def test_apply_on_column_is_series(self):
         # df["x"].apply(f) operates on a column -> SERIES.

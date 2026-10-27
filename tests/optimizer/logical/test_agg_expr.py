@@ -5,20 +5,22 @@ import pandas as pd
 import polars as pl
 
 from stratum.optimizer.logical._column_expr import (
-    AGG_PARAMS, AggExpr, BinOpExpr, Col, Const, DtExpr, EvalContext, OperandLeaf,
+    AGG_PARAMS, AggExpr, BinOpExpr, Col, Const, DtExpr, OperandLeaf,
     StrExpr, UnaryOpExpr)
 from stratum.optimizer.logical._ops import OperandRef
+from stratum.optimizer.physical._expressions import (
+    EvalContext, polars_unsupported, to_pandas, to_pandas_query, to_polars)
 
 # Reductions polars can express; `sem` has no polars equivalent.
 _POLARS_UNSUPPORTED = {"sem", "idxmin", "idxmax"}
 
 
 def _pandas(expr, df, inputs=()):
-    return expr.to_pandas(EvalContext(frame=df, inputs=list(inputs)))
+    return to_pandas(expr, EvalContext(frame=df, inputs=list(inputs)))
 
 
 def _polars(expr, df, inputs=()):
-    return df.select(expr.to_polars(EvalContext(frame=df, inputs=list(inputs)))).item()
+    return df.select(to_polars(expr, EvalContext(frame=df, inputs=list(inputs)))).item()
 
 
 class TestAggExprValidation(unittest.TestCase):
@@ -145,8 +147,8 @@ class TestAggExprEvaluation(unittest.TestCase):
                 expr = AggExpr(func, Col("a"))
                 got = _pandas(expr, self.pdf)
                 if func in _POLARS_UNSUPPORTED:
-                    with self.assertRaises(NotImplementedError):
-                        expr.to_polars(EvalContext(frame=self.pldf, inputs=[]))
+                    # Refused at plan time, so a polars impl never compiles it.
+                    self.assertIn(func, polars_unsupported(expr))
                     continue
                 self.assertAlmostEqual(float(got), float(_polars(expr, self.pldf)),
                                        msg=f"{func} disagrees across backends")
@@ -205,9 +207,7 @@ class TestAggExprEvaluation(unittest.TestCase):
 
     def test_polars_refuses_parameters_it_cannot_express(self):
         expr = AggExpr("sum", Col("a"), {"min_count": 1})
-        with self.assertRaises(NotImplementedError) as cm:
-            expr.to_polars(EvalContext(frame=self.pldf, inputs=[]))
-        self.assertIn("min_count", str(cm.exception))
+        self.assertIsNotNone(polars_unsupported(expr))
 
     def test_polars_ignores_parameters_left_at_their_pandas_default(self):
         expr = AggExpr("sum", Col("a"), {"skipna": True, "numeric_only": False,
@@ -215,7 +215,7 @@ class TestAggExprEvaluation(unittest.TestCase):
         self.assertAlmostEqual(self.pdf["a"].sum(), _polars(expr, self.pldf))
 
     def test_aggregate_is_not_a_query_predicate(self):
-        self.assertIsNone(AggExpr("sum", Col("a")).to_pandas_query({}))
+        self.assertIsNone(to_pandas_query(AggExpr("sum", Col("a")), {}))
 
 
 if __name__ == "__main__":

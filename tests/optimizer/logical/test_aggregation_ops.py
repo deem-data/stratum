@@ -17,7 +17,7 @@ from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
-from stratum.optimizer.logical._source_ops import DataSourceOp
+from stratum.optimizer.logical._source_ops import InMemoryFrameOp
 from stratum.optimizer.logical._ops import MethodCallOp, Op, OperandRef, OutputType
 from stratum.runtime._buffer_pool import BufferPool
 from .test_dataframe_ops import (
@@ -105,7 +105,7 @@ class TestAggregateOp(unittest.TestCase):
     def test_options_reach_the_groupby(self):
         df = pd.DataFrame({"g": ["b", "a", "b"], "v": [1, 2, 3]})
         op = AggregateOp(grouped=True, grouping=(Col("g"),),
-                         aggregations=_wildcard("sum"), options={"sort": False})
+                         aggregations=_wildcard("sum"), sort_keys=False)
         pd.testing.assert_frame_equal(run_op(op, df),
                                       df.groupby("g", sort=False).agg("sum"))
 
@@ -149,7 +149,7 @@ class TestAggregateOp(unittest.TestCase):
             self.assertEqual(["a", "b"], run_op(sorted_op, pldf)["g"].to_list())
             unsorted = AggregateOp(grouped=True, grouping=(Col("g"),),
                                    aggregations=(("s", AggExpr("sum", Col("v"))),),
-                                   options={"sort": False})
+                                   sort_keys=False)
             self.assertEqual(["b", "a"], run_op(unsorted, pldf)["g"].to_list())
 
     def test_backends_agree_on_grouped_sums(self):
@@ -324,7 +324,7 @@ class TestAggregateHelpers(unittest.TestCase):
 
     def test_is_aggregation_non_groupby_input_is_false(self):
         agg = MethodCallOp("sum", args=(), kwargs={})
-        agg.inputs = [DataSourceOp(data=pd.DataFrame({"a": [1]}))]
+        agg.inputs = [InMemoryFrameOp(data=pd.DataFrame({"a": [1]}))]
         self.assertFalse(_is_aggregation(agg))
 
     def test_is_aggregation_multi_consumer_groupby_is_false(self):
@@ -358,7 +358,7 @@ class TestAggregateHelpers(unittest.TestCase):
         self.assertEqual("sum", _extract_aggregations(agg))
 
     def test_make_aggregate_op_normalizes_direct_method(self):
-        df = DataSourceOp(data=pd.DataFrame({"g": ["a"], "v": [1]}))
+        df = InMemoryFrameOp(data=pd.DataFrame({"g": ["a"], "v": [1]}))
         groupby = MethodCallOp("groupby", args=("g",), kwargs={})
         groupby.inputs = [df]
         df.outputs = [groupby]
@@ -399,7 +399,7 @@ class TestAggregateHelpers(unittest.TestCase):
         # A list spec produces MultiIndex-keyed columns in pandas; the expression
         # grammar has no spelling for it, so the chain is left unfused.
         _, agg = _groupby_agg_pair(agg_method="agg", agg_args=(["sum", "mean"],))
-        agg.inputs[0].inputs = [DataSourceOp(data=pd.DataFrame({"g": ["a"]}))]
+        agg.inputs[0].inputs = [InMemoryFrameOp(data=pd.DataFrame({"g": ["a"]}))]
         self.assertIsNone(make_aggregate_op(agg))
 
 
@@ -569,7 +569,30 @@ class TestAggregateRewrites(unittest.TestCase):
         data = st.as_data_op(self.df).groupby("g", sort=False).agg("sum")
         ops, agg_ops = self._agg_ops(data)
         self.assertEqual(1, len(agg_ops))
-        self.assertEqual({"sort": False}, agg_ops[0].options)
+        self.assertIs(False, agg_ops[0].sort_keys)
+        self.assertIs(True, agg_ops[0].drop_null_keys)
+        pd.testing.assert_frame_equal(
+            self._run_plan(ops), self.df.groupby("g", sort=False).agg("sum"))
+
+    def test_groupby_options_become_fields(self):
+        data = st.as_data_op(self.df).groupby(
+            "g", sort=False, dropna=False, observed=False, as_index=False).agg("sum")
+        _, (agg,) = self._agg_ops(data)
+        self.assertEqual((False, False, False, True, None),
+                         (agg.sort_keys, agg.drop_null_keys, agg.observed,
+                          agg.keys_as_columns, agg.level))
+
+    def test_groupby_option_defaults_are_pandas(self):
+        _, (agg,) = self._agg_ops(st.as_data_op(self.df).groupby("g").agg("sum"))
+        self.assertEqual((True, True, True, False, None, False),
+                         (agg.sort_keys, agg.drop_null_keys, agg.observed,
+                          agg.keys_as_columns, agg.level, agg.sort_categories))
+
+    def test_a_graph_fed_groupby_option_does_not_fuse(self):
+        sort = st.as_data_op(False).skb.apply_func(lambda flag: flag)
+        data = st.as_data_op(self.df).groupby("g", sort=sort).agg("sum")
+        ops, agg_ops = self._agg_ops(data)
+        self.assertEqual(0, len(agg_ops))
         pd.testing.assert_frame_equal(
             self._run_plan(ops), self.df.groupby("g", sort=False).agg("sum"))
 
@@ -681,7 +704,7 @@ class TestValueCountsExtraction(unittest.TestCase):
     def test_the_groupby_runs_unsorted_so_the_sort_can_break_ties(self):
         # A key-sorted groupby would replace pandas' first-appearance tie order.
         agg = make_value_counts_ops(_value_counts()).inputs[0]
-        self.assertIs(False, agg.options["sort"])
+        self.assertIs(False, agg.sort_keys)
 
     def test_series_counts_are_a_series_and_frame_counts_stay_unfused(self):
         call = _value_counts()
@@ -708,7 +731,7 @@ class TestValueCountsExtraction(unittest.TestCase):
         for dropna in (True, False):
             with self.subTest(dropna=dropna):
                 agg = make_value_counts_ops(_value_counts(dropna=dropna)).inputs[0]
-                self.assertIs(dropna, agg.options["dropna"])
+                self.assertIs(dropna, agg.drop_null_keys)
 
     def test_options_without_a_spelling_here_are_refused(self):
         # normalize is a ratio not a reduction, bins buckets the values first,

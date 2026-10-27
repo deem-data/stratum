@@ -11,15 +11,16 @@ from skrub._data_ops._choosing import BaseChoice, Choice, DiscretizedNumericChoi
 from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, Scoring, SplitX, Var, _wrap_estimator
 from skrub._data_ops._utils import NULL
 from skrub._utils import PassThrough
-from pandas import DataFrame
+from pandas import DataFrame, Series
 import polars as pl
 from polars import DataFrame as PlDataFrame
+from stratum.frontend._pandas_calls import bind_pandas_method
 from stratum.frontend._skrub_graph import _collect_child_data_ops
 from stratum.optimizer.logical import _schema
 # Shared IR foundation. Re-exported below so existing ``from ..._ops import X``
 # call sites (OutputType, OperandRef, is_frame_like, config_key, ...) keep working.
 from stratum.optimizer.logical._base import (
-    IRNode, OutputType, FRAME_TYPES, is_frame_like, OperandRef,
+    IRNode, IndexEffect, OutputType, FRAME_TYPES, has_default_labels, is_frame_like, OperandRef,
     _resolve_operand, _resolve_args, _resolve_kwargs, remap_operand_refs,
     config_key, estimator_key, clone_value, rebuild_dict,
     _ALL_SELECTOR_KEY, _GRAPH_PARAM_KEY,
@@ -144,7 +145,24 @@ class Op(IRNode):
         return (type(self), input_ids, config)
 
 
+def substitute_op(op: Op, new_op: Op, keep_kind: bool = False) -> Op:
+    """Put ``new_op`` in ``op``'s place and return it.
+
+    ``new_op`` takes ``op``'s inputs and outputs, and ``op``'s producers feed it
+    instead; extraction rewires the consumers. ``keep_kind``: ``new_op``
+    produces what ``op``'s receiver (input 0) is, a frame or a series, as a row
+    selection or a column-wise map does.
+    """
+    new_op.inputs, new_op.outputs = op.inputs, op.outputs
+    if keep_kind and op.inputs:
+        new_op.output_type = op.inputs[0].output_type
+    op.replace_output_of_inputs(new_op)
+    return new_op
+
+
 class ImplOp(Op):
+    index_effect = IndexEffect.KEEP
+
     def __init__(self, name: str, skrub_impl):
         super().__init__(name=name)
         self.skrub_impl = skrub_impl
@@ -216,6 +234,7 @@ class ImplOp(Op):
 
 class SplitXOp(Op):
     """Temporary X boundary carrying skrub's declared splitter until split planning."""
+    index_effect = IndexEffect.KEEP
 
     def __init__(self, skrub_impl: SplitX):
         super().__init__(name="X", is_X=True)
@@ -277,6 +296,9 @@ class BaseEstimatorOp(Op):
     response_modes: frozenset = frozenset()
     #: What it does instead in a response pass it cannot serve.
     fallback_mode: str = "transform"
+    # Row-preserving, and positional on both backends.
+    index_effect = IndexEffect.KEEP
+    aligns_by_label = False
 
     @classmethod
     def callable_kwargs_keys(cls, estimator) -> frozenset:
@@ -595,7 +617,11 @@ class ChoiceOp(Op):
 
 class ValueOp(Op):
     fields = ["value"]
-    
+
+    @property
+    def index_effect(self):
+        return IndexEffect.DEFAULT if has_default_labels(self.value) else IndexEffect.NEW
+
     def __init__(self, value):
         super().__init__(name="DataFrame" if isinstance(value, DataFrame) else str(value))
         self.value = value
@@ -605,7 +631,28 @@ class ValueOp(Op):
 
 class MethodCallOp(Op):
     fields = ["method_name", "args", "kwargs"]
-    
+
+    #: What is known about the pandas methods that stay recorded calls, by name:
+    #: ``(keeps_kind, keeps_rows)``. ``keeps_kind``: the result is what the
+    #: receiver is, a frame or a series. ``keeps_rows``: it holds the receiver's
+    #: rows, in order, with their labels.
+    OPAQUE_METHODS = {
+        "where": (True, True), "map": (True, True), "fillna": (True, True),
+        "rename": (True, True),
+        "sort_values": (True, False), "dropna": (True, False), "set_axis": (True, False),
+        "drop": (True, False), "drop_duplicates": (True, False), "sample": (True, False),
+        "mask": (False, True), "astype": (False, True), "clip": (False, True),
+        "abs": (False, True), "round": (False, True), "replace": (False, True),
+        "isna": (False, True), "notna": (False, True), "isnull": (False, True),
+        "notnull": (False, True), "isin": (False, True), "between": (False, True),
+        "copy": (False, True),
+    }
+
+    @property
+    def index_effect(self):
+        _, keeps_rows = self.OPAQUE_METHODS.get(self.method_name, (False, False))
+        return IndexEffect.COMMON if keeps_rows else IndexEffect.NEW
+
     def __init__(self, method_name: str, args = None, kwargs = None):
         super().__init__(name=method_name)
         if kwargs is not None:
@@ -613,6 +660,17 @@ class MethodCallOp(Op):
         self.method_name = method_name
         self.args = args
         self.kwargs = kwargs
+
+    def bind_pandas(self, owner=None) -> dict | None:
+        """The recorded call's arguments by parameter name, or ``None`` when pandas
+        would reject them.
+
+        It binds against ``owner``'s method, by default the receiver's own class,
+        since a Series and a DataFrame method can take different parameters.
+        """
+        if owner is None:
+            owner = Series if self.inputs[0].output_type is OutputType.SERIES else DataFrame
+        return bind_pandas_method(owner, self.method_name, self.args, self.kwargs)
 
 class CallOp(Op):
     fields = ["func", "args", "kwargs"]
@@ -710,6 +768,7 @@ class GetItemOp(Op):
 
 class BinOp(Op):
     fields = ["op", "left", "right"]
+    index_effect = IndexEffect.COMMON
     
     def __init__(self, op: Callable, left, right):
         super().__init__(name=op.__name__.lstrip('__').rstrip('__'))
@@ -751,6 +810,7 @@ def apply_binary(op, left, right):
 
 class UnaryOp(Op):
     fields = ["op", "operand"]
+    index_effect = IndexEffect.COMMON
 
     def __init__(self, op: Callable, operand):
         super().__init__(name=op.__name__.lstrip('__').rstrip('__'))
@@ -778,6 +838,12 @@ def _bind_or_value(binder: OperandBinder, value):
     in-degree entry for.
     """
     return binder.bind(value)
+
+
+def _bind_operand(binder: OperandBinder, value) -> OperandRef:
+    """Bind ``value`` as an input edge, giving a literal a ``ValueOp`` of its own."""
+    bound = binder.bind(value)
+    return bound if isinstance(bound, OperandRef) else binder.ref_op(ValueOp(bound))
 
 
 def _getitem_key_name(key) -> str:
@@ -1261,10 +1327,10 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_esti
         return_op.inputs = binder.inputs
     elif isinstance(impl, Concat):
         from stratum.optimizer.logical._dataframe_ops import ConcatOp
-        first = _bind_or_value(binder, impl.first)
-        others = list(binder.bind_seq(impl.others))
+        # Every operand is an input edge; a literal one (an array) gets a ValueOp.
+        operands = [_bind_operand(binder, o) for o in (impl.first, *impl.others)]
         axis = _bind_or_value(binder, impl.axis)
-        return_op = ConcatOp(first=first, others=others, axis=axis)
+        return_op = ConcatOp(operands=operands, axis=axis)
         return_op.inputs = binder.inputs
     else:
         for field_name in impl._fields:

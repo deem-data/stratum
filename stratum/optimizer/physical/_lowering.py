@@ -20,6 +20,7 @@ from typing import Callable
 from stratum.optimizer.logical._base import IRNode, OutputType
 from stratum.optimizer.logical._ops import Op
 from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._registry import import_exec_modules
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.utils._utils import start_time, log_time
 
@@ -77,6 +78,7 @@ def lower_to_physical(root: IRNode, ctx) -> IRNode:
     Returns the (possibly new) root.
     """
     start = start_time()
+    import_exec_modules()  # registers the rules
     for op in topological_iterator(root):
         rule = _LOWERING_RULES.get(type(op))
         if rule is None:

@@ -24,7 +24,8 @@ rule reads as intent rather than an oversight:
 * ``ColumnSelectorOp`` -- a deferred skrub selector. Resolvable for name- and
   dtype-based selectors, but value-dependent ones (``cardinality_below``,
   ``has_nulls``, a user ``filter``) would answer from a zero-row frame without
-  erroring, i.e. silently wrong. See the TODO on ``resolve_selector_columns``.
+  erroring, i.e. silently wrong. See the TODO on ``resolve_selector_columns``
+  (``physical/_projection_execs.py``).
 * ``MapOp`` (the base) -- each kind opts in by overriding, as ``AssignMapOp`` does.
 * ``NumericOp`` -- the numpy/MATRIX world has no columns.
 * ``ChoiceOp`` -- a choice combines alternative pipelines and is the last
@@ -33,7 +34,7 @@ rule reads as intent rather than an oversight:
 
 A rule covers an *operation*, not an operation family, wherever the family is not
 uniformly column preserving: see ``StringMethodOp.ONE_TO_ONE_METHODS``,
-``AccessorMapOp.ELEMENTWISE_ACCESSORS`` and ``DatetimeConversionOp``, each of which admits only the members that map one
+``DatetimeFieldOp.FIELDS`` and ``DatetimeConversionOp``, each of which admits only the members that map one
 input column to one output column.
 """
 from __future__ import annotations

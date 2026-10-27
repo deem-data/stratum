@@ -9,8 +9,11 @@ across the plan.
 """
 from __future__ import annotations
 
+from skrub.selectors._base import make_selector
+
+from stratum.optimizer.logical._base import _resolve_kwargs, _resolve_operand
 from stratum.optimizer.logical._projection_ops import (
-    ColumnProjectionOp, ColumnSelectorOp, DropOp, resolve_selector_columns)
+    ColumnProjectionOp, ColumnSelectorOp, DropOp)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 
@@ -20,36 +23,50 @@ from stratum.optimizer.physical._registry import physical_impl
 @physical_impl(of=DropOp, backend="pandas")
 class PandasDropOp(DropOp, PhysicalOp):
     def process(self, mode: str, inputs: list):
-        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
-        return _obj.drop(*_args, **_kwargs)
+        kwargs = _resolve_kwargs(
+            {"columns": self.columns, "level": self.level, "errors": self.errors}, inputs)
+        return inputs[0].drop(**kwargs)
 
 
 @physical_impl(of=DropOp, backend="polars")
 class PolarsDropOp(DropOp, PhysicalOp):
     @classmethod
     def supports(cls, op: DropOp, ctx) -> bool:
-        # Extraction only builds a DropOp for a column drop on a frame; row drops
-        # are DropLabelsSelectionOp.
-        unsupported = set(op.kwargs or {}) - {"columns", "labels", "axis", "errors"}
-        if unsupported:
-            op._unsupported_reason = f"drop options {sorted(unsupported)}"
+        if op.level is not None:
+            op._unsupported_reason = "drops labels of a MultiIndex level"
             return False
         return True
 
     def process(self, mode: str, inputs: list):
-        _obj, _args, _kwargs = self._extract_args_and_kwargs(inputs)
-        columns = _kwargs.get("columns", _kwargs.get("labels", _args[0] if _args else []))
+        columns, errors = (_resolve_operand(v, inputs) for v in (self.columns, self.errors))
         columns = [columns] if isinstance(columns, str) else list(columns)
         # pandas' errors="ignore" skips labels that are not there.
-        return _obj.drop(columns, strict=_kwargs.get("errors", "raise") == "raise")
+        return inputs[0].drop(columns, strict=errors == "raise")
 
 
 # --- ColumnSelectorOp (skb.select) --------------------------------------------
+
+def resolve_selector_columns(frame, selector) -> list[str]:
+    """Resolve a skrub selector (or column name / list of names) against ``frame``.
+
+    Returns the concrete column-name list. Selectors are *deferred*: which columns
+    match (e.g. ``numeric()``) depends on the data, so resolution can only happen
+    once a frame with a schema is available. skrub's dispatch handles both pandas
+    and polars frames.
+
+    # TODO with schema propagation we can resolute the column name list at compile time
+    """
+    return make_selector(selector).expand(frame)
+
 
 class ColumnSelectorExec(ColumnSelectorOp, PhysicalOp):
     """Physical base: resolve the (deferred) selector at fit time and reuse the
     stored column list at predict time -- backend-agnostic; only the final
     indexing differs per backend."""
+
+    def on_impl_selected(self, ctx) -> None:
+        # Resolved by the fitting pass; nothing is known at plan time.
+        self.selected_columns = None
 
     def _resolved_columns(self, frame, mode: str):
         if mode == "fit_transform":

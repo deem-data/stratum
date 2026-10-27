@@ -13,7 +13,7 @@ from stratum.optimizer._optimize import OptConfig, logical_optimize, propagate_o
 from stratum.optimizer.logical._column_expr import BinOpExpr, Col, Const
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, DropOp
-from stratum.optimizer.physical._source_execs import InMemoryFrame
+from stratum.optimizer.logical._source_ops import InMemoryFrameOp
 from .test_dataframe_ops import force_polars, optimize
 
 
@@ -48,7 +48,7 @@ def _of(ops, cls):
 
 
 def _source(ops):
-    [source] = _of(ops, InMemoryFrame)
+    [source] = _of(ops, InMemoryFrameOp)
     return source
 
 

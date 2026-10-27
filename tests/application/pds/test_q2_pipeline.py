@@ -265,7 +265,7 @@ def test_q2_filter_inlines_the_constants(polars):
     filters = [o for o in ops if isinstance(o, MaskSelectionOp)]
 
     assert [BinOpExpr(operator.eq, Col("p_size"), Const(15)),
-            StrExpr(Col("p_type"), "endswith", ("BRASS",)),
+            StrExpr(Col("p_type"), "endswith", {"pat": "BRASS"}),
             BinOpExpr(operator.eq, Col("r_name"), Const("EUROPE"))] \
         == [o.predicate for o in filters]
     for sel in filters:
@@ -290,7 +290,7 @@ def test_q2_folds_the_grouped_aggregation(polars):
     assert agg.grouped
     assert (Col("p_partkey"),) == agg.grouping
     assert ((None, AggExpr("min", Col("ps_supplycost"))),) == agg.aggregations
-    assert agg.options["as_index"] is False
+    assert agg.keys_as_columns
     assert ["p_partkey", "ps_supplycost"] == join_back.left_on == join_back.right_on
     assert join_back.inputs[0] is agg
     assert len(agg.inputs) == 1
@@ -389,7 +389,7 @@ def test_q2_filter_binds_query_impl_under_flag():
         # this test does not care what order the optimizer emits them in.
         # They are still applied in query order below.
         size = by_predicate(ops, BinOpExpr(operator.eq, Col("p_size"), Const(15)))
-        suffix = by_predicate(ops, StrExpr(Col("p_type"), "endswith", ("BRASS",)))
+        suffix = by_predicate(ops, StrExpr(Col("p_type"), "endswith", {"pat": "BRASS"}))
         region = by_predicate(ops, BinOpExpr(operator.eq, Col("r_name"),
                                              Const("EUROPE")))
         assert isinstance(size, impl)

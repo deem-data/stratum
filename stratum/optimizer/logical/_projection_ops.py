@@ -5,27 +5,17 @@ reorders) the column set: ``df[["a", "b"]]``, ``skb.select(...)``,
 ``df.drop(columns=...)``. Anything that changes column values or adds columns is
 a map (:mod:`stratum.optimizer.logical._map_ops`).
 """
-from skrub.selectors._base import make_selector
-from stratum.optimizer.logical._ops import (OutputType, MethodCallOp, Op, TransformerOp,
-                                            _resolve_args, _resolve_kwargs)
+import pandas as pd
+
+from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._ops import OutputType, MethodCallOp, Op, TransformerOp, substitute_op
 from stratum.optimizer.logical import _schema
 
-
-def resolve_selector_columns(frame, selector) -> list[str]:
-    """Resolve a skrub selector (or column name / list of names) against ``frame``.
-
-    Returns the concrete column-name list. Selectors are *deferred*: which columns
-    match (e.g. ``numeric()``) depends on the data, so resolution can only happen
-    once a frame with a schema is available. skrub's dispatch handles both pandas
-    and polars frames.
-
-    # TODO with schema propagation we can resolute the column name list at compile time
-    """
-    return make_selector(selector).expand(frame)
 
 class ProjectionOp(Op):
     """Base for projection operators: keeps rows and values, selects columns."""
     logical_family = "Projection"
+    index_effect = IndexEffect.KEEP
 
     def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)
@@ -59,68 +49,70 @@ def drop_targets_columns(kwargs: dict | None) -> bool | None:
 
 
 class DropOp(ProjectionOp):
-    """``df.drop(...)`` of columns.
+    """Removes the named columns.
 
-    Only the statically column-wise form becomes a ``DropOp`` (see
+    ``columns``: a column label or a list of them (graph-fed labels arrive as an
+    ``OperandRef``). ``level``: the level of a MultiIndex column axis the labels
+    belong to, ``None`` for a flat one. ``errors``: ``"raise"`` when a label is
+    absent, ``"ignore"`` to skip it.
+
+    Only the statically column-wise form of ``drop`` becomes a ``DropOp`` (see
     :func:`drop_targets_columns`). The pandas default (``axis=0``) drops *rows*
     by index label, which extraction turns into a ``DropLabelsSelectionOp``.
     """
-    fields = ["args", "kwargs", "columns"]
-    def __init__(self, args: tuple | list = (), kwargs: dict = {},
-        inputs: list[Op] = None, outputs: list[Op] = None, columns: list[str] = None):
+    fields = ["columns", "level", "errors"]
+
+    def __init__(self, columns=None, level=None, errors="raise",
+                 inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(inputs=inputs, outputs=outputs)
-        if kwargs is not None:
-            self.check_kwargs(kwargs)
-        self.args = args
-        self.kwargs = kwargs
         self.columns = columns
-
-    def _extract_args_and_kwargs(self, inputs: list):
-        """The frame (operand 0) and the drop's resolved arguments."""
-        return inputs[0], _resolve_args(self.args, inputs), _resolve_kwargs(self.kwargs, inputs)
-
-    def _dropped_columns(self):
-        """Column labels being dropped, or ``None`` if not statically known."""
-        kwargs = self.kwargs or {}
-        for key in ("columns", "labels"):
-            if kwargs.get(key) is not None:
-                return kwargs[key]
-        return self.args[0] if self.args else None
+        self.level = level
+        self.errors = errors
 
     def propagate_output_schema(self):
         """Removes the named columns from the input schema."""
         self.output_schema = _schema.drop_columns(self.inputs[0].output_schema,
-                                                  self._dropped_columns())
+                                                  self.columns)
 
 
-def make_drop_op(op: MethodCallOp) -> DropOp:
-    """Rewrite a column-wise ``df.drop(...)`` call into a :class:`DropOp`."""
-    new_op = DropOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
-    op.replace_output_of_inputs(new_op)
-    return new_op
+def make_drop_op(op: MethodCallOp) -> DropOp | None:
+    """Parse a column-wise ``DataFrame.drop`` into a :class:`DropOp`.
+
+    Extraction has already decided the axis (:func:`drop_targets_columns`), so the
+    labels are either ``columns=`` or ``labels=`` next to a column ``axis``.
+    ``inplace`` and calls pandas would reject stay opaque.
+    """
+    call = op.bind_pandas(owner=pd.DataFrame)
+    if call is None or call.get("inplace", False) is not False:
+        return None
+    columns, labels = call.get("columns"), call.get("labels")
+    if columns is not None and labels is not None:
+        return None  # pandas rejects labels next to columns=
+    columns = columns if columns is not None else labels
+    if columns is None:
+        return None  # pandas requires something to drop
+    return substitute_op(op, DropOp(columns=columns, level=call.get("level"),
+                                    errors=call.get("errors", "raise")))
 
 
 class ColumnSelectorOp(ProjectionOp):
     """A column selection by (deferred) skrub selector: keeps rows, restricts columns.
 
     Produced from ``skb.select(cols)``. Matches ``SelectCols`` semantics: the selector resolves against the schema at
-    fit time and the *stored* column list is reused at predict time.
+    fit time and the *stored* column list is reused at predict time (by the
+    physical impls, see ``physical/_projection_execs.py``).
     """
     fields = ["selector"]
 
     def __init__(self, selector, inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=f"select[{selector!r}]", inputs=inputs, outputs=outputs)
         self.selector = selector
-        self.selected_columns = None
 
 
 def make_column_selector_op(op: TransformerOp) -> ColumnSelectorOp:
     """Rewrite a ``TransformerOp`` wrapping skrub's ``SelectCols`` into a
     :class:`ColumnSelectorOp` carrying the selector itself."""
-    new_op = ColumnSelectorOp(selector=op.estimator.cols,
-                              inputs=op.inputs, outputs=op.outputs)
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    return substitute_op(op, ColumnSelectorOp(selector=op.estimator.cols))
 
 
 class ColumnProjectionOp(ProjectionOp):
@@ -153,6 +145,4 @@ class ColumnProjectionOp(ProjectionOp):
 def make_column_projection_op(op) -> ColumnProjectionOp:
     """Rewrite a column-selecting ``df[key]`` :class:`GetItemOp` (a literal
     ``str`` / ``list[str]`` key on a frame) into a :class:`ColumnProjectionOp`."""
-    new_op = ColumnProjectionOp(key=op.key, inputs=op.inputs, outputs=op.outputs)
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    return substitute_op(op, ColumnProjectionOp(key=op.key))

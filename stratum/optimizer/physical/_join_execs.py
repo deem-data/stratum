@@ -33,21 +33,27 @@ class PandasJoinOp(JoinOp, PhysicalOp):
 
 @physical_impl(of=JoinOp, backend="polars")
 class PolarsJoinOp(JoinOp, PhysicalOp):
+    #: The `how` values whose polars join matches pandas' merge.
+    _HOW = ("inner", "left", "outer")
+
+    @classmethod
+    def supports(cls, op: JoinOp, ctx) -> bool:
+        if op.left_index or op.right_index:
+            op._unsupported_reason = "joins on index labels"
+        elif op.how not in cls._HOW:
+            op._unsupported_reason = f"how={op.how!r}"
+        elif ((op.left_on is not None or op.right_on is not None)
+              and not isinstance(op.left_on, (str, list, tuple))):
+            op._unsupported_reason = f"left_on of type {type(op.left_on).__name__}"
+        else:
+            return True
+        return False
 
     def process(self, mode: str, inputs: list):
         if len(inputs) != 2:
             raise ValueError(f"JoinOp expects exactly 2 inputs (left and right dataframes), got {len(inputs)}.")
         left_df, right_df = inputs
-        if self.left_index or self.right_index:
-            raise NotImplementedError("JoinOp Polars backend does not support index-based joins.")
-        if self.how not in ("inner", "left", "outer"):
-            raise NotImplementedError(
-                f"JoinOp Polars backend does not support how={self.how!r}.")
         no_defined_join_columns = self.left_on is None and self.right_on is None
-        if not no_defined_join_columns and not isinstance(self.left_on, (str, list, tuple)):
-            raise NotImplementedError(
-                f"JoinOp Polars backend does not support left_on of type "
-                f"{type(self.left_on).__name__}.")
 
         left_columns_list = list(left_df.columns)
         common_columns = [col for col in right_df.columns if col in left_columns_list]
@@ -67,7 +73,7 @@ class PolarsJoinOp(JoinOp, PhysicalOp):
             return result
         if isinstance(self.left_on, str):
             key_cols = {self.left_on, self.right_on}
-        else:  # list/tuple, validated above
+        else:  # a list or tuple, as supports() admits
             key_cols = set(self.left_on) | set(self.right_on)
         mapping = {
             col: col + self.suffixes[0]

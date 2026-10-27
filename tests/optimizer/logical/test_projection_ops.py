@@ -6,11 +6,20 @@ import stratum as st
 from stratum.optimizer._optimize import OptConfig
 from skrub import selectors
 from stratum.optimizer.logical._projection_ops import (
-    ColumnProjectionOp, ColumnSelectorOp, DropOp, ProjectionOp, drop_targets_columns)
+    ColumnProjectionOp, ColumnSelectorOp, DropOp, ProjectionOp, drop_targets_columns,
+    make_drop_op)
 from stratum.optimizer.logical._ops import (
     GetItemOp, MethodCallOp, OperandRef, OutputType, TransformerOp)
+from stratum.optimizer.physical._projection_execs import PolarsDropOp
 from .test_dataframe_ops import (
-    PolarsTestCase, _inp, _inputs_for, force_polars, optimize, run_op)
+    PolarsTestCase, _inp, _inputs_for, force_polars, optimize, plan_context, run_op)
+
+
+def _call(method, *args, **kwargs) -> MethodCallOp:
+    op = MethodCallOp(method, args=args, kwargs=kwargs)
+    op.inputs = [_inp(None)]
+    op.inputs[0].outputs = [op]
+    return op
 
 
 class TestProjectionRewrites(unittest.TestCase):
@@ -97,19 +106,94 @@ class TestColumnProjectionOp(unittest.TestCase):
         self.assertEqual(["x", "y"], result.columns)
 
 
+class TestDropExtraction(unittest.TestCase):
+    """A column-wise ``drop`` parses into ``DropOp(columns, level, errors)``."""
+
+    def setUp(self):
+        self.df = pd.DataFrame({"a": [1, 2], "b": [3, 4], "c": [5, 6]})
+
+    def _drops(self, data_op):
+        return [o for o in optimize(data_op, OptConfig(literal_inlining=False))
+                if isinstance(o, DropOp)]
+
+    def test_spellings_parse_to_the_same_fields(self):
+        data = st.as_data_op(self.df)
+        cases = [
+            data.drop(columns=["b"]),
+            data.drop(["b"], axis=1),
+            data.drop(labels=["b"], axis="columns"),
+        ]
+        for dag in cases:
+            with self.subTest(dag=dag):
+                [drop] = self._drops(dag)
+                self.assertEqual(["b"], drop.columns)
+                self.assertIsNone(drop.level)
+                self.assertEqual("raise", drop.errors)
+
+    def test_errors_and_level_are_fields(self):
+        [drop] = self._drops(st.as_data_op(self.df).drop(columns="b", errors="ignore"))
+        self.assertEqual(("b", None, "ignore"), (drop.columns, drop.level, drop.errors))
+        drop = make_drop_op(_call("drop", columns="b", level=0))
+        self.assertEqual(0, drop.level)
+
+    def test_graph_fed_columns_stay_an_operand(self):
+        dag = st.as_data_op(self.df).drop(columns=st.var("cols"))
+        ops = optimize(dag, OptConfig(literal_inlining=False))
+        [drop] = [o for o in ops if isinstance(o, DropOp)]
+        self.assertIsInstance(drop.columns, OperandRef)
+
+    def test_unmodelled_calls_stay_opaque(self):
+        cases = [
+            _call("drop", columns=["b"], inplace=True),
+            _call("drop", columns=OperandRef(1), inplace=OperandRef(2)),
+            _call("drop", ["a"], columns=["b"]),  # pandas rejects both
+            _call("drop", columns=["b"], unknown=1),
+        ]
+        for op in cases:
+            with self.subTest(kwargs=op.kwargs):
+                self.assertIsNone(make_drop_op(op))
+
+
+class TestDropOpExecution(unittest.TestCase):
+    def setUp(self):
+        self.df = pd.DataFrame({"a": [1], "b": [2], "c": [3]})
+
+    def test_pandas(self):
+        result = run_op(DropOp(columns=["b"]), self.df)
+        self.assertEqual(["a", "c"], list(result.columns))
+
+    def test_pandas_errors_ignore(self):
+        result = run_op(DropOp(columns=["b", "missing"], errors="ignore"), self.df)
+        self.assertEqual(["a", "c"], list(result.columns))
+
+    def test_graph_fed_columns(self):
+        for backend, frame in (("pandas", self.df), ("polars", pl.from_pandas(self.df))):
+            with self.subTest(backend=backend), force_polars(backend == "polars"):
+                result = run_op(DropOp(columns=OperandRef(1)), frame, ["a", "b"])
+                self.assertEqual(["c"], list(result.columns))
+
+    def test_polars_refuses_a_level(self):
+        op = DropOp(columns=["b"], level=0)
+        self.assertFalse(PolarsDropOp.supports(op, plan_context()))
+        self.assertIn("MultiIndex level", op._unsupported_reason)
+
+
 class TestDropOpPolars(PolarsTestCase):
-    def test_drop_with_columns_kwarg(self):
-        op = DropOp(args=(), kwargs={"columns": ["b"]})
-        result = run_op(op, pl.DataFrame({"a": [1], "b": [2], "c": [3]}))
+    def test_drop_columns(self):
+        result = run_op(DropOp(columns=["b"]), pl.DataFrame({"a": [1], "b": [2], "c": [3]}))
         self.assertNotIn("b", result.columns)
 
+    def test_a_single_label(self):
+        result = run_op(DropOp(columns="b"), pl.DataFrame({"a": [1], "b": [2]}))
+        self.assertEqual(["a"], result.columns)
+
     def test_errors_ignore_skips_missing_columns(self):
-        op = DropOp(args=(), kwargs={"columns": ["a", "missing"], "errors": "ignore"})
+        op = DropOp(columns=["a", "missing"], errors="ignore")
         result = run_op(op, pl.DataFrame({"a": [1], "b": [2]}))
         self.assertEqual(["b"], result.columns)
 
     def test_a_missing_column_raises_by_default(self):
-        op = DropOp(args=(), kwargs={"columns": ["missing"]})
+        op = DropOp(columns=["missing"])
         with self.assertRaises(Exception):
             run_op(op, pl.DataFrame({"a": [1], "b": [2]}))
 
@@ -189,7 +273,7 @@ class TestColumnSelectorProcess(unittest.TestCase):
         # no resolved column list.
         op = ColumnSelectorOp(selector=selectors.numeric())
         op.selected_columns = ["a"]  # even if the original were somehow resolved
-        self.assertIsNone(op.clone().selected_columns)
+        self.assertIsNone(getattr(op.clone(), "selected_columns", None))
 
 
 class TestDropTargetsColumns(unittest.TestCase):

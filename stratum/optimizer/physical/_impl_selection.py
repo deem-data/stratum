@@ -65,21 +65,22 @@ _GREEDY_RF_PREFERENCES = (
 )
 
 
-class DefaultImplementationSelector(ImplementationSelector):
-    """Choose implementations using the stable default backend preference.
+class PreferenceSelector(ImplementationSelector):
+    """Choose an implementation from fixed preference lists.
 
-    The selector is intentionally local to one operator.  Candidates have
+    The selector is intentionally local to one operator. Candidates have
     already been filtered through ``supports(op, ctx)`` by :func:`bind_op`, so
-    this policy only ranks the supported implementations and falls back to
+    this policy only ranks the supported implementations: first by the
+    implementation names listed for the op's type, then by backend, and in
     registration order when none of the preferred backends is available.
+    Subclasses set the two lists.
     """
 
-    _PREFERRED_BACKENDS = ("pandas", "sklearn-skrub", "numpy")
-    _OP_PREFERENCES = {
-        RandomForestOp: ("sklearn_rf",),
-    }
+    #: Backends in order of preference.
+    _PREFERRED_BACKENDS: tuple[str, ...] = ()
+    #: op type -> implementation names in order of preference, ahead of backends.
+    _OP_PREFERENCES: dict = {}
 
-    # FIXME: PandasInMemoryFrame may fail if the in-memory dataframe is Polars
     def choose(self, op: IRNode, candidates: list[PhysicalImpl],
                ctx: PlanContext) -> PhysicalImpl | None:
         if not candidates:
@@ -95,15 +96,22 @@ class DefaultImplementationSelector(ImplementationSelector):
         return candidates[0]
 
 
-class GreedyImplementationSelector(ImplementationSelector):
+class DefaultImplementationSelector(PreferenceSelector):
+    """Choose implementations using the stable default backend preference."""
+
+    _PREFERRED_BACKENDS = ("pandas", "sklearn-skrub", "numpy")
+    _OP_PREFERENCES = {
+        RandomForestOp: ("sklearn_rf",),
+    }
+
+
+class GreedyImplementationSelector(PreferenceSelector):
     """Choose implementations using an efficient-backend-first preference.
 
-    Like DefaultImplementationSelector, this policy only ranks the
-    already ``supports``-filtered candidates for one operator at a time. It
-    does not call :meth:`PhysicalImpl.cost` (still a placeholder) and does not
-    look at neighboring operators, formats, conversion costs, or plan-wide
-    costs. This is a baseline.
-    stratum backend contains hybrid implementations (python + rust).
+    It does not call :meth:`PhysicalImpl.cost` (still a placeholder) and does
+    not look at neighboring operators, formats, conversion costs, or plan-wide
+    costs. This is a baseline. The stratum backend contains hybrid
+    implementations (python + rust).
     """
 
     _PREFERRED_BACKENDS = (
@@ -112,20 +120,6 @@ class GreedyImplementationSelector(ImplementationSelector):
     _OP_PREFERENCES = {
         RandomForestOp: _GREEDY_RF_PREFERENCES,
     }
-
-    def choose(self, op: IRNode, candidates: list[PhysicalImpl],
-               ctx: PlanContext) -> PhysicalImpl | None:
-        if not candidates:
-            return None
-        preferred = self._OP_PREFERENCES.get(type(op), ())
-        implementation = _find_preferred_implementation(candidates, preferred)
-        if implementation is not None:
-            return implementation
-        for backend_name in self._PREFERRED_BACKENDS:
-            for impl in candidates:
-                if impl.backend_name == backend_name:
-                    return impl
-        return candidates[0]
 
 
 _IMPLEMENTATION_SELECTOR_FACTORIES: dict[str, type[ImplementationSelector]] = {
@@ -381,19 +375,8 @@ def _plan_selection(ops, ctx, registry, selector,
 
 def _requires_label_alignment(op: IRNode, index_memo: dict) -> bool:
     """Whether polars' positional pairing differs from pandas' label alignment."""
-    from stratum.optimizer.logical._dataframe_ops import ConcatOp
-    from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
-    from stratum.optimizer.logical._ops import BaseEstimatorOp
-
-    if isinstance(op, JoinOp):
-        # Index joins key on labels.
-        return op.left_index or op.right_index
-    if isinstance(op, FilteringJoinOp):
-        return False  # matches key values, never labels
-    if isinstance(op, BaseEstimatorOp):
-        return False  # positional on both backends
-    if isinstance(op, ConcatOp) and op.axis in (0, "index", "rows"):
-        return False  # row concat does not align
+    if op.aligns_by_label is not None:
+        return op.aligns_by_label
     frames = [i for i in op.inputs if i.output_type in FRAME_TYPES]
     return len({index_origin(i, index_memo) for i in frames}) > 1
 

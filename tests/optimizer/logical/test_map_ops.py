@@ -10,15 +10,17 @@ import skrub
 import stratum as st
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._map_ops import (
-    AccessorMapOp, ApplyUDFOp, AssignMapOp, AssignOp, CallMapOp,
-    DatetimeConversionOp, StringMethodOp, make_datetime_conversion_op,
-    make_frame_get_attr, make_string_method_op, polars_datetime_kwargs)
+    ApplyUDFOp, AssignMapOp, AssignOp, AttributeReadOp, CallMapOp,
+    DatetimeConversionOp, DatetimeFieldOp, StringMethodOp, make_datetime_conversion_op,
+    make_frame_get_attr, make_string_method_op)
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._column_expr import (
-    BinOpExpr, Col, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, OperandLeaf,
-    StrExpr, _Folder)
+    AstypeExpr, BinOpExpr, ClipExpr, Col, Const, DatetimeExpr, DtExpr, FillnaExpr,
+    IsinExpr, IsnaExpr, NotnaExpr, OperandLeaf, StrExpr, WhereExpr)
+from stratum.optimizer.logical._expr_folding import _Folder
 from stratum.optimizer.logical._column_methods import (
-    ColumnMethodOp, is_supported_column_method)
+    AstypeOp, ClipOp, ColumnMethodOp, FillnaOp, IsinOp, IsnaOp, MapValuesOp, NotnaOp,
+    WhereOp, make_column_method_op)
 from stratum.optimizer.logical._dataframe_ops import extract_dataframe_op
 from stratum.optimizer.logical._selection_ops import SelectionOp
 from stratum.optimizer.logical._ops import (
@@ -55,7 +57,7 @@ class TestAssignMapFolding(unittest.TestCase):
                           "c4": day, "c5": day}, map_op.entries)
         # everything private to the assign is absorbed: only source + map remain
         self.assertEqual(1, len(map_op.inputs))
-        for cls in (GetItemOp, BinOp, DatetimeConversionOp, AccessorMapOp):
+        for cls in (GetItemOp, BinOp, DatetimeConversionOp, DatetimeFieldOp, AttributeReadOp):
             self.assertEqual([], [o for o in ops if isinstance(o, cls)], cls.__name__)
 
     def test_shared_subexpression_folds_to_same_object(self):
@@ -86,20 +88,14 @@ class TestAssignMapFolding(unittest.TestCase):
         src = st.as_data_op(self.df)
         out = src.assign(c=src["s"].str.count("1"))
         map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        self.assertEqual({"c": StrExpr(Col("s"), "count", ("1",))}, map_op.entries)
+        self.assertEqual({"c": StrExpr(Col("s"), "count", {"pat": "1"})}, map_op.entries)
 
     def test_fillna_astype_chain_folds(self):
         src = st.as_data_op(self.df)
         out = src.assign(c=src["c1"].fillna(0).astype("float32"))
         map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        self.assertEqual(
-            ColumnMethodExpr(
-                ColumnMethodExpr(Col("c1"), "fillna", (0,)),
-                "astype",
-                ("float32",),
-            ),
-            map_op.entries["c"],
-        )
+        self.assertEqual(AstypeExpr(FillnaExpr(Col("c1"), 0), "float32"),
+                         map_op.entries["c"])
         self.assertEqual(1, len(map_op.inputs))
 
     def test_unsupported_astype_options_stay_as_leaf(self):
@@ -124,26 +120,12 @@ class TestAssignMapFolding(unittest.TestCase):
         map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
 
         self.assertEqual(1, len(map_op.inputs))
+        self.assertEqual(ClipExpr(Col("c1"), 1, 2), map_op.entries["clipped"])
         self.assertEqual(
-            ColumnMethodExpr(Col("c1"), "clip", kwargs={"lower": 1, "upper": 2}),
-            map_op.entries["clipped"],
-        )
-        self.assertEqual(
-            ColumnMethodExpr(
-                Col("c1"),
-                "where",
-                (BinOpExpr(operator.gt, Col("c1"), Const(1)), 0),
-            ),
-            map_op.entries["kept"],
-        )
-        self.assertEqual(
-            ColumnMethodExpr(Col("s"), "isin", (["a1", "missing"],)),
-            map_op.entries["member"],
-        )
-        self.assertEqual(
-            ColumnMethodExpr(Col("c1"), "notna"),
-            map_op.entries["present"],
-        )
+            WhereExpr(Col("c1"), BinOpExpr(operator.gt, Col("c1"), Const(1)), 0),
+            map_op.entries["kept"])
+        self.assertEqual(IsinExpr(Col("s"), ["a1", "missing"]), map_op.entries["member"])
+        self.assertEqual(NotnaExpr(Col("c1")), map_op.entries["present"])
 
     def test_unsupported_fillna_options_stay_as_leaf(self):
         src = st.as_data_op(self.df)
@@ -202,12 +184,16 @@ class TestAssignMapFolding(unittest.TestCase):
         self.assertTrue(any(isinstance(o, TransformerOp) for o in ops))
 
     def test_unsupported_datetime_kwargs_stay_as_leaf(self):
+        # An option a DatetimeConversionOp does not hold keeps the call opaque.
         src = st.as_data_op(self.df)
         parsed = src["c2"].skb.apply_func(pd.to_datetime, dayfirst=True)
         ops = optimize(src.assign(parsed=parsed), OptConfig(dataframe_ops=True))
         map_op = _one(self, ops, AssignMapOp)
         self.assertIsInstance(map_op.entries["parsed"], OperandLeaf)
-        _one(self, ops, DatetimeConversionOp)
+        self.assertFalse([o for o in ops if isinstance(o, DatetimeConversionOp)])
+        call = _one(self, ops, CallOp)
+        self.assertIs(pd.to_datetime, call.func)
+        self.assertIs(OutputType.SERIES, call.output_type)
 
 
 class TestAssignMapProcess(unittest.TestCase):
@@ -228,12 +214,16 @@ class TestAssignMapProcess(unittest.TestCase):
         self.assertEqual([1, 1, 1], result["flag"].tolist())
         self.assertEqual(["x", "d", "y", "day", "flag"], list(result.columns))
 
-    def test_datetime_expr_forwards_pandas_kwargs(self):
-        frame = pd.DataFrame({"d": ["01/02/2020"]})
-        op = AssignMapOp(entries={
-            "parsed": DatetimeExpr(Col("d"), kwargs={"dayfirst": True})})
-        result = run_op(op, frame)
-        self.assertEqual(pd.Timestamp("2020-02-01"), result["parsed"].iloc[0])
+    def test_datetime_expr_fields(self):
+        frame = pd.DataFrame({"d": ["01/02/2020", "bad"]})
+        for polars in (False, True):
+            with self.subTest(polars=polars), force_polars(polars):
+                op = AssignMapOp(entries={"parsed": DatetimeExpr(
+                    Col("d"), format="%d/%m/%Y", errors="coerce")})
+                result = run_op(op, pl.from_pandas(frame) if polars else frame)
+                parsed = list(result["parsed"])
+                self.assertEqual(pd.Timestamp("2020-02-01"), parsed[0])
+                self.assertTrue(pd.isna(parsed[1]))
 
     def test_expr_entries_polars(self):
         op = AssignMapOp(entries={
@@ -327,11 +317,9 @@ class TestMapExprRefContract(unittest.TestCase):
         self.assertEqual([2], [r.k for r in expr.iter_operand_refs()])
 
     def test_remap_rebuilds_dt_chain(self):
-        expr = DtExpr(DatetimeExpr(OperandLeaf(OperandRef(2)),
-                                   kwargs={"format": "%Y"}), "day")
+        expr = DtExpr(DatetimeExpr(OperandLeaf(OperandRef(2)), format="%Y"), "day")
         self.assertEqual(
-            DtExpr(DatetimeExpr(OperandLeaf(OperandRef(1)),
-                                kwargs={"format": "%Y"}), "day"),
+            DtExpr(DatetimeExpr(OperandLeaf(OperandRef(1)), format="%Y"), "day"),
             expr.remap_operand_refs({2: 1}))
 
     def test_pure_dt_chain_has_no_refs(self):
@@ -340,26 +328,10 @@ class TestMapExprRefContract(unittest.TestCase):
         self.assertEqual(expr, expr.remap_operand_refs({}))
 
     def test_method_expression_remaps_refs_in_arguments(self):
-        expr = ColumnMethodExpr(
-            OperandLeaf(OperandRef(1)),
-            "where",
-            (
-                OperandLeaf(OperandRef(2)),
-                OperandLeaf(OperandRef(3)),
-            ),
-        )
+        expr = WhereExpr(*(OperandLeaf(OperandRef(k)) for k in (1, 2, 3)))
         self.assertEqual([1, 2, 3], [ref.k for ref in expr.iter_operand_refs()])
-        self.assertEqual(
-            ColumnMethodExpr(
-                OperandLeaf(OperandRef(4)),
-                "where",
-                (
-                    OperandLeaf(OperandRef(5)),
-                    OperandLeaf(OperandRef(6)),
-                ),
-            ),
-            expr.remap_operand_refs({1: 4, 2: 5, 3: 6}),
-        )
+        self.assertEqual(WhereExpr(*(OperandLeaf(OperandRef(k)) for k in (4, 5, 6))),
+                         expr.remap_operand_refs({1: 4, 2: 5, 3: 6}))
 
 
 class TestFolderEdgeCases(unittest.TestCase):
@@ -697,11 +669,7 @@ def test_fillna_astype_pipeline_evaluates(polars):
 
 
 def test_folded_fillna_astype_executes_on_polars():
-    expr = ColumnMethodExpr(
-        ColumnMethodExpr(Col("x"), "fillna", (0.0,)),
-        "astype",
-        ("float32",),
-    )
+    expr = AstypeExpr(FillnaExpr(Col("x"), 0.0), "float32")
     op = AssignMapOp(entries={"x": expr})
     with force_polars():
         result = run_op(op, pl.DataFrame({"x": [1.0, float("nan"), None]}))
@@ -711,7 +679,7 @@ def test_folded_fillna_astype_executes_on_polars():
 
 def test_standalone_fillna_handles_polars_nan_and_null():
     series = pl.Series("x", [1.0, float("nan"), None])
-    op = ColumnMethodOp(method="fillna", args=(0.0,))
+    op = FillnaOp(0.0)
     with force_polars():
         result = run_op(op, series)
     assert [1.0, 0.0, 0.0] == result.to_list()
@@ -760,7 +728,7 @@ def test_notna_is_foldable_in_selection_predicate():
     from stratum.optimizer.logical._selection_ops import SelectionOp
 
     selection = _one(unittest.TestCase(), ops, SelectionOp)
-    assert ColumnMethodExpr(Col("x"), "notna") == selection.predicate
+    assert NotnaExpr(Col("x")) == selection.predicate
     assert 2 == len(ops)
 
 
@@ -785,12 +753,13 @@ class TestMissingValueMethods(unittest.TestCase):
 
     def test_method_extracts(self):
         src = st.as_data_op(self.df)
-        for method in ("isna", "isnull", "notna", "notnull"):
+        for method, cls in (("isna", IsnaOp), ("isnull", IsnaOp),
+                            ("notna", NotnaOp), ("notnull", NotnaOp)):
             with self.subTest(method=method):
                 ops = optimize(getattr(src["a"], method)(),
                                OptConfig(dataframe_ops=True))
                 method_op = _one(self, ops, ColumnMethodOp)
-                self.assertEqual(method, method_op.method)
+                self.assertIsInstance(method_op, cls)
                 self.assertIs(OutputType.SERIES, method_op.output_type)
                 self.assertFalse(any(isinstance(op, MethodCallOp) for op in ops))
 
@@ -814,10 +783,7 @@ class TestMissingValueMethods(unittest.TestCase):
         root, changed = extract_dataframe_op(call, call)
 
         self.assertTrue(changed)
-        self.assertIsInstance(root, ColumnMethodOp)
-        self.assertEqual("notna", root.method)
-        self.assertEqual((), root.args)
-        self.assertEqual({}, root.kwargs)
+        self.assertIsInstance(root, NotnaOp)
         self.assertEqual([src], root.inputs)
         self.assertEqual([root], src.outputs)
 
@@ -826,7 +792,7 @@ class TestMissingValueMethods(unittest.TestCase):
             with self.subTest(args=args, kwargs=kwargs):
                 call = _wire(MethodCallOp("isna", args=args, kwargs=kwargs),
                              _series_input())
-                self.assertFalse(is_supported_column_method(call))
+                self.assertIsNone(make_column_method_op(call))
                 self.assertFalse(extract_dataframe_op(call, call)[1])
 
     def test_function_rejects_unsupported_calls(self):
@@ -857,9 +823,8 @@ class TestMissingValueMethods(unittest.TestCase):
     def test_folds_into_selection(self):
         src = st.as_data_op(self.df)
         for out, expected in (
-                (src[src["a"].isnull()], ColumnMethodExpr(Col("a"), "isnull")),
-                (src[src["a"].skb.apply_func(pd.notna)],
-                 ColumnMethodExpr(Col("a"), "notna"))):
+                (src[src["a"].isnull()], IsnaExpr(Col("a"))),
+                (src[src["a"].skb.apply_func(pd.notna)], NotnaExpr(Col("a")))):
             with self.subTest(expected=expected):
                 ops = optimize(out, OptConfig(dataframe_ops=True))
                 selection = _one(self, ops, SelectionOp)
@@ -872,24 +837,98 @@ class TestMissingValueMethods(unittest.TestCase):
                          present=src["a"].skb.apply_func(pd.notnull))
         ops = optimize(out, OptConfig(dataframe_ops=True))
         map_op = _one(self, ops, AssignMapOp)
-        self.assertEqual({"missing": ColumnMethodExpr(Col("a"), "isnull"),
-                          "present": ColumnMethodExpr(Col("a"), "notna")},
+        self.assertEqual({"missing": IsnaExpr(Col("a")),
+                          "present": NotnaExpr(Col("a"))},
                          map_op.entries)
         self.assertEqual([], [op for op in ops if isinstance(op, ColumnMethodOp)])
 
     def test_standalone_polars_handles_nan_and_null(self):
         series = pl.Series("a", [1.0, float("nan"), None])
-        for method, expected in (("isna", [False, True, True]),
-                                 ("isnull", [False, True, True]),
-                                 ("notna", [True, False, False]),
-                                 ("notnull", [True, False, False])):
-            with self.subTest(method=method), force_polars():
-                self.assertEqual(expected, run_op(ColumnMethodOp(method), series).to_list())
+        for cls, expected in ((IsnaOp, [False, True, True]),
+                              (NotnaOp, [True, False, False])):
+            with self.subTest(cls=cls.__name__), force_polars():
+                self.assertEqual(expected, run_op(cls(), series).to_list())
 
     def test_standalone_polars_on_non_float(self):
         series = pl.Series("s", ["x", None])
         with force_polars():
-            self.assertEqual([False, True], run_op(ColumnMethodOp("isna"), series).to_list())
+            self.assertEqual([False, True], run_op(IsnaOp(), series).to_list())
+
+
+class TestColumnMethodFields(unittest.TestCase):
+    """Each admitted column method parses into its subclass's fields."""
+
+    def _parse(self, method, *args, output_type=OutputType.SERIES, **kwargs):
+        src = _series_input()
+        src.output_type = output_type
+        return make_column_method_op(_wire(MethodCallOp(method, args=args, kwargs=kwargs), src))
+
+    def test_spellings_parse_to_the_same_fields(self):
+        cases = [
+            (("astype", "float32"), ("astype",), {"dtype": "float32"}, AstypeOp, ("float32",)),
+            (("fillna", 0), ("fillna",), {"value": 0}, FillnaOp, (0,)),
+            (("clip", 1, 2), ("clip",), {"lower": 1, "upper": 2}, ClipOp, (1, 2)),
+            (("where", OperandRef(0), 0), ("where", OperandRef(0)), {"other": 0},
+             WhereOp, (OperandRef(0), 0)),
+            (("isin", [1]), ("isin",), {"values": [1]}, IsinOp, ([1],)),
+            (("map", {1: 2}), ("map",), {"arg": {1: 2}}, MapValuesOp, ({1: 2}, None)),
+        ]
+        for positional, keyword_args, keywords, cls, fields in cases:
+            for op in (self._parse(*positional), self._parse(*keyword_args, **keywords)):
+                with self.subTest(method=positional[0]):
+                    self.assertIsInstance(op, cls)
+                    self.assertEqual(fields, tuple(getattr(op, f) for f in op.fields))
+                    self.assertIs(OutputType.SERIES, op.output_type)
+
+    def test_a_frame_admits_astype_and_a_per_column_fillna(self):
+        frame = OutputType.FRAME
+        self.assertEqual("int32", self._parse("astype", "int32", output_type=frame).dtype)
+        self.assertEqual({"a": 0}, self._parse("fillna", {"a": 0}, output_type=frame).value)
+        for method, args in (("fillna", (0,)), ("clip", (1,)), ("isna", ()),
+                             ("isin", ([1],)), ("map", ({1: 2},))):
+            with self.subTest(method=method):
+                self.assertIsNone(self._parse(method, *args, output_type=frame))
+
+    def test_unmodelled_calls_stay_opaque(self):
+        cases = [
+            ("astype", ("float32",), {"errors": "ignore"}),
+            ("astype", ("not a dtype",), {}),
+            ("fillna", (0,), {"limit": 1}),
+            ("fillna", ([0, 1],), {}),
+            ("clip", (), {}),
+            ("clip", (1,), {"axis": 0}),
+            ("where", (OperandRef(0),), {}),  # pandas' implicit NaN
+            ("isin", ("ab",), {}),
+            ("map", (lambda v: v,), {}),
+            ("map", ({1: 2},), {"na_action": "all"}),
+            ("map", ({1: "a", 2: 3},), {}),  # mixed value types
+            ("isna", (1,), {}),
+        ]
+        for method, args, kwargs in cases:
+            with self.subTest(method=method, args=args, kwargs=kwargs):
+                self.assertIsNone(self._parse(method, *args, **kwargs))
+
+
+@pytest.mark.parametrize("op, values, expected", [
+    pytest.param(AstypeOp("float32"), [1, 2], [1.0, 2.0], id="astype"),
+    pytest.param(FillnaOp(0.0), [1.0, None], [1.0, 0.0], id="fillna"),
+    pytest.param(ClipOp(lower=1, upper=2), [0, 3], [1, 2], id="clip"),
+    pytest.param(IsinOp([1]), [1, 2], [True, False], id="isin"),
+    pytest.param(IsnaOp(), [1.0, None], [False, True], id="isna"),
+    pytest.param(NotnaOp(), [1.0, None], [True, False], id="notna"),
+    pytest.param(MapValuesOp({1: "a"}), [1, 2], ["a", None], id="map"),
+])
+def test_column_methods_run_on_both_backends(polars, op, values, expected):
+    series = pl.Series("x", values) if polars else pd.Series(values)
+    result = run_op(op.clone(), series)
+    assert expected == [None if pd.isna(v) else v for v in result]
+
+
+def test_where_reads_its_condition_from_the_graph(polars):
+    values = [1, 2, 3]
+    series = pl.Series("x", values) if polars else pd.Series(values)
+    cond = pl.Series([True, False, True]) if polars else pd.Series([True, False, True])
+    assert [1, 0, 3] == list(run_op(WhereOp(OperandRef(1), 0), series, cond))
 
 
 _MISSING = pd.DataFrame({"a": [0.0, 1.0, np.nan, 4.0], "b": [0.0, 2.0, 1.0, None],
@@ -1014,7 +1053,7 @@ class TestIndexAttribute(unittest.TestCase):
         op = GetAttrOp(attr_name=attr)
         op.inputs = [container]
         container.outputs = [op]
-        return make_frame_get_attr(None, op)
+        return make_frame_get_attr(op)
 
     def test_index_is_a_series_whatever_it_is_read_off(self):
         from stratum.optimizer.logical._index_ops import IndexAccessOp
@@ -1027,16 +1066,6 @@ class TestIndexAttribute(unittest.TestCase):
     def test_other_accessors_still_keep_the_container_kind(self):
         self.assertIs(OutputType.FRAME,
                       self._get_attr("dt", OutputType.FRAME).output_type)
-
-    def test_polars_refuses_index(self):
-        # polars frames have no index, and what `.index` means depends on what
-        # produced the value, so there is no per-op translation.
-        from stratum.optimizer.physical._map_execs import (
-            PolarsAccessorMapOp)
-        self.assertFalse(PolarsAccessorMapOp.supports(
-            AccessorMapOp(attr_name=["index"]), None))
-        self.assertTrue(PolarsAccessorMapOp.supports(
-            AccessorMapOp(attr_name=["dt", "year"]), None))
 
     def test_arbitrary_pandas_index_is_preserved(self):
         from stratum.optimizer.logical._index_ops import IndexAccessOp
@@ -1053,44 +1082,19 @@ class TestIndexAttribute(unittest.TestCase):
 
 
 class TestCallMapOp(unittest.TestCase):
-    def test_func_and_method_are_mutually_exclusive(self):
-        with self.assertRaises(ValueError):
-            CallMapOp(func=lambda x: x, method="drop", args=(), kwargs={})
-
     def test_kwargs_can_be_omitted(self):
-        op = CallMapOp(method="copy", args=(), kwargs=None)
+        op = CallMapOp(args=())
         self.assertIsNone(op.kwargs)
-
-    def test_no_func_no_method_raises(self):
-        with self.assertRaises(TypeError):
-            run_op(CallMapOp(args=(), kwargs={}), pd.DataFrame({"a": [1]}))
-
-    def test_func_path(self):
-        op = CallMapOp(func=lambda df, v: df * v,
-                          args=(OperandRef(0), 2), kwargs={})
-        result = run_op(op, pd.DataFrame({"a": [1, 2]}))
-        self.assertEqual([2, 4], result["a"].tolist())
-
-    def test_method_pandas_path(self):
-        op = CallMapOp(method="drop", args=("y",), kwargs={"axis": 1})
-        result = run_op(op, pd.DataFrame({"x": [1, 2], "y": [3, 4]}))
-        self.assertNotIn("y", result.columns)
-
-    def test_method_polars_raises(self):
-        with force_polars():
-            op = CallMapOp(method="drop", args=(), kwargs={})
-            with self.assertRaises(ValueError):
-                run_op(op, pl.DataFrame({"a": [1]}))
 
 
 class TestApplyUDFOp(unittest.TestCase):
-    def test_pandas_single_column_str(self):
-        op = ApplyUDFOp(args=(lambda x: x * 10,), kwargs={}, columns="a")
-        result = run_op(op, pd.DataFrame({"a": [1, 2], "b": [3, 4]}))
+    def test_pandas_series(self):
+        op = ApplyUDFOp(args=(lambda x: x * 10,), kwargs={})
+        result = run_op(op, pd.Series([1, 2]))
         self.assertEqual([10, 20], result.tolist())
 
     def test_pandas_multi_column(self):
-        op = ApplyUDFOp(args=(lambda x: x * 2,), kwargs={}, columns=["a", "b"])
+        op = ApplyUDFOp(args=(lambda x: x * 2,), kwargs={})
         result = run_op(op, pd.DataFrame({"a": [1, 2], "b": [3, 4]}))
         self.assertEqual([2, 4], result["a"].tolist())
 
@@ -1114,8 +1118,7 @@ class TestApplyUDFOp(unittest.TestCase):
 
     def test_polars_multi_col_map_rows(self):
         with force_polars():
-            op = ApplyUDFOp(args=(lambda row: (row[0] + row[1],),),
-                            kwargs={}, columns=["a", "b"])
+            op = ApplyUDFOp(args=(lambda row: (row[0] + row[1],),), kwargs={})
             result = run_op(op, pl.DataFrame({"a": [1, 2], "b": [3, 4]}))
             self.assertIsNotNone(result)
 
@@ -1131,151 +1134,116 @@ class TestAssignOpPolars(PolarsTestCase):
         result = run_op(op, pl.DataFrame({"a": [1, 2]}))
         self.assertIn("b", result.columns)
 
-    def test_placeholder_raises(self):
-        # An OperandRef surviving into a polars assign kwarg is unsupported.
-        op = AssignOp(args=(), kwargs={"b": OperandRef(1)})
-        with self.assertRaises(NotImplementedError):
-            run_op(op, pl.DataFrame({"a": [1, 2]}), OperandRef(1))
-
 
 class TestDatetimeConversionOp(unittest.TestCase):
     def test_polars_path(self):
         with force_polars():
-            op = DatetimeConversionOp(args=(), kwargs={})
+            op = DatetimeConversionOp()
             result = run_op(op, pl.Series("dt", ["2025-01-01", "2025-06-15"]))
             self.assertEqual(pl.Datetime, result.dtype)
 
-    def test_pandas_path_preserves_kwargs(self):
-        op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
-        result = run_op(op, pd.Series(["01/02/2020"]))
-        self.assertEqual(pd.Timestamp("2020-02-01"), result.iloc[0])
+    def test_fields_on_both_backends(self):
+        cases = [
+            (dict(format="%d/%m/%Y"), ["01/02/2020"], [pd.Timestamp("2020-02-01")]),
+            (dict(errors="coerce"), ["2025-01-01", "bad"], [pd.Timestamp("2025-01-01"), None]),
+            # polars' non-exact match fails on a pattern that covers only part
+            # of the string, where pandas parses it; this one agrees.
+            (dict(format="%Y-%m-%d", exact=False), ["x2025-03-07y"], [pd.Timestamp("2025-03-07")]),
+            (dict(cache=False), ["2025-01-01"], [pd.Timestamp("2025-01-01")]),
+        ]
+        for fields, values, expected in cases:
+            for polars in (False, True):
+                with self.subTest(fields=fields, polars=polars), force_polars(polars):
+                    series = pl.Series("dt", values) if polars else pd.Series(values)
+                    result = run_op(DatetimeConversionOp(**fields), series)
+                    self.assertEqual(expected, [None if pd.isna(v) else v for v in result])
 
-    def test_polars_unsupported_kwargs_use_pandas_semantics(self):
-        with force_polars():
-            op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
-            result = run_op(op, pl.Series("dt", ["01/02/2020"]))
-        self.assertEqual([pd.Timestamp("2020-02-01")], result.to_list())
+    def test_errors_is_raise_or_coerce(self):
+        with self.assertRaises(ValueError):
+            DatetimeConversionOp(errors="ignore")
 
-    def test_polars_positional_options_use_pandas_semantics(self):
-        with force_polars():
-            op = DatetimeConversionOp(args=("coerce",), kwargs={})
-            result = run_op(op, pl.Series("dt", ["2025-01-01", "bad"]))
-        self.assertEqual([pd.Timestamp("2025-01-01"), None], result.to_list())
-
-    def test_polars_fallback_converts_datetime_index(self):
-        with force_polars():
-            op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
-            result = run_op(op, ["01/02/2020", "03/04/2021"])
-        self.assertEqual(
-            [pd.Timestamp("2020-02-01"), pd.Timestamp("2021-04-03")],
-            result.to_list())
-
-    def test_polars_fallback_keeps_scalar_result(self):
-        with force_polars():
-            op = DatetimeConversionOp(args=(), kwargs={"dayfirst": True})
-            result = run_op(op, "01/02/2020")
-        self.assertEqual(pd.Timestamp("2020-02-01"), result)
-
-    def _convert_with_option(self, polars, values, args, kwargs, option):
-        # A plan-fed option is an OperandRef into the op's inputs: here inputs[1].
-        series = pl.Series("dt", values) if polars else pd.Series(values)
-        with force_polars(polars):
-            op = DatetimeConversionOp(args=args, kwargs=kwargs)
-            return list(run_op(op, series, option))
-
-    def test_resolves_graph_fed_kwarg(self):
-        # On polars the kwargs translation must see the resolved format.
-        for polars in (False, True):
-            with self.subTest(polars=polars):
-                result = self._convert_with_option(
-                    polars, ["2025-01-06"], (), {"format": OperandRef(1)}, "%Y-%m-%d")
-                self.assertEqual([pd.Timestamp("2025-01-06")], result)
-
-    def test_resolves_graph_fed_positional(self):
-        for polars in (False, True):
-            with self.subTest(polars=polars):
-                result = self._convert_with_option(
-                    polars, ["2025-01-06", "bad"], (OperandRef(1),), {}, "coerce")
-                self.assertEqual(pd.Timestamp("2025-01-06"), result[0])
-                self.assertTrue(pd.isna(result[1]))
-
-    def test_polars_datetime_kwargs_rejects_unsupported_errors(self):
-        self.assertIsNone(
-            polars_datetime_kwargs((), {"errors": "ignore"}))
+    def test_graph_fed_fields_resolve(self):
+        cases = [(dict(format=OperandRef(1)), "%Y-%m-%d", ["2025-01-06"]),
+                 (dict(errors=OperandRef(1)), "coerce", ["2025-01-06", "bad"])]
+        for fields, option, values in cases:
+            for polars in (False, True):
+                with self.subTest(fields=fields, polars=polars), force_polars(polars):
+                    series = pl.Series("dt", values) if polars else pd.Series(values)
+                    result = list(run_op(DatetimeConversionOp(**fields), series, option))
+                    self.assertEqual(pd.Timestamp("2025-01-06"), result[0])
+                    self.assertTrue(all(pd.isna(v) for v in result[1:]))
 
 
-class TestAccessorMapOp(unittest.TestCase):
-    def test_init_with_none(self):
-        self.assertEqual([], AccessorMapOp(attr_name=None).attr_name)
-
-    def test_init_with_str(self):
-        self.assertEqual(["dt"], AccessorMapOp(attr_name="dt").attr_name)
-
-    def _run_polars(self, dt_values, attr_name):
+class TestDatetimeFieldOp(unittest.TestCase):
+    def _run_polars(self, dt_values, field):
         with force_polars():
             s = pl.Series("dt", pd.to_datetime(dt_values))
-            op = AccessorMapOp(attr_name=attr_name)
-            return run_op(op, s)
+            return run_op(DatetimeFieldOp(field=field), s)
 
     def test_polars_year(self):
-        result = self._run_polars(["2025-01-15", "2025-06-20"], ["dt", "year"])
+        result = self._run_polars(["2025-01-15", "2025-06-20"], "year")
         self.assertEqual([2025, 2025], result.to_list())
 
     def test_polars_matches_pandas_values(self):
         values = _DATES["d"]
-        for attr in _DT_ATTRS_PANDAS_SEMANTICS:
-            with self.subTest(attr=attr):
-                result = self._run_polars(values, ["dt", attr])
-                self.assertEqual(getattr(values.dt, attr).tolist(), result.to_list())
+        for field in _DT_ATTRS_PANDAS_SEMANTICS:
+            with self.subTest(field=field):
+                result = self._run_polars(values, field)
+                self.assertEqual(getattr(values.dt, field).tolist(), result.to_list())
 
     def test_polars_is_month_end(self):
-        result = self._run_polars(["2025-01-31", "2025-01-15"],
-                                  ["dt", "is_month_end"])
+        result = self._run_polars(["2025-01-31", "2025-01-15"], "is_month_end")
         self.assertEqual([True, False], result.to_list())
 
-    def test_polars_refuses_untranslated_dt_attribute(self):
-        from stratum.optimizer.physical._map_execs import PolarsAccessorMapOp
-        for _, attr in _DT_ATTRS_PANDAS_ONLY:
-            with self.subTest(attr=attr):
-                op = AccessorMapOp(attr_name=["dt", attr])
-                self.assertFalse(PolarsAccessorMapOp.supports(op, None))
-                self.assertIn(f"dt.{attr}", op._unsupported_reason)
-        for attr in ("dayofweek", "is_month_end"):
-            with self.subTest(attr=attr):
-                self.assertTrue(PolarsAccessorMapOp.supports(
-                    AccessorMapOp(attr_name=["dt", attr]), None))
+    def test_polars_refuses_untranslated_field(self):
+        from stratum.optimizer.physical._map_execs import PolarsDatetimeFieldOp
+        for _, field in _DT_ATTRS_PANDAS_ONLY:
+            with self.subTest(field=field):
+                op = DatetimeFieldOp(field=field)
+                self.assertFalse(PolarsDatetimeFieldOp.supports(op, None))
+                self.assertIn(f"dt.{field}", op._unsupported_reason)
+        for field in ("dayofweek", "is_month_end"):
+            with self.subTest(field=field):
+                self.assertTrue(PolarsDatetimeFieldOp.supports(
+                    DatetimeFieldOp(field=field), None))
 
-    def test_polars_refuses_bare_dt_namespace(self):
-        from stratum.optimizer.physical._map_execs import PolarsAccessorMapOp
-        op = AccessorMapOp(attr_name=["dt"])
-        self.assertFalse(PolarsAccessorMapOp.supports(op, None))
-        self.assertIn("dt", op._unsupported_reason)
-
-    def test_polars_supports_only_dt_fields(self):
-        # Extraction wraps any attribute read, so anything but a `.dt` field
-        # (including a `.dt` method read without its call) binds pandas.
-        from stratum.optimizer.physical._map_execs import PolarsAccessorMapOp
-        for attr_name in (["iloc"], ["T"], ["values"], ["str"], ["cat", "codes"],
-                          ["dt", "round"], ["dt", "year", "values"]):
-            with self.subTest(attr_name=attr_name):
-                op = AccessorMapOp(attr_name=attr_name)
-                self.assertFalse(PolarsAccessorMapOp.supports(op, None))
-                self.assertEqual(f"pandas attribute `.{'.'.join(attr_name)}` "
-                                 "has no polars translation", op._unsupported_reason)
+    def test_only_dt_fields_become_datetime_field_ops(self):
+        # Extraction sees any attribute read; everything but a `.dt` field (a
+        # bare namespace, a `.dt` method read without its call, a read off a
+        # field) stays an opaque attribute read with a pandas impl only.
+        cases = {"dt.year": ("dt", "year"), "dt": ("dt",), "dt.round": ("dt", "round"),
+                 "dt.year.values": ("dt", "year", "values"), "iloc": ("iloc",),
+                 "T": ("T",), "cat.codes": ("cat", "codes"), "str": ("str",)}
+        for name, chain in cases.items():
+            with self.subTest(name):
+                op = _series_input()
+                for attr in chain:
+                    read = _wire(GetAttrOp(attr_name=attr), op)
+                    op = make_frame_get_attr(read)
+                if name == "dt.year":
+                    self.assertIsInstance(op, DatetimeFieldOp)
+                    self.assertEqual("year", op.field)
+                elif name == "dt.year.values":
+                    self.assertIsInstance(op, AttributeReadOp)
+                    self.assertEqual(["values"], op.attr_name)
+                else:
+                    self.assertIsInstance(op, AttributeReadOp)
+                    self.assertEqual(list(chain), op.attr_name)
+                self.assertIs(OutputType.SERIES, op.output_type)
 
     def test_shared_accessor_keeps_original_edge_when_fused(self):
         source = Op()
         source.output_type = OutputType.SERIES
-        accessor = AccessorMapOp(
-            attr_name=["dt"], inputs=[source], outputs=[])
+        accessor = AttributeReadOp(attr_name=["dt"], inputs=[source], outputs=[])
         current = GetAttrOp(attr_name="year")
         current.inputs = [accessor]
         other_consumer = Op(inputs=[accessor])
         accessor.outputs = [current, other_consumer]
         source.outputs = [accessor]
 
-        new_op = make_frame_get_attr(None, current)
+        new_op = make_frame_get_attr(current)
 
+        self.assertIsInstance(new_op, DatetimeFieldOp)
         self.assertEqual([other_consumer], accessor.outputs)
         self.assertIn(accessor, source.outputs)
         self.assertIn(new_op, source.outputs)
@@ -1312,7 +1280,7 @@ def _run_plan(dag, env, polars):
 @pytest.mark.parametrize("path", ["accessor", "assign", "selection"])
 @pytest.mark.parametrize("attr", _DT_ATTRS_PANDAS_SEMANTICS)
 def test_dt_attribute_matches_pandas(attr, path, polars):
-    # The standalone accessor runs PolarsAccessorMapOp; assign and mask
+    # The standalone accessor runs PolarsDatetimeFieldOp; assign and mask
     # selection fold the read into a DtExpr.
     values = getattr(_DATES["d"].dt, attr)
     expected = {"accessor": values, "assign": _DATES.assign(v=values),
@@ -1424,9 +1392,9 @@ def test_dt_method_call_fails_plan_pinned_to_polars(method, args):
         optimize(dag, env={"x": _DATES})
 
 
-# Pandas attribute reads with no polars translation. Extraction wraps any
-# attribute read on frame-like data into an AccessorMapOp, so polars has to
-# refuse everything but the `.dt` fields it can read.
+# Pandas attribute reads with no polars translation. Extraction turns every
+# attribute read on frame-like data that is not a `.dt` field into an
+# AttributeReadOp, which only pandas runs.
 _MIXED = pd.DataFrame({"c": pd.Series(["a", "b", "a"], dtype="category"),
                        "s": ["xy", "zw", "uv"], "n": [1, 2, 3]})
 _PANDAS_ONLY_ATTR_READS = {
@@ -1510,7 +1478,7 @@ class TestStringMethodOp(unittest.TestCase):
 
     def test_str_method_fuses_accessor_away(self):
         # A str call used as a column projection (here assigned) becomes a single
-        # StringMethodOp; the AccessorMapOp(["str"]) accessor drops out.
+        # StringMethodOp; the AttributeReadOp(["str"]) accessor drops out.
         # Map folding is disabled so the intermediate op stays observable (with it
         # on, the assign absorbs the call into a StrExpr entry -- see test_map_ops).
         data = st.as_data_op(self.df)
@@ -1521,7 +1489,7 @@ class TestStringMethodOp(unittest.TestCase):
         self.assertEqual("upper", sm.method)
         self.assertIs(OutputType.SERIES, sm.output_type)
         self.assertIsInstance(sm.inputs[0], ColumnProjectionOp)  # the column, not the accessor
-        self.assertEqual([], [o for o in ops if isinstance(o, AccessorMapOp)])
+        self.assertEqual([], [o for o in ops if isinstance(o, AttributeReadOp)])
 
     def test_shared_accessor_detached_after_last_call(self):
         # When the same `.str` accessor feeds two calls, each folds to its own
@@ -1532,24 +1500,44 @@ class TestStringMethodOp(unittest.TestCase):
             ops = optimize(data.assign(a=acc.count("1"), b=acc.upper()),
                            OptConfig(dataframe_ops=True))
         self.assertEqual(2, len([o for o in ops if isinstance(o, StringMethodOp)]))
-        self.assertEqual([], [o for o in ops if isinstance(o, AccessorMapOp)])
+        self.assertEqual([], [o for o in ops if isinstance(o, AttributeReadOp)])
+
+    def test_arguments_bind_to_pandas_parameter_names(self):
+        data = st.as_data_op(self.df)
+        for call in (data["s"].str.replace("1", "2", regex=False),
+                     data["s"].str.replace(pat="1", repl="2", regex=False),
+                     data["s"].str.replace("1", repl="2", regex=False)):
+            with self.subTest(call=call), make_map_op(False):
+                sm = self._one(optimize(call, OptConfig(dataframe_ops=True)), StringMethodOp)
+                self.assertEqual({"pat": "1", "repl": "2", "regex": False}, sm.params)
+                self.assertEqual(["pat", "repl", "regex"], list(sm.params))
+
+    def test_calls_pandas_rejects_stay_opaque(self):
+        column = Op()
+        column.output_type = OutputType.SERIES
+        for method, args, kwargs in (("upper", (1,), {}), ("lower", (), {"x": 1}),
+                                     ("no_such_method", (), {})):
+            with self.subTest(method=method):
+                accessor = AttributeReadOp(attr_name=["str"], inputs=[column], outputs=[])
+                call = _wire(MethodCallOp(method, args=args, kwargs=kwargs), accessor)
+                self.assertIsNone(make_string_method_op(call))
 
     def test_process_pandas(self):
-        op = StringMethodOp(method="count", args=("1",))
+        op = StringMethodOp(method="count", params={"pat": "1"})
         result = run_op(op, pd.Series(["a1", "bb", "c1"]))
         self.assertEqual([1, 0, 1], result.tolist())
 
     def test_process_polars_renames_method(self):
-        # polars renames .str.count -> .str.count_matches (STR_POLARS_METHODS).
+        # polars spells .str.count as .str.count_matches.
         with force_polars():
-            op = StringMethodOp(method="count", args=("1",))
+            op = StringMethodOp(method="count", params={"pat": "1"})
             result = run_op(op, pl.Series(["a1", "bb", "c1"]))
         self.assertEqual([1, 0, 1], result.to_list())
 
     def test_graph_argument_is_rewired_to_fused_method(self):
         column = Op()
         column.output_type = OutputType.SERIES
-        accessor = AccessorMapOp(
+        accessor = AttributeReadOp(
             attr_name=["str"], inputs=[column], outputs=[])
         argument = Op()
         call = MethodCallOp(
@@ -1566,11 +1554,37 @@ class TestStringMethodOp(unittest.TestCase):
 
 
 class TestMakeDatetimeConversionOp(unittest.TestCase):
-    def test_extra_positional_args(self):
-        op = CallOp(func=pd.to_datetime,
-                    args=(OperandRef(0), "ISO8601"), kwargs={})
-        new_op = make_datetime_conversion_op(op)
-        self.assertEqual(("ISO8601",), tuple(new_op.args))
+    def _call(self, *args, output_type=OutputType.SERIES, **kwargs):
+        op = CallOp(func=pd.to_datetime, args=args, kwargs=kwargs)
+        op.inputs = [_inp(None)]
+        op.inputs[0].output_type = output_type
+        op.inputs[0].outputs = [op]
+        return op
+
+    def test_positional_and_keyword_options_parse_to_the_same_fields(self):
+        for op in (self._call(OperandRef(0), "coerce", format="ISO8601"),
+                   self._call(OperandRef(0), errors="coerce", format="ISO8601")):
+            new_op = make_datetime_conversion_op(op)
+            self.assertEqual(("ISO8601", None, True, "coerce"),
+                             (new_op.format, new_op.exact, new_op.cache, new_op.errors))
+            self.assertIs(OutputType.SERIES, new_op.output_type)
+
+    def test_a_graph_fed_option_is_a_field(self):
+        op = self._call(OperandRef(0), format=OperandRef(1))
+        op.inputs.append(_inp(None))
+        op.inputs[1].outputs = [op]
+        self.assertEqual(OperandRef(1), make_datetime_conversion_op(op).format)
+
+    def test_unmodelled_calls_stay_opaque(self):
+        cases = {
+            "dayfirst": self._call(OperandRef(0), dayfirst=True),
+            "errors=ignore": self._call(OperandRef(0), errors="ignore"),
+            "assembly from a frame": self._call(OperandRef(0), output_type=OutputType.FRAME),
+            "unknown keyword": self._call(OperandRef(0), foo=1),
+        }
+        for name, op in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(make_datetime_conversion_op(op))
 
 
 if __name__ == "__main__":

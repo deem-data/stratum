@@ -34,16 +34,6 @@ class RepresentationError(NotImplementedError):
     """An edge carries a frame library its consumer cannot read."""
 
 
-def refuse_unsupported_exprs(op: IRNode, exprs) -> bool:
-    """``supports`` helper for polars impls; records the refusal reason on ``op``."""
-    for expr in exprs:
-        reason = expr.polars_unsupported()
-        if reason is not None:
-            op._unsupported_reason = reason
-            return False
-    return True
-
-
 def frame_lib(op: IRNode) -> FrameLib | None:
     """Output library of ``op``; ``None`` for non-frame or unknown outputs."""
     return getattr(op, "_frame_lib", None)

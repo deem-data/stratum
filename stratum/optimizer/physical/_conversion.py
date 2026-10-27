@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.logical._base import FRAME_TYPES, IRNode
+from stratum.optimizer.logical._base import FRAME_TYPES, IRNode, IndexEffect
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._representation import FrameLib
 
@@ -19,6 +19,7 @@ class ConversionOp(PhysicalOp):
     """Converts a frame or series between frame libraries."""
 
     logical_family = "Conversion"
+    index_effect = IndexEffect.KEEP
 
     def __init__(self, source: FrameLib, target: FrameLib, inputs=None, outputs=None):
         super().__init__(name=f"{source}->{target}", inputs=inputs, outputs=outputs)
@@ -78,82 +79,19 @@ def index_origin(op: IRNode, memo: dict | None = None):
     return memo[key]
 
 
-def _is_default_index(data) -> bool:
-    if isinstance(data, (pl.DataFrame, pl.Series)):
-        return True
-    index = getattr(data, "index", None)
-    return (isinstance(index, pd.RangeIndex) and index.start == 0 and index.step == 1)
-
-
 def _index_origin(op: IRNode, memo: dict):
-    # Lazy imports: avoid import cycles.
-    from stratum.optimizer.logical._aggregation_ops import AggregateOp
-    from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
-    from stratum.optimizer.logical._map_ops import MapOp
-    from stratum.optimizer.logical._numeric_ops import NumericOp
-    from stratum.optimizer.logical._ops import (BaseEstimatorOp, BinOp, ImplOp,
-                                                MethodCallOp, SplitXOp, UnaryOp,
-                                                ValueOp)
-    from stratum.optimizer.logical._metadata_ops import RenameOp, ResetIndexOp
-    from stratum.optimizer.logical._projection_ops import (
-        ColumnProjectionOp, ColumnSelectorOp, DropOp)
-    from stratum.optimizer.logical._selection_ops import SelectionOp, SliceSelectionOp
-    from stratum.optimizer.logical._sort_ops import SortOp
-    from stratum.optimizer.physical._source_execs import FileReadOp, InMemoryFrame
-
-    new = id(op)
-
-    def first_input():
-        return index_origin(op.inputs[0], memo) if op.inputs else new
-
-    if isinstance(op, ConversionOp):
-        return first_input()
-    if isinstance(op, FileReadOp):
+    """Follow ``op``'s declared :class:`IndexEffect`."""
+    effect = op.index_effect
+    if effect is IndexEffect.DEFAULT:
         return DEFAULT
-    if isinstance(op, InMemoryFrame):
-        return DEFAULT if _is_default_index(op.data) else new
-    if isinstance(op, ValueOp):
-        return DEFAULT if _is_default_index(op.value) else new
-    if isinstance(op, ResetIndexOp):
-        return DEFAULT
-    if isinstance(op, RenameOp):
-        return first_input()
-    if isinstance(op, SelectionOp):
-        # Keeps row labels; only head() of a default index stays default.
-        if (isinstance(op, SliceSelectionOp) and not op.from_end
-                and first_input() == DEFAULT):
-            return DEFAULT
-        if getattr(op, "ignore_index", False) is True:
-            return DEFAULT
-        return new
-    if isinstance(op, SortOp):
-        return DEFAULT if op.ignore_index else new
-    if isinstance(op, FilteringJoinOp):
-        return new  # keeps the left rows' labels
-    if isinstance(op, JoinOp):
-        # merge -> RangeIndex; index joins keep labels.
-        if op.left_index or op.right_index:
-            return new
-        return DEFAULT
-    if isinstance(op, AggregateOp):
-        return DEFAULT if op.grouped and op.options.get("as_index", True) is False else new
-    if isinstance(op, (MapOp, ColumnProjectionOp, ColumnSelectorOp, DropOp,
-                       BaseEstimatorOp, ImplOp, SplitXOp)):
-        # Row-preserving. A DropOp only drops columns; a row drop is a
-        # DropLabelsSelectionOp and starts a new origin above.
-        return first_input()
-    if isinstance(op, MethodCallOp) and op.method_name in _ROW_PRESERVING_METHODS:
+    if effect is IndexEffect.COMMON:
         return _common_origin(op, memo)
-    if isinstance(op, (BinOp, UnaryOp, NumericOp)):
-        return _common_origin(op, memo)
-    return new
-
-
-#: Row-preserving pandas methods.
-_ROW_PRESERVING_METHODS = frozenset({
-    "where", "mask", "fillna", "astype", "map", "clip", "abs", "round", "replace",
-    "isna", "notna", "isnull", "notnull", "isin", "between", "rename", "copy",
-})
+    first = index_origin(op.inputs[0], memo) if op.inputs else id(op)
+    if effect is IndexEffect.KEEP:
+        return first
+    if effect is IndexEffect.PREFIX and first == DEFAULT:
+        return DEFAULT
+    return id(op)
 
 
 def _common_origin(op: IRNode, memo: dict):

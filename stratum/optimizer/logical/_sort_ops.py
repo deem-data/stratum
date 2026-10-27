@@ -7,7 +7,8 @@ ordering rather than an aggregation with an ordering baked into its options, and
 it puts the ordering somewhere a later rewrite can drop it from once we can see
 that the consumer never observes row order.
 """
-from stratum.optimizer.logical._ops import MethodCallOp, Op, OutputType
+from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._ops import MethodCallOp, Op, OutputType, substitute_op
 
 
 class SortOp(Op):
@@ -41,6 +42,10 @@ class SortOp(Op):
                           else tuple(ascending))
         self.na_position = na_position
         self.ignore_index = ignore_index
+
+    @property
+    def index_effect(self):
+        return IndexEffect.DEFAULT if self.ignore_index else IndexEffect.NEW
         # A sort reorders rows and changes nothing else, so it keeps its input's
         # kind; extraction overrides this with the propagated type.
         self.output_type = OutputType.FRAME
@@ -85,11 +90,8 @@ def make_sort_op(op: MethodCallOp) -> SortOp | None:
                     or (isinstance(ascending, (list, tuple)) and len(ascending) == len(by)
                         and all(type(flag) is bool for flag in ascending)))):
         return None
-    sort = SortOp(by=by, ascending=ascending, na_position=na_position,
-                  ignore_index=ignore_index, inputs=op.inputs, outputs=op.outputs)
-    sort.output_type = op.inputs[0].output_type
-    op.replace_output_of_inputs(sort)
-    return sort
+    return substitute_op(op, SortOp(by=by, ascending=ascending, na_position=na_position,
+                                    ignore_index=ignore_index), keep_kind=True)
 
 
 def _render_name(by, ascending) -> str:

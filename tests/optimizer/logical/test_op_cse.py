@@ -1,3 +1,4 @@
+import operator
 import unittest
 
 import pandas as pd
@@ -7,7 +8,8 @@ import stratum as st
 from stratum.optimizer import apply_op_cse
 from stratum.optimizer._optimize import convert_to_ops
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
-from stratum.optimizer.logical._ops import ChoiceOp
+from stratum.optimizer.logical._ops import (
+    BinOp, ChoiceOp, GetItemOp, Op, OperandRef, OutputType)
 
 
 def pre_process(df):
@@ -210,6 +212,37 @@ class TestOpCSE(unittest.TestCase):
 
         self.assertEqual(3, before - after,)
         validate_dag(root)
+
+
+class TestMergeKeepsPositionalSlots(unittest.TestCase):
+    """A merge rebinds only the slot it changes."""
+
+    @staticmethod
+    def _wire(op, *inputs):
+        op.inputs = list(inputs)
+        for in_ in inputs:
+            in_.add_output(op)
+        return op
+
+    def test_a_choice_keeps_its_repeated_outcomes(self):
+        # The choice reads `a` twice, by position. Merging its third input into a
+        # twin must not collapse the first two, whichever of the twins is kept.
+        for canonical_first in (True, False):
+            with self.subTest(canonical_first=canonical_first):
+                src = Op()
+                src.output_type = OutputType.FRAME
+                a = self._wire(GetItemOp(key="a"), src)
+                b1, b2 = (BinOp(operator.add, OperandRef(0), 1) for _ in range(2))
+                for b in ((b1, b2) if canonical_first else (b2, b1)):
+                    self._wire(b, src)
+                choice = self._wire(ChoiceOp(outcome_names=["x", "y", "z"]), a, a, b2)
+                root = self._wire(BinOp(operator.add, OperandRef(0), OperandRef(1)),
+                                  choice, b1)
+                apply_op_cse(root)
+                self.assertEqual(3, len(choice.inputs))
+                self.assertIs(choice.inputs[0], choice.inputs[1])
+
+
 
 if __name__ == "__main__":
     unittest.main()

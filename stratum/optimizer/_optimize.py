@@ -6,28 +6,23 @@ from collections import deque, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
-from .logical._op_cse import apply_op_cse
+from .logical.rewrites._cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
-from .logical._literal_inlining import literal_inlining
+from .logical.rewrites._literal_inlining import literal_inlining
 from .logical._numeric_ops import extract_numeric_op
 from .logical._candidate_ops import CollectCandidatesOp, DeclaredScoringOp, ScoreCandidatesOp
 from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared, remap_operand_refs
 from .logical._split_ops import SplitOutput
 from ._op_utils import show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
-from .logical._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
-from .logical._relational_rewrites import relational_rewrites
+from .logical.rewrites._algebraic import algebraic_rewrites, AlgebraicRewritesConfig
+from .logical.rewrites._relational import relational_rewrites
 from ._linearization import linearize_dag
 from ._fit_pass_planning import mark_fit_dead_ops
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
 from .physical._plan_context import PlanContext
 from .physical._lowering import lower_to_physical
 from .physical._impl_selection import (ImplementationSelector, get_implementation_selector, select_implementations)
-# Importing the physical exec modules and their lowering rules.
-from .physical import _source_execs  # noqa: F401
-from .physical import _transform_execs  # noqa: F401
-from .physical import _predictor_execs  # noqa: F401
-from .physical import _generic_execs  # noqa: F401
 from stratum.frontend._skrub_graph import build_graph
 import logging
 from stratum._config import FLAGS

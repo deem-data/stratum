@@ -1,7 +1,8 @@
 import pandas as pd
 
-from stratum.optimizer.logical._column_expr import (
-    AggExpr, AllCols, Col, OperandLeaf, _Folder)
+from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._column_expr import AggExpr, AllCols, Col, OperandLeaf
+from stratum.optimizer.logical._expr_folding import _Folder
 from stratum.optimizer.logical._ops import (
     BinOp, UnaryOp, GetItemOp, OperandRef, OutputType, MethodCallOp, Op, ValueOp)
 from stratum.optimizer.logical._sort_ops import SortOp
@@ -24,22 +25,36 @@ class AggregateOp(Op):
     ``value_counts`` (group by the series' own values) and expression grouping
     (``groupby(df["d"].dt.year)``) share one representation.
 
-    ``options`` carries only the groupby options that change the *result*, e.g.
-    ``sort`` (which fixes the output row order) and ``dropna``. How the
+    The grouping options are the ones that change the *result*; how the
     aggregation runs is the physical layer's business and has no field here.
-    ``sort_categories`` orders categorical groups by their declared domain while
-    leaving other groups in appearance order, as required by ``value_counts``.
+    Their defaults are pandas':
+
+    * ``sort_keys``: order the groups by key, or else by first appearance.
+    * ``drop_null_keys``: drop the groups whose key is missing.
+    * ``observed``: for a categorical key, only the categories that occur form
+      groups.
+    * ``keys_as_columns``: the keys become output columns rather than the row
+      labels (pandas' ``as_index=False``).
+    * ``level``: the index level the grouping refers to, ``None`` for none.
+    * ``sort_categories``: order categorical groups by their declared domain while
+      leaving other groups in appearance order, as ``value_counts`` requires.
 
     Pure config -- execution is provided by the physical impls in
     ``physical/_aggregation_execs.py``, selected at plan time.
     """
     logical_family = "Aggregation"
-    fields = ["grouped", "grouping", "aggregations", "options", "output_type"]
+    fields = ["grouped", "grouping", "aggregations", "sort_keys", "drop_null_keys",
+              "observed", "keys_as_columns", "level", "sort_categories", "output_type"]
 
     def __init__(self, grouped: bool = False,
                  grouping: tuple = (),
                  aggregations: tuple = (),
-                 options: dict | None = None,
+                 sort_keys: bool = True,
+                 drop_null_keys: bool = True,
+                 observed: bool = True,
+                 keys_as_columns: bool = False,
+                 level=None,
+                 sort_categories: bool = False,
                  output_type: OutputType | None = None,
                  inputs: list[Op] | None = None, outputs: list[Op] | None = None):
         # The reductions go in the name so the base helper renders them for both
@@ -52,7 +67,12 @@ class AggregateOp(Op):
         # tuples down into the ColumnExprs inside.
         self.grouping = tuple(grouping)
         self.aggregations = tuple(aggregations)
-        self.options = options or {}
+        self.sort_keys = sort_keys
+        self.drop_null_keys = drop_null_keys
+        self.observed = observed
+        self.keys_as_columns = keys_as_columns
+        self.level = level
+        self.sort_categories = sort_categories
         self.output_type = (output_type if output_type is not None
                             else self.infer_output_type())
 
@@ -77,7 +97,7 @@ class AggregateOp(Op):
         src = src_type
         if src is None:
             src = self.inputs[0].output_type if self.inputs else OutputType.UNKNOWN
-        if self.grouped and self.options.get("as_index") is False:
+        if self.grouped and self.keys_as_columns:
             return OutputType.FRAME
         if self.grouped and self.counts_group_rows():
             # One count per group, whatever columns the source has: pandas'
@@ -94,6 +114,12 @@ class AggregateOp(Op):
         if src is OutputType.SERIES and len(self.aggregations) > 1:
             return OutputType.FRAME
         return src
+
+    @property
+    def index_effect(self):
+        # The groups label the rows, unless the keys become columns.
+        return (IndexEffect.DEFAULT if self.grouped and self.keys_as_columns
+                else IndexEffect.NEW)
 
     def counts_group_rows(self) -> bool:
         """A single unnamed ``size`` over every column: the rows per group.
@@ -131,7 +157,7 @@ class AggregateOp(Op):
             (None if any(isinstance(agg.child, AllCols)
                          for _, agg in self.aggregations) else
              [self.entry_name(i) for i in range(len(self.aggregations))]),
-            self.options.get("as_index"),
+            not self.keys_as_columns,
         )
 
 
@@ -150,18 +176,6 @@ def _render_name(grouping, aggregations) -> str:
     return f"by={', '.join(repr(g) for g in grouping)}, {aggs}"
 
 
-class GroupedDataframeOp(Op):
-    def __init__(self, ops: list[Op]):
-        super().__init__(name="GROUPED_DATAFRAME", is_X=False, is_y=False)
-        self.ops = ops
-        self.output_type = OutputType.FRAME
-
-    def process(self, mode: str, inputs: list):  # pragma: no cover
-        # TODO: GroupedDataframeOp is experimental and not integrated yet.
-        # Needs proper refactoring to collect sub-op inputs from the pool.
-        raise NotImplementedError("GroupedDataframeOp is not integrated yet.")
-
-
 # Aggregation methods callable directly on a groupby (no .agg wrapper needed).
 _AGG_METHODS = {"sum", "mean", "count", "min", "max", "median", "std", "var",
                 "first", "last", "prod", "size", "nunique", "sem"}
@@ -170,9 +184,6 @@ _AGG_FUNCS = {"agg", "aggregate"}
 # `.agg(spec)` also spells its spec as a keyword, and that keyword is the spec
 # itself rather than a parameter of the reduction, so it is read separately.
 _AGG_SPEC_KWARG = "func"
-# Groupby options that change the result and so belong in `AggregateOp.options`.
-# `sort` fixes the output row order, `dropna`/`observed` decide which groups exist.
-_GROUPBY_OPTIONS = {"sort", "dropna", "observed", "as_index", "level"}
 # Options that only say *how* to run, never what the result is. The physical layer
 # picks its own strategy, so these are discarded on the way in rather than
 # refused: keeping them out of the logical IR must not cost us the rewrite.
@@ -282,6 +293,25 @@ def _named_aggregation_spec(value) -> tuple | None:
             or not all(isinstance(v, str) for v in value)):
         return None
     return value[0], value[1], params
+
+
+def _grouping_options(groupby_op: MethodCallOp) -> dict | None:
+    """The groupby call's options as :class:`AggregateOp` fields.
+
+    ``None`` when pandas would reject the call or an option is graph-fed.
+    ``group_keys`` only affects ``apply``, so it has no field.
+    """
+    call = groupby_op.bind_pandas()
+    if call is None:
+        return None
+    options = {name: call.get(name, default) for name, default in (
+        ("sort", True), ("dropna", True), ("observed", True), ("as_index", True),
+        ("level", None))}
+    if any(isinstance(value, OperandRef) for value in options.values()):
+        return None
+    return dict(sort_keys=options["sort"], drop_null_keys=options["dropna"],
+                observed=options["observed"], keys_as_columns=not options["as_index"],
+                level=options["level"])
 
 
 def _extract_grouping(groupby_op: MethodCallOp) -> str | list[str] | OperandRef:
@@ -432,6 +462,9 @@ def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
         return None
     groupby_op, selection = source
     df = groupby_op.inputs[0]
+    options = _grouping_options(groupby_op)
+    if options is None:
+        return None
 
     columns = _selected_columns(selection)
     if selection is not None and columns is None:
@@ -482,14 +515,11 @@ def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
         folder = _Folder(df)
         grouping = _grouping_exprs(groupby_op, folder)
 
-    options = {k: v for k, v in (groupby_op.kwargs or {}).items()
-               if k in _GROUPBY_OPTIONS}
-
     new_op = AggregateOp(
         grouped=True,
         grouping=grouping,
         aggregations=entries,
-        options=options,
+        **options,
         # `_Folder` numbers its leaves from 1 with the source at 0, so this order
         # is fixed by the folder, not a choice. Refusing graph-fed reduction
         # parameters is what keeps the aggregation call from adding more.
@@ -502,28 +532,8 @@ def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
         new_op.output_type = new_op.infer_output_type(
             selection.output_type if selection is not None else source_kind)
 
-    _detach_and_rewire(new_op, df, folder, replaced=[groupby_op, selection, op])
+    folder.install(new_op, replaced=[groupby_op, selection, op])
     return new_op
-
-
-def _detach_and_rewire(new_op: AggregateOp, df: Op, folder: _Folder,
-                       replaced: list) -> None:
-    """Unlink the folded ops and point the surviving producers at ``new_op``.
-
-    Mirrors ``make_mask_selection_op``: absorbed nodes leave the graph entirely,
-    while the frame and every kept leaf feed the aggregation in place of the ops it
-    replaced. Downstream consumers are rewired by the caller.
-    """
-    for node in folder.absorbed:
-        node.detach()
-    replaced_ids = {id(node) for node in replaced if node is not None}
-    for producer in (df, *folder.leaf_ops):
-        producer.outputs = [o for o in producer.outputs
-                            if id(o) not in replaced_ids]
-        producer.add_output(new_op)
-    for node in replaced:
-        if node is not None and node is not new_op:
-            node.inputs = []
 
 
 # --- value_counts -------------------------------------------------------------
@@ -597,8 +607,8 @@ def make_value_counts_ops(op: MethodCallOp) -> Op | None:
         aggregations=(("count", AggExpr("size", values)),),
         # Unsorted on purpose (see above); `dropna` carries straight over, since
         # groupby drops null groups under the same flag and default.
-        options={"sort": False, "dropna": kwargs.get("dropna", True),
-                 "observed": False, "sort_categories": True},
+        sort_keys=False, drop_null_keys=kwargs.get("dropna", True),
+        observed=False, sort_categories=True,
         inputs=[src],
     )
     # The supported Series value_counts form returns a Series of counts.

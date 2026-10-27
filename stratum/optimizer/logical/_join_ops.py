@@ -1,5 +1,9 @@
 from collections.abc import Sequence
-from stratum.optimizer.logical._ops import OperandRef, OutputType, MethodCallOp, Op
+
+import pandas as pd
+
+from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._ops import OperandRef, OutputType, MethodCallOp, Op, substitute_op
 from stratum.optimizer.logical import _schema
 
 
@@ -36,6 +40,16 @@ class JoinOp(Op):
         self.right_index = right_index
         self.suffixes = suffixes
         self.output_type = OutputType.FRAME
+
+    @property
+    def index_effect(self):
+        # A merge numbers its rows 0..n-1; an index join keeps labels.
+        return IndexEffect.NEW if self.left_index or self.right_index else IndexEffect.DEFAULT
+
+    @property
+    def aligns_by_label(self):
+        # Index joins key on labels; key joins on column values.
+        return self.left_index or self.right_index
 
     def propagate_output_schema(self):
         """Merge the two sides; `how` is part of the schema, since a null-padded
@@ -104,6 +118,9 @@ class FilteringJoinOp(Op):
     """
     logical_family = "Join"
     fields = ["anti", "left_on", "right_on"]
+    # Keeps the left rows' labels, and matches key values, never labels.
+    index_effect = IndexEffect.NEW
+    aligns_by_label = False
 
     def __init__(
         self,
@@ -125,93 +142,76 @@ class FilteringJoinOp(Op):
         self.output_schema = self.inputs[0].output_schema
 
 
-_MERGE_POSITIONAL = ["how", "on", "left_on", "right_on",
-                    "left_index", "right_index", "sort", "suffixes"]
-_JOIN_POSITIONAL = ["on", "how", "lsuffix", "rsuffix", "sort"]
+#: The pandas arguments a :class:`JoinOp` field holds.
 _JOIN_OP_FIELDS = {"how", "left_on", "right_on", "left_index", "right_index", "suffixes"}
 
 
-def make_join_op(op: MethodCallOp) -> JoinOp:
-    # First positional arg is the right/other df; it's already in op.inputs
-    pos_args = op.args[1:] if op.args else ()
-    pos_names = _MERGE_POSITIONAL if op.method_name == "merge" else _JOIN_POSITIONAL
+def make_join_op(op: MethodCallOp) -> JoinOp | None:
+    """Parse ``DataFrame.merge`` or ``DataFrame.join`` into a :class:`JoinOp`.
 
-    params = dict(zip(pos_names, pos_args))
-    if op.kwargs:
-        params.update(op.kwargs)
-    params.pop("other", None)
+    The call is bound against pandas' own signature, so both methods' positional
+    orders hold. ``join`` matches the right side's index, by default against the
+    left index too, or against the ``on`` column; ``df.join([df2, df3])`` unrolls
+    into a chain of index joins.
 
-    other_arg = op.args[0] if op.args else None
-    if other_arg is None and op.kwargs:
-        other_arg = op.kwargs.get("other")
-
-    if isinstance(other_arg, (list, tuple)):
-        # Compare by operand index: a frame used twice de-duplicates to one input
-        # edge (the same OperandRef.k), which the chained-join unrolling can't handle.
-        keys = [x.k if isinstance(x, OperandRef) else id(x) for x in other_arg]
-        if len(keys) != len(set(keys)):
-            raise ValueError(
-                "Duplicate right-hand frames in chained joins are not supported."
-            )
-
-    is_chained = (
-        op.method_name == "join"
-        and (isinstance(other_arg, (list, tuple)) or len(op.inputs) > 2)
-    )
-
-    if op.method_name == "join":
-        # pandas .join() defaults to how="left" and matches against right's index.
-        params.setdefault("how", "left")
-        if is_chained:
-            # Chained joins are always index-based on every link.
-            params["left_index"] = True
-            params["right_index"] = True
-            params.pop("on", None)
-            params.pop("left_on", None)
-            params.pop("right_on", None)
-        elif "on" in params:
-            params["left_on"] = params.pop("on")
-            params["left_index"] = False
-            params["right_index"] = True
-        else:
-            params["left_index"] = True
-            params["right_index"] = True
-        # join uses lsuffix/rsuffix instead of suffixes; both default to "" in pandas.
-        if "lsuffix" in params or "rsuffix" in params:
-            params["suffixes"] = (params.pop("lsuffix", ""), params.pop("rsuffix", ""))
-        params.setdefault("suffixes", ("", ""))
-    else:
-        # merge's `on` applies to both sides when left_on/right_on are unset.
-        if "on" in params and "left_on" not in params and "right_on" not in params:
-            shared = params.pop("on")
-            params["left_on"] = shared
-            params["right_on"] = shared
-        else:
-            params.pop("on", None)
-        params.setdefault("suffixes", ("_x", "_y"))
-
-    if params.pop("sort", False):
-        raise NotImplementedError(
-            "sort=True is not supported by JoinOp."
-        )
-
-    unsupported = [
-        k for k in params
-        if k not in _JOIN_OP_FIELDS and k not in ("right", "other")
-    ]
-    if unsupported:
-        raise NotImplementedError(
-            f"Unsupported arguments for {op.method_name}(): {', '.join(sorted(unsupported))}"
-        )
-
-    join_kwargs = {k: v for k, v in params.items() if k in _JOIN_OP_FIELDS}
+    Returns ``None`` (the call stays opaque and runs on pandas as recorded) for a
+    call a ``JoinOp`` cannot hold: ``sort=True``, options such as ``indicator`` or
+    ``validate``, a graph-fed option, a right side that is not a graph input, and
+    a right side that is also the left one or repeats in a chain.
+    """
+    call = op.bind_pandas(owner=pd.DataFrame)
+    if call is None:
+        return None
+    other = call.pop("right" if op.method_name == "merge" else "other", None)
+    is_chained = op.method_name == "join" and isinstance(other, (list, tuple))
+    rights = list(other) if is_chained else [other]
+    # Each right side is its own input edge after the left one, and nothing else
+    # is. A frame used twice de-duplicates to one edge, a literal frame has none,
+    # and a graph-fed option adds one.
+    if (not all(isinstance(r, OperandRef) for r in rights)
+            or sorted(r.k for r in rights) != list(range(1, len(op.inputs)))):
+        return None
+    fields = _join_fields(call, is_chained) if op.method_name == "join" else _merge_fields(call)
+    if fields is None or fields.pop("sort", False) is not False:
+        return None
+    if set(fields) - _JOIN_OP_FIELDS:
+        return None
 
     if is_chained:
-        return _make_chained_join_op(op, join_kwargs)
+        return _make_chained_join_op(op, fields)
 
-    new_op = JoinOp(**join_kwargs, inputs=op.inputs, outputs=op.outputs)
-    op.replace_output_of_inputs(new_op)
-    return new_op
+    return substitute_op(op, JoinOp(**fields))
+
+
+def _merge_fields(call: dict) -> dict | None:
+    """``merge``'s bound arguments as :class:`JoinOp` fields, or ``None`` when
+    pandas would reject them."""
+    # `on` applies to both sides when left_on/right_on are unset.
+    on = call.pop("on", None)
+    if "left_on" not in call and "right_on" not in call:
+        call["left_on"] = call["right_on"] = on
+    elif on is not None:
+        return None  # pandas rejects on= next to left_on=/right_on=
+    call.setdefault("suffixes", ("_x", "_y"))
+    return call
+
+
+def _join_fields(call: dict, is_chained: bool) -> dict:
+    """``join``'s bound arguments as :class:`JoinOp` fields.
+
+    ``join`` always matches the right side's index: against the ``on`` column of
+    the left side, or against its index. A chained join is index-based on every
+    link.
+    """
+    on = call.pop("on", None)
+    call.setdefault("how", "left")
+    if on is not None and not is_chained:
+        call.update(left_on=on, left_index=False, right_index=True)
+    else:
+        call.update(left_index=True, right_index=True)
+    # join names its suffixes lsuffix/rsuffix, both "" by default in pandas.
+    call["suffixes"] = (call.pop("lsuffix", ""), call.pop("rsuffix", ""))
+    return call
 
 
 def _make_chained_join_op(op: MethodCallOp, join_kwargs: dict) -> JoinOp:

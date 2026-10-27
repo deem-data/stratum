@@ -5,7 +5,7 @@ from enum import Enum
 import numpy as np
 import polars as pl
 
-from stratum.optimizer.logical._base import _resolve_args, _resolve_kwargs
+from stratum.optimizer.logical._base import IndexEffect, _resolve_args, _resolve_kwargs
 from stratum.optimizer.logical._ops import BinOp, CallOp, Op, OperandRef
 
 class NumericOpType(Enum):
@@ -60,6 +60,7 @@ _BINARY_NUMPY_FUNCS = frozenset(_NUMPY_BINARY_MAP.keys())
 
 class NumericOp(Op):
     fields = ["func", "args", "kwargs", "type", "constant", "opt_operand", "reversed"]
+    index_effect = IndexEffect.COMMON
     func = None
 
     def __init__(self, inputs=None, outputs=None, func=None, args=(), kwargs=None, type: NumericOpType = None, constant=None, opt_operand=None, reversed=False):

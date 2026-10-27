@@ -90,7 +90,7 @@ def test_grouped_null_semantics(dropna, func):
     def make():
         return AggregateOp(grouped=True, grouping=(Col("g"),),
                            aggregations=(("v", AggExpr(func, Col("v"))),),
-                           options={"dropna": dropna})
+                           drop_null_keys=dropna)
     expected = run_op(make(), pd.DataFrame(data)).reset_index().sort_values("g", na_position="last")
     with force_polars():
         result = run_op(make(), pl.DataFrame(data))

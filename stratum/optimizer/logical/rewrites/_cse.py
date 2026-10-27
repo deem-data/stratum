@@ -22,15 +22,10 @@ two input slots collapsed into one, so such a merge is skipped (see ``_can_merge
 from __future__ import annotations
 
 from stratum.optimizer._op_utils import topological_iterator
-from stratum.optimizer.logical._ops import Op, remap_operand_refs
+from stratum.optimizer.logical._ops import Op
 import logging
 
 logger = logging.getLogger(__name__)
-
-# Attributes that are graph structure rather than configuration; never rewritten
-# when renumbering operand refs. Mirrors the exclusion set in `validate_operands`.
-_STRUCTURAL_ATTRS = frozenset({"inputs", "outputs", "remove_after"})
-
 
 def apply_op_cse(root: Op) -> Op:
     """Run CSE on an Op DAG in place and return the (possibly new) root.
@@ -76,38 +71,13 @@ def _merge_op(op: Op, canonical: Op) -> None:
     ``op`` and ``canonical`` share the same input objects (that is why they are
     equal), so we only move the output edges: every consumer is rebound from
     ``op`` to ``canonical``, then ``op`` is dropped from its inputs' output lists.
+    ``IRNode.replace_input`` collapses the consumer's slot onto ``canonical``'s
+    when it already reads it, renumbering its refs, or swaps it in place for a
+    positional consumer (``_can_merge`` refuses the case where that would be
+    needed).
     """
     for out in list(op.outputs):
-        _rebind_consumer(out, op, canonical)
+        while any(i is op for i in out.inputs):
+            out.replace_input(op, canonical)
         canonical.add_output(out)
     op.detach()
-
-
-def _rebind_consumer(out: Op, old_op: Op, new_op: Op) -> None:
-    """Replace ``old_op`` with ``new_op`` in ``out``'s inputs and renumber refs.
-
-    Input edges are de-duplicated, so if ``out`` already references ``new_op`` the
-    substitution collapses two edges into one and the consumer's :class:`OperandRef`s
-    are remapped to the new, compacted index space. ``_can_merge`` guarantees such a
-    collapse only happens for OperandRef-based consumers.
-    """
-    substituted = [new_op if x is old_op else x for x in out.inputs]
-
-    new_inputs: list = []
-    id_to_new: dict = {}
-    old_to_new: dict = {}
-    for old_k, x in enumerate(substituted):
-        new_k = id_to_new.get(id(x))
-        if new_k is None:
-            new_k = len(new_inputs)
-            new_inputs.append(x)
-            id_to_new[id(x)] = new_k
-        old_to_new[old_k] = new_k
-
-    # Operand refs live in the declared config `fields`; fall back to scanning all
-    # config attributes for the rare op that carries refs without declaring fields.
-    fields = getattr(type(out), "fields", None)
-    attrs = fields if fields is not None else [a for a in out.__dict__ if a not in _STRUCTURAL_ATTRS]
-    for attr in attrs:
-        setattr(out, attr, remap_operand_refs(getattr(out, attr), old_to_new))
-    out.inputs = new_inputs
