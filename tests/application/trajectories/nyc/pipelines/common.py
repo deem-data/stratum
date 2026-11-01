@@ -1,8 +1,8 @@
 """Plan-building helpers for the NYC housing Class-C violation risk task (v2 workspace).
 
 Copied from stratum-bench, trajectories/nyc-housing/mle-claude-run/pipelines, for
-tests/application/test_nyc_trajectory.py. The only changes: the lake is a local
-directory of generated tables, which the test sets as ``LAKE`` before the pipelines
+tests/application/trajectories/nyc/test_nyc_trajectory.py. The only changes: the lake
+is a local directory of generated tables, which the test sets as ``LAKE`` before the pipelines
 are imported, and is read without storage options; GPU models run on the CPU; model
 sizes (trees, iterations, epochs) are a tenth of the original, scaled alike so that
 values that differed still differ; and every TableVectorizer seeds its StringEncoder,

@@ -1,6 +1,6 @@
 """A real agent trajectory, replayed on one reuse cache over a generated lake.
 
-``nyc_trajectory/`` holds the pipelines an agent wrote for the NYC housing Class-C
+``pipelines/`` holds the pipelines an agent wrote for the NYC housing Class-C
 violation risk task, in the order it wrote them (stratum-bench,
 trajectories/nyc-housing/mle-claude-run), with the GCS lake replaced by a local one
 of the same tables, columns and partitions. Each pipeline is scored as the bench
@@ -30,7 +30,7 @@ from stratum.optimizer.logical._ops import MethodCallOp
 from stratum.runtime import _reuse_cache
 from stratum.runtime._scheduler import SequentialScheduler
 
-TRAJECTORY = Path(__file__).parent / "nyc_trajectory"
+TRAJECTORY = Path(__file__).parent / "pipelines"
 SCORING = "average_precision"
 PIPELINES = [f"pipeline_{i:02d}" for i in range(1, 33)]
 

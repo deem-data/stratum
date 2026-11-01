@@ -102,18 +102,38 @@ if __name__ == "__main__":
 
 ### Running the Tests
 
-Install all extras and run the full test suite:
+Install the test dependencies with CPU torch and run the full test suite:
 
 ```bash
-uv sync --all-extras
-pytest -v tests
+uv sync --extra test --extra cpu --extra hardware
+uv run --no-sync pytest -v tests
 ```
 
-Or, more concisely:
+Run the regular suite without trajectory replays:
 
 ```bash
-uv run pytest
+uv run --no-sync pytest -v tests --ignore=tests/application/trajectories
 ```
+
+Run just the NYC trajectory:
+
+```bash
+uv run --no-sync pytest -v tests/application/trajectories/nyc
+```
+
+CI runs the regular suite on all six OS/Python combinations and each trajectory
+in its own Ubuntu/Python 3.12 job. To add a trajectory, create a directory under
+`tests/application/trajectories/<name>/` with uniquely named `test_*.py` modules
+and a `pipelines/` directory for its supporting code. Use lowercase letters,
+digits, underscores or hyphens for the directory name, starting with a letter or
+digit. CI discovers these directories automatically; no workflow edit is needed.
+Keep the ordered replay in a module-scoped fixture so its pipelines share one
+cache, and run it in one pytest process without xdist workers.
+
+Coverage from the regular Ubuntu/Python 3.12 job and every trajectory is combined
+before checking the existing thresholds and uploading to Codecov. The stable
+`Python Tests Complete` check requires discovery, all test jobs, and coverage to
+succeed and can be used as the required branch-protection check.
 
 ---
 

@@ -51,8 +51,8 @@ test = [
     "pytest-xdist>=3.8.0",
     "stratum-ai[server]",
 ]
-# torch is only needed by tests/application/test_ttt_task.py, and which build of
-# it you want depends on the machine, so it rides in its own extra rather than
+# torch is needed by the TTT application test and the NYC trajectory. Its build
+# depends on the machine, so it rides in its own extra rather than
 # in `test`. Pick exactly one alongside `test`: `cpu` on CI and on any box
 # without an NVIDIA GPU, `cu126` on the GPU box. They are declared conflicting
 # below so uv resolves a separate lock branch for each.
@@ -134,6 +134,7 @@ dev = [
 
 [tool.coverage.run]
 source = ["stratum"]
+relative_files = true
 omit = [
     "**/tests/**",
     "*/__pycache__/*",
