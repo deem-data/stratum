@@ -62,11 +62,56 @@ def _pandas_only_operand(op: IRNode) -> bool:
     return False
 
 
+def _polars_safe_estimators() -> frozenset:
+    """Estimators that fit and answer on a polars frame exactly as on the pandas one.
+
+    Each is checked by ``test_an_allowed_estimator_answers_as_on_pandas``. Others
+    can differ: skrub's ``ToCategorical`` makes polars categoricals, which
+    scikit-learn's HistGradientBoosting does not take as categorical.
+    """
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler
+    return frozenset({LinearRegression, LogisticRegression, MinMaxScaler, Ridge,
+                      SimpleImputer, StandardScaler})
+
+
+def _reads_pandas_only(impl_class, op: IRNode) -> bool:
+    """An estimator run as given (the ``sklearn-skrub`` backend, or unbound) reads
+    its data as the pandas run gives it, unless it is one known to answer the same
+    on polars, given data it reads alike from both. Stratum's own kernels
+    (``rust``, ``stratum``) read either library."""
+    from stratum.optimizer.logical._ops import BaseEstimatorOp
+    return (isinstance(op, BaseEstimatorOp)
+            and getattr(impl_class, "backend_name", "sklearn-skrub") == "sklearn-skrub"
+            and (type(op.original_estimator) not in _polars_safe_estimators()
+                 or not _read_alike(op)))
+
+
+def _read_alike(op: IRNode) -> bool:
+    """Whether scikit-learn reads ``op``'s data alike from pandas and polars: each
+    input's schema is known and holds only dtypes it converts the same way from
+    both. It keeps a pandas frame's float32 columns, but widens a polars frame's
+    to float64, and an estimator then computes in the wider type."""
+    import polars as pl
+    from stratum.optimizer.logical import _schema
+    alike = (pl.Float64, pl.Int64, pl.Boolean)
+    for k, producer in enumerate(op.inputs):
+        if op.reads_state(k) or producer.output_type not in FRAME_TYPES:
+            continue
+        schema = producer.output_schema
+        if not _schema.is_known(schema) or any(dtype not in alike for dtype in schema.values()):
+            return False
+    return True
+
+
 def accepts_input(impl_class, op: IRNode, index: int, lib: FrameLib | None) -> bool:
     """Whether ``op`` run by ``impl_class`` reads input ``index`` as ``lib``."""
     if lib is None or op.reads_state(index):
         # A fitted state is read as the object it is.
         return True
+    if lib is FrameLib.POLARS and _reads_pandas_only(impl_class, op):
+        return False
     if impl_class is not None and hasattr(impl_class, "accepts_input_lib"):
         return impl_class.accepts_input_lib(op, index, lib)
     if _is_opaque_call(op) or _pandas_only_operand(op):

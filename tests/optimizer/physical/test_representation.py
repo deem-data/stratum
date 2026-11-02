@@ -12,7 +12,7 @@ from stratum.optimizer.logical._base import FRAME_TYPES
 from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._registry import get_default_physical_registry
 from stratum.optimizer.physical._representation import (
-    FrameLib, frame_lib)
+    FrameLib, _polars_safe_estimators, frame_lib)
 
 
 @pytest.fixture
@@ -86,3 +86,111 @@ def test_registered_impls_declare_their_backends_library():
             expected = {"pandas": FrameLib.PANDAS, "polars": FrameLib.POLARS}.get(
                 impl.backend_name)
             assert impl.impl_class.frame_lib == expected, impl
+
+
+# --- Estimators read what the pandas run gives them ----------------------------
+
+_FEATURES = pd.DataFrame({"c": ["C1", "C2", "C1", "C3"] * 10,
+                          "x": [float(i % 7) for i in range(40)],
+                          "y": [i % 2 for i in range(40)]})
+
+
+def _estimator_inputs(ops):
+    return {type(op.original_estimator).__name__: [frame_lib(i) for i in op.inputs]
+            for op in ops if hasattr(op, "original_estimator")}
+
+
+def test_an_estimator_reads_pandas_under_greedy(tmp_path):
+    # skrub's ToCategorical makes polars categoricals of a polars frame, which
+    # HistGradientBoosting does not take as categorical: it fails on "C1".
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from skrub import TableVectorizer, ToCategorical
+    path = tmp_path / "f.parquet"
+    _FEATURES.to_parquet(path)
+    with skrub.config_context(eager_data_ops=False):
+        data = st.as_data_op(str(path)).skb.apply_func(pd.read_parquet)
+        kept = data[data["x"] > 0]
+        X, y = kept[["c", "x"]].skb.mark_as_X(), kept["y"].skb.mark_as_y()
+        plan = (X.skb.apply(TableVectorizer(low_cardinality=ToCategorical()))
+                .skb.apply(HistGradientBoostingClassifier(max_iter=5), y=y))
+    ops = _optimize(plan, "greedy")
+    assert _estimator_inputs(ops)["HistGradientBoostingClassifier"][0] is FrameLib.PANDAS
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = evaluate(plan)
+    with st.config(scheduler=True):
+        expected = evaluate(plan)
+    assert list(result) == list(expected)
+
+
+def test_an_allowed_estimator_reads_polars_given_dtypes_it_reads_alike(source):
+    from sklearn.preprocessing import StandardScaler
+    with skrub.config_context(eager_data_ops=False):
+        known = skrub.var("frame", pd.DataFrame({"x": [1.0, -2.0, 3.0]}))
+        plan = known[["x"]].skb.apply(StandardScaler())
+    ops = _optimize(plan, "greedy")
+    assert _estimator_inputs(ops)["StandardScaler"][0] is FrameLib.POLARS
+    # A parquet read's dtypes are not known when planning.
+    ops = _optimize(source[["x"]].skb.apply(StandardScaler()), "greedy")
+    assert _estimator_inputs(ops)["StandardScaler"][0] is FrameLib.PANDAS
+
+
+@pytest.mark.parametrize("estimator", sorted(_polars_safe_estimators(), key=lambda c: c.__name__),
+                         ids=lambda c: c.__name__)
+def test_an_allowed_estimator_answers_as_on_pandas(estimator):
+    # Every estimator allowed to read polars, fitted through skrub on the same
+    # data as a pandas and as a polars frame, missing values included where it
+    # takes them.
+    import numpy as np
+    from sklearn.base import is_classifier, is_regressor
+    rng = np.random.default_rng(0)
+    # The dtypes scikit-learn reads alike from both libraries (see _read_alike).
+    X = pd.DataFrame({"a": rng.normal(size=200), "b": rng.integers(0, 9, 200).astype(float),
+                      "c": rng.normal(size=200) * 1e3, "d": rng.integers(0, 9, 200),
+                      "e": rng.normal(size=200) > 0})
+    noise = rng.normal(size=200)
+    y = pd.Series((noise > 0).astype(int) if is_classifier(estimator()) else noise, name="y")
+    if not (is_classifier(estimator()) or is_regressor(estimator())):
+        X.loc[::7, "a"] = np.nan  # the linear models reject missing values
+
+    def fitted(X, y):
+        Xv, yv = skrub.var("X", X).skb.mark_as_X(), skrub.var("y", y).skb.mark_as_y()
+        out = Xv.skb.apply(estimator(), y=yv).skb.eval()
+        return np.asarray(out.to_numpy() if hasattr(out, "to_numpy") else out)
+
+    on_pandas, on_polars = fitted(X, y), fitted(pl.from_pandas(X), pl.from_pandas(y))
+    assert on_pandas.dtype == on_polars.dtype
+    assert on_pandas.shape == on_polars.shape
+    assert np.array_equal(on_pandas, on_polars, equal_nan=True)
+
+
+def test_an_allowed_estimator_reads_pandas_where_it_would_widen_floats(tmp_path):
+    # scikit-learn keeps pandas' float32 but reads polars' as float64.
+    import numpy as np
+    from sklearn.preprocessing import StandardScaler
+    path = tmp_path / "f.parquet"
+    pd.DataFrame({"x": np.arange(5, dtype="float32") / 3}).to_parquet(path)
+    with skrub.config_context(eager_data_ops=False):
+        plan = st.as_data_op(str(path)).skb.apply_func(pd.read_parquet).skb.apply(StandardScaler())
+    ops = _optimize(plan, "greedy")
+    assert _estimator_inputs(ops)["StandardScaler"][0] is FrameLib.PANDAS
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = evaluate(plan)
+    with st.config(scheduler=True):
+        expected = evaluate(plan)
+    pd.testing.assert_frame_equal(result, expected)
+
+
+def test_a_frame_that_may_repeat_a_column_name_stays_on_pandas():
+    # pandas keeps two columns of one name, which polars cannot hold; the drop
+    # after the rename removes both.
+    frame = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0], "k": [5, 6]})
+    with skrub.config_context(eager_data_ops=False):
+        data = skrub.var("frame", frame)
+        name = data.skb.apply_func(lambda df: "pad")
+        plan = data.rename(columns={"a": name, "b": name}).drop(columns=["pad"]).assign(m=1)
+    with st.config(scheduler=True, implementation_selector="greedy"):
+        result = evaluate(plan)
+    with st.config(scheduler=True):
+        expected = evaluate(plan)
+    result = result.to_pandas() if isinstance(result, pl.DataFrame) else result
+    pd.testing.assert_frame_equal(result, expected, check_dtype=False)

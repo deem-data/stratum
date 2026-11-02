@@ -7,15 +7,12 @@ the matching impl in place, so ``isinstance(op, StringMethodOp)`` etc. still
 holds across the plan. For ``AssignMapOp`` every folded entry runs in one
 ``with_columns`` call on polars and goes through ``assign`` on pandas (see
 ``_expressions``). The call-based maps replay their recorded pandas call on
-pandas and translate it on polars (see ``_polars_translate``).
+pandas and translate it on polars (see ``_polars_translate``), except
+``ApplyUDFOp`` and ``AssignOp``, which run on pandas only.
 """
 from __future__ import annotations
 
-import logging
-
-import pandas as pd
 import polars as pl
-from numpy import sin, cos
 
 from stratum.optimizer.logical._base import (
     OperandRef, _resolve_args, _resolve_kwargs, _resolve_operand)
@@ -35,8 +32,6 @@ from stratum.optimizer.physical._polars_translate import (
     polars_frame_fillna_unsupported, polars_str_method_unsupported, polars_string_method,
     polars_to_datetime, polars_where_unsupported)
 from stratum.optimizer.physical._registry import physical_impl
-
-logger = logging.getLogger(__name__)
 
 
 def _resolved_call(op, inputs: list):
@@ -231,6 +226,8 @@ class PolarsMapValuesOp(MapValuesOp, _PolarsColumnMethodExec):
 
 
 # --- ApplyUDFOp (df.apply / column UDF) ---------------------------------------
+# pandas only: the user's function was written for the pandas object pandas
+# hands it (a column Series per call, a missing value as NaN).
 
 @physical_impl(of=ApplyUDFOp, backend="pandas")
 class PandasApplyUDFOp(ApplyUDFOp, PhysicalOp):
@@ -239,45 +236,15 @@ class PandasApplyUDFOp(ApplyUDFOp, PhysicalOp):
         return _obj.apply(*_args, **_kwargs)
 
 
-@physical_impl(of=ApplyUDFOp, backend="polars")
-class PolarsApplyUDFOp(ApplyUDFOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
-        _obj, _args, _kwargs = _resolved_call(self, inputs)
-        if not isinstance(_obj, pl.Series):
-            return _obj.map_rows(*_args, **_kwargs)
-        if _args[0] == sin:
-            logger.debug("Rewrite UDF sin to polars sin")
-            return _obj.sin()
-        if _args[0] == cos:
-            logger.debug("Rewrite UDF cos to polars cos")
-            return _obj.cos()
-        return _obj.map_elements(*_args, **_kwargs)
-
-
 # --- AssignOp (df.assign, non-foldable) ---------------------------------------
+# pandas only: a recorded value may be a Series aligned by index, or a scalar
+# whose dtype pandas infers, neither of which ``with_columns`` reproduces.
 
 @physical_impl(of=AssignOp, backend="pandas")
 class PandasAssignOp(AssignOp, PhysicalOp):
     def process(self, mode: str, inputs: list):
         _obj, _args, _kwargs = _resolved_call(self, inputs)
         return _obj.assign(*_args, **_kwargs)
-
-
-@physical_impl(of=AssignOp, backend="polars")
-class PolarsAssignOp(AssignOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
-        _obj, _args, _kwargs = _resolved_call(self, inputs)
-        checked_kwargs = {}
-        for k, v in _kwargs.items():
-            if isinstance(v, pd.Series) or isinstance(v, pd.DataFrame):
-                # A literal pandas value recorded in the call, not a plan edge.
-                logger.warning(f"Converting pandas object to polars object for column {k}")
-                checked_kwargs[k] = pl.from_pandas(v)
-            elif isinstance(v, list):
-                checked_kwargs[k] = pl.Series(v)
-            else:
-                checked_kwargs[k] = v
-        return _obj.with_columns(*_args, **checked_kwargs)
 
 
 # --- DatetimeConversionOp (pd.to_datetime) ------------------------------------

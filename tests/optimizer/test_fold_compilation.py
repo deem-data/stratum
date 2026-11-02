@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import skrub
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
@@ -156,11 +157,11 @@ def run_search(plan, cv=KFold(3), recompile_with=None):
     ``recompile_with`` is the selector the compile after the first fold uses."""
     profiles = []
 
-    def compile_folds(profile=None, current=None):
+    def compile_folds(profile=None, current=None, known=None):
         profiles.append(profile)
         if profile is not None and recompile_with is not None:
             plan.selector = recompile_with
-        return plan.compile_folds(profile, current)
+        return plan.compile_folds(profile, current, known)
 
     sched = SequentialScheduler(plan.linearized_dag, plan.split_pos, compile_folds=compile_folds)
     sched.grid_search(cv)
@@ -235,3 +236,35 @@ def test_a_recompile_reads_what_the_plan_before_the_split_kept(frame):
     unchanged, _ = run_search(plan())
     assert sched.results_.equals(unchanged.results_)
     assert sched.pool.active_count == 0 and not sched.state_store
+
+
+@pytest.mark.parametrize("names,lib", [(["x y", "z"], "Polars"), (["x y", "x_y"], "Pandas")])
+def test_a_fold_is_compiled_knowing_the_scalars_computed_before_the_split(names, lib,
+                                                                          monkeypatch):
+    # The new column names come from data the plan reads before the split; a
+    # fold renames on polars only where they stay distinct.
+    from stratum.optimizer._fold_compilation import FoldTemplate
+    from stratum.optimizer.logical._metadata_ops import RenameOp
+    renames = []
+    compile_ = FoldTemplate.compile
+    def compile_and_record(self, *args, **kwargs):
+        fold = compile_(self, *args, **kwargs)
+        renames.extend(type(op).__name__ for op in fold.ops if isinstance(op, RenameOp))
+        return fold
+    monkeypatch.setattr(FoldTemplate, "compile", compile_and_record)
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({"a": rng.normal(size=40), "b": rng.normal(size=40)})
+    y = pd.Series(rng.normal(size=40), name="y")
+    with skrub.config_context(eager_data_ops=False):
+        X = skrub.var("X", frame).skb.mark_as_X(cv=KFold(2, shuffle=True, random_state=0))
+        top = skrub.var("cats", pd.DataFrame({"c": names}))["c"].value_counts().index
+        new = {"a": "p_" + top[0].replace(" ", "_"), "b": "p_" + top[1].replace(" ", "_")}
+        plan = (X.rename(columns=new) * 2).skb.apply(Ridge(), y=skrub.var("y", y).skb.mark_as_y())
+    scores = {}
+    for selector in ("default", "greedy"):
+        renames.clear()
+        with st.config(scheduler=True, implementation_selector=selector):
+            search = plan.skb.make_grid_search(fitted=True, refit=False, n_jobs=1, scoring="r2")
+        scores[selector] = list(search.results_["scores"])
+    assert renames and all(name == f"{lib}RenameOp" for name in renames)
+    assert scores["greedy"] == scores["default"]

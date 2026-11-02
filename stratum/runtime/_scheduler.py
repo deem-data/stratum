@@ -4,7 +4,8 @@ from typing import Any
 from sklearn.model_selection import train_test_split, check_cv
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._dataframe_ops import SplitOp
-from stratum.optimizer._fold_compilation import FoldPlan, FoldProfile, Measured
+from stratum.optimizer._fold_compilation import (FoldPlan, FoldProfile, KNOWN_VALUE_TYPES,
+                                                 Measured)
 from stratum.optimizer._lineage import state_key
 from stratum.optimizer.logical._ops import Op
 from stratum.runtime._buffer_pool import BufferPool
@@ -414,17 +415,28 @@ class SequentialScheduler(Scheduler):
         """Compile the fold plan; the plan the scheduler reports is the ops it ran
         before the split followed by it."""
         if self._compile_folds is not None:
-            self._use_fold_plan(self._compile_folds())
+            self._use_fold_plan(self._compile_folds(known=self._known_values()))
         else:
             self._use_fold_plan(FoldPlan(self.linearized_dag[self.pos_split_op:]))
 
     def _recompile_folds(self, profile: FoldProfile) -> None:
         """Compile the fold plan again from what a fold measured; the next folds
         run what it gives."""
-        plan = self._compile_folds(profile, self.fold_plan)
+        plan = self._compile_folds(profile, self.fold_plan, known=self._known_values())
         if plan is not self.fold_plan:
             logger.debug("The plan of the remaining folds changed after the first")
             self._use_fold_plan(plan)
+
+    def _known_values(self) -> dict:
+        """The plain scalar values of the ops before the split, which the plan
+        after it is compiled knowing (see ``FoldTemplate.compile``)."""
+        known = {}
+        for op in self.linearized_dag[:self.pos_split_op]:
+            entry = self.pool.live_variable_map.get(op)
+            if (entry is not None and not entry.is_spilled
+                    and isinstance(entry.data, KNOWN_VALUE_TYPES)):
+                known[op] = entry.data
+        return known
 
     def _use_fold_plan(self, plan: FoldPlan) -> None:
         self.fold_plan = plan

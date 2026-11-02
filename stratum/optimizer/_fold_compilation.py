@@ -109,11 +109,13 @@ class FoldTemplate:
         """The ops before the split the plan after it reads."""
         return {b.stands_for for b in self.boundaries}
 
-    def compile(self, ctx, selector, live: set[IRNode], registry=None) -> FoldPlan:
+    def compile(self, ctx, selector, live: set[IRNode], registry=None,
+                known: dict | None = None) -> FoldPlan:
         """Lower a copy of the template and select its implementations.
 
         ``live`` are the ops before the split whose values the pool keeps for the
-        folds. A conversion of one of them that the plan before the split already
+        folds. ``known`` maps some of them to their value, a plain scalar, which
+        the plan is compiled knowing (``BoundaryOp.known_value``). A conversion of one of them that the plan before the split already
         made is read from there rather than repeated in every fold. An op before
         the split the pool did not keep is read through a conversion of it that it
         kept, converted back if the plan needs it so.
@@ -124,6 +126,8 @@ class FoldTemplate:
         for op, new in copies.items():
             if isinstance(new, BoundaryOp):
                 new.stands_for = _kept(op.stands_for, live)
+                if known and new.stands_for in known:
+                    new.known_value = known[new.stands_for]
         replaced = {}
         root = lower_to_physical(copies[self.root], ctx, replaced)
         for op, new in copies.items():
@@ -150,6 +154,11 @@ class FoldTemplate:
                          else in_ for in_ in op.inputs]
         log_time("compiling the plan after the split took", start)
         return FoldPlan(fold)
+
+
+#: The values a plan after the split is compiled knowing: plain scalars (numpy's
+#: among them), cheap to read from the pool and small enough to hold in the plan.
+KNOWN_VALUE_TYPES = (str, int, float, bool)
 
 
 def _kept(op: IRNode, live: set[IRNode]) -> IRNode:

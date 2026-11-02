@@ -11,7 +11,7 @@ import stratum as st
 from stratum.adapters.string_encoder import supports_rust_string_encoder
 from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.physical._concat_execs import PandasConcatOp, PolarsConcatOp
-from stratum.optimizer.physical._map_execs import PandasAssignMapOp, PolarsAssignMapOp
+from stratum.optimizer.physical._map_execs import PandasAssignMapOp
 from stratum.optimizer.physical._projection_execs import (
     PandasColumnProjectionOp,
     PandasColumnSelectorOp,
@@ -100,7 +100,9 @@ def test_greedy_selector_compiles_registered_pipeline():
             )
 
     assert any(isinstance(op, PolarsReadCSV) for op in ops)
-    assert any(isinstance(op, PolarsAssignMapOp) for op in ops)
+    # Ridge reads pandas, since the encoder's float32 output would be read as
+    # float64 from polars, and its predictions keep the test rows' index: their
+    # side stays on pandas from the split on.
     assert any(isinstance(op, PolarsColumnProjectionOp) for op in ops)
     assert any(isinstance(op, PolarsColumnSelectorOp) for op in ops)
     assert any(isinstance(op, PolarsConcatOp) for op in ops)

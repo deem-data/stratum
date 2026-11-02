@@ -172,19 +172,20 @@ class CompiledPlan:
         self.reuse = reuse
 
     def compile_folds(self, profile: FoldProfile | None = None,
-                      current: FoldPlan | None = None) -> FoldPlan:
+                      current: FoldPlan | None = None, known: dict | None = None) -> FoldPlan:
         """The plan of a fold, compiled at the split: from the retained template if
         there is one, else the initial plan's ops from the split on.
 
         Compiled again after a fold, ``profile`` is what that fold measured and
         ``current`` the plan it ran, which is returned if the new one decides as it
-        does.
+        does. ``known``: the plain scalar values of ops before the split.
         """
         if self.template is None:
             return current or FoldPlan(self.linearized_dag[self.split_pos:], self.reuse)
         before = self.linearized_dag[:self.split_pos]
         ctx = self.ctx if profile is None else replace(self.ctx, profile=profile)
-        fold = self.template.compile(ctx, self.selector, live=pinned_before_split(before))
+        fold = self.template.compile(ctx, self.selector, live=pinned_before_split(before),
+                                     known=known)
         if current is not None and fold.decides_as(current):
             return current
         fold.reuse = self.reuse

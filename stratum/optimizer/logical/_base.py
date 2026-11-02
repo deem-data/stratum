@@ -71,10 +71,16 @@ class IndexEffect(Enum):
 
     Index lineage (``physical/_conversion.py``) follows these to tell when two
     frames share row labels, so that pairing their rows by position (polars)
-    gives what aligning them by label (pandas) does.
+    gives what aligning them by label (pandas) does. Index use
+    (``physical/_index_use.py``) follows them back, to tell which inputs' index
+    reaches the output.
     """
-    #: Labels of its own; nothing is assumed about them.
+    #: Labels of its own; nothing is assumed about them, so they may be any
+    #: input's (a row selection keeps some of its input's).
     NEW = auto()
+    #: Labels of its own, none of them its inputs' (an aggregation's groups,
+    #: ``set_index``'s columns): the inputs' index does not reach the output.
+    FRESH = auto()
     #: Its first input's rows, in order, with their labels.
     KEEP = auto()
     #: Elementwise over its inputs: their labels, if they all share them.
@@ -297,6 +303,22 @@ class IRNode:
     #: label, ``False`` by position or not at all, ``None`` by label wherever the
     #: labels differ (pandas' alignment of elementwise operands).
     aligns_by_label = None
+
+    #: The inputs whose rows this op matches by label, where it matches only some
+    #: of them (an index join, on one side's labels); ``None`` defers to
+    #: ``aligns_by_label``.
+    keyed_inputs: tuple[int, ...] | None = None
+
+    #: The inputs whose index reaches the output, where ``index_effect`` does not
+    #: say which; ``None`` defers to it.
+    index_passed_from: tuple[int, ...] | None = None
+
+    #: Whether the result depends on its inputs' index other than by passing it
+    #: to the output (``index_effect``) or pairing rows by it (``aligns_by_label``):
+    #: a read of ``.index``, a label lookup, or recorded code stratum cannot see
+    #: into. Index use (``physical/_index_use.py``) keeps the index of what such an
+    #: op reads. True unless declared otherwise.
+    reads_index = True
 
     #: Physical impls multiply-inherit from their logical family op (e.g.
     #: ``PandasQuerySelectionOp(SelectionOp, PhysicalOp)``), so they would inherit

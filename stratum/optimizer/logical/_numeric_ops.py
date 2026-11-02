@@ -62,6 +62,7 @@ _BINARY_NUMPY_FUNCS = frozenset(_NUMPY_BINARY_MAP.keys())
 class NumericOp(Op):
     fields = ["func", "args", "kwargs", "type", "constant", "opt_operand", "reversed"]
     index_effect = IndexEffect.COMMON
+    reads_index = False
     func = None
     #: Keyed by its operation and operands; a GENERIC one holds a numpy function
     #: stratum does not know, and is not.

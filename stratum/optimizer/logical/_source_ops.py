@@ -35,6 +35,7 @@ class SourceOp(Op):
     logical_family = "Source"
     # A reader numbers the rows it reads 0..n-1.
     index_effect = IndexEffect.DEFAULT
+    reads_index = False
 
 
 def file_fingerprint(path, storage_options=None) -> tuple:

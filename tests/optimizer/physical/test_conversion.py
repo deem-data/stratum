@@ -173,12 +173,13 @@ _FRAME_MODULES = ["_aggregation_ops", "_column_methods", "_dataframe_ops", "_ind
                   "_selection_ops", "_sort_ops", "_source_ops"]
 
 
+@pytest.mark.parametrize("attribute", ["index_effect", "reads_index"])
 @pytest.mark.parametrize("name", _FRAME_MODULES)
-def test_every_frame_operator_declares_its_index_effect(name):
-    # Index lineage reads the declaration; an op that relied on the base
-    # default would have its effect decided by omission.
+def test_every_frame_operator_declares_how_it_treats_the_index(name, attribute):
+    # Index lineage and index use read the declarations; an op that relied on
+    # the base default would have them decided by omission.
     module = importlib.import_module(f"stratum.optimizer.logical.{name}")
     undeclared = [cls.__name__ for _, cls in inspect.getmembers(module, inspect.isclass)
                   if issubclass(cls, Op) and cls.__module__ == module.__name__
-                  and next(k for k in cls.__mro__ if "index_effect" in vars(k)) is IRNode]
-    assert not undeclared, f"operators without an index_effect: {undeclared}"
+                  and next(k for k in cls.__mro__ if attribute in vars(k)) is IRNode]
+    assert not undeclared, f"operators without {attribute}: {undeclared}"

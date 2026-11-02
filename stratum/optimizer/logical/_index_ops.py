@@ -14,6 +14,7 @@ class IndexAccessOp(Op):
     logical_family = "IndexAccess"
     fields = []
     index_effect = IndexEffect.NEW
+    reads_index = True
     cacheable = True
 
     def __init__(self, inputs=None, outputs=None):
@@ -27,6 +28,8 @@ class GroupKeysOp(Op):
     logical_family = "GroupKeys"
     fields = ["key"]
     index_effect = IndexEffect.NEW
+    # On pandas the keys are the aggregate's index.
+    reads_index = True
     cacheable = True
 
     def __init__(self, key: str, inputs=None, outputs=None):

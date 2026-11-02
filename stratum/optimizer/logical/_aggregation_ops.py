@@ -47,6 +47,11 @@ class AggregateOp(Op):
               "observed", "keys_as_columns", "level", "sort_categories", "output_type"]
     cacheable = True
 
+    @property
+    def reads_index(self) -> bool:
+        # Grouping by an index level groups by the index.
+        return self.level is not None
+
     def __init__(self, grouped: bool = False,
                  grouping: tuple = (),
                  aggregations: tuple = (),
@@ -120,7 +125,7 @@ class AggregateOp(Op):
     def index_effect(self):
         # The groups label the rows, unless the keys become columns.
         return (IndexEffect.DEFAULT if self.grouped and self.keys_as_columns
-                else IndexEffect.NEW)
+                else IndexEffect.FRESH)
 
     def counts_group_rows(self) -> bool:
         """A single unnamed ``size`` over every column: the rows per group.

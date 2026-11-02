@@ -61,6 +61,7 @@ class ConcatOp(Op):
     fields = ["operands", "axis"]
     # Stacked rows keep their inputs' labels, repeats and all.
     index_effect = IndexEffect.NEW
+    reads_index = False
     cacheable = True
 
     def __init__(self, operands: list = None, axis=0, inputs: list[Op] = None,

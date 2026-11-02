@@ -252,6 +252,7 @@ _STATEFUL_IMPLS = (Apply, Concat, FreezeAfterFit)
 class SplitXOp(Op):
     """Temporary X boundary carrying skrub's declared splitter until split planning."""
     index_effect = IndexEffect.KEEP
+    reads_index = False
 
     def __init__(self, skrub_impl: SplitX):
         super().__init__(name="X", is_X=True)
@@ -319,6 +320,7 @@ class BaseEstimatorOp(Op):
     # Row-preserving, and positional on both backends.
     index_effect = IndexEffect.KEEP
     aligns_by_label = False
+    reads_index = False
 
     @classmethod
     def callable_kwargs_keys(cls, estimator) -> frozenset:
@@ -632,6 +634,8 @@ def process_transformer_task(task_data):
 class ChoiceOp(Op):
     logical_family = "Choice"
     fields = ["outcome_names"]
+    # Hands its outcomes on as they are.
+    reads_index = False
 
     def __init__(self, outcome_names: list[str] = None, n_outcomes: int = None, choice_name: str=None, append_choice_name = True, inputs: list = None):
         if inputs is None:
@@ -813,6 +817,17 @@ class GetItemOp(Op):
             name = str(key)
         super().__init__(name=name)
 
+    @property
+    def reads_index(self) -> bool:
+        """A frame's columns are taken by name and its rows by position (an integer
+        slice) or by a mask, which ``aligns_by_label`` covers; a series' item and a
+        label slice are looked up by label."""
+        if not self.inputs or self.inputs[0].output_type is not OutputType.FRAME:
+            return True
+        key = self.key
+        return isinstance(key, slice) and not all(
+            bound is None or isinstance(bound, int) for bound in (key.start, key.stop, key.step))
+
     def propagate_output_schema(self):
         """A literal key projects a sub-schema; a row slice or a boolean row mask
         keeps the input schema."""
@@ -836,6 +851,7 @@ class GetItemOp(Op):
 class BinOp(Op):
     fields = ["op", "left", "right"]
     index_effect = IndexEffect.COMMON
+    reads_index = False
     
     def __init__(self, op: Callable, left, right):
         super().__init__(name=op.__name__.lstrip('__').rstrip('__'))
@@ -878,6 +894,7 @@ def apply_binary(op, left, right):
 class UnaryOp(Op):
     fields = ["op", "operand"]
     index_effect = IndexEffect.COMMON
+    reads_index = False
 
     def __init__(self, op: Callable, operand):
         super().__init__(name=op.__name__.lstrip('__').rstrip('__'))

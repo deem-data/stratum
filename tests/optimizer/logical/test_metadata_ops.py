@@ -117,6 +117,19 @@ class TestRenameExecution(unittest.TestCase):
         self.assertFalse(PolarsRenameOp.supports(RenameOp(index={0: 9}), None))
         self.assertTrue(PolarsRenameOp.supports(RenameOp(columns={"a": "x"}), None))
 
+    def test_polars_refuses_a_rename_that_may_give_two_columns_one_name(self):
+        # pandas keeps both columns; polars refuses the duplicate.
+        from stratum.optimizer.physical._metadata_execs import PolarsRenameOp
+        known = _inp(None)
+        known.output_schema = pl.Schema({"a": pl.Int64, "b": pl.Int64})
+        cases = [({"a": "x", "b": "x"}, []), ({"a": "b"}, [known]),
+                 ({"a": OperandRef(1)}, []), (str.upper, [])]
+        for case, (columns, inputs) in enumerate(cases):
+            with self.subTest(case=case):
+                op = RenameOp(columns=columns, inputs=inputs)
+                self.assertFalse(PolarsRenameOp.supports(op, None))
+        self.assertTrue(PolarsRenameOp.supports(RenameOp(columns={"a": "x"}, inputs=[known]), None))
+
 
 class TestToFrame(unittest.TestCase):
     """`to_frame` turns a series into a frame: a rename, which may relabel its column."""

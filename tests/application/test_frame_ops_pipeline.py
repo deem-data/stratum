@@ -127,10 +127,16 @@ def backend(request):
     return FlagBasedSelector(backend=request.param)
 
 
-def test_frame_ops_pipeline_plan(backend):
+def test_frame_ops_pipeline_plan(backend, request):
     """Every logical abstraction is recognised, and the compiling pass binds the
     frame abstractions to concrete physical implementations -- on either
     backend, since each frame family has a pandas and a polars impl."""
+    if backend.backend == "polars":
+        # The encoder and Ridge read pandas (their input dtypes are not known when
+        # planning), and pass the filter's index on to the predictions: polars
+        # cannot carry it until it carries an index of its own.
+        request.applymarker(pytest.mark.xfail(strict=True, raises=NotImplementedError,
+                                              reason="the index reaches the result"))
     with csv_file(make_orders()) as path:
         ops = _optimize(build_pipeline(path), backend)
 

@@ -33,6 +33,9 @@ class SelectionOp(Op):
         # stays a series); extraction overrides this with the propagated type.
         self.output_type = OutputType.FRAME
 
+    # Rows are kept by value, position or chance, not by label.
+    reads_index = False
+
     def propagate_output_schema(self):
         """Rows go, columns stay: the source schema passes through unchanged."""
         # A selection with no source edge has nothing to pass through.
@@ -154,6 +157,7 @@ class DropLabelsSelectionOp(SelectionOp):
     level of a MultiIndex; ``errors="ignore"`` skips labels that are absent.
     """
     fields = ["labels", "level", "errors"]
+    reads_index = True
 
     def __init__(self, labels=None, level=None, errors="raise",
                  inputs: list[Op] = None, outputs: list[Op] = None):

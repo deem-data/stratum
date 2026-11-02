@@ -16,6 +16,7 @@ class ProjectionOp(Op):
     """Base for projection operators: keeps rows and values, selects columns."""
     logical_family = "Projection"
     index_effect = IndexEffect.KEEP
+    reads_index = False
 
     def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)

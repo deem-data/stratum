@@ -29,7 +29,11 @@ class MetadataOp(Op):
     """
     logical_family = "Metadata"
     # A structure read is not a frame; a relabelling says how it relabels.
-    index_effect = IndexEffect.NEW
+    index_effect = IndexEffect.FRESH
+    # A relabelling passes the index on (``rename``) or drops it; a structure
+    # read does not look at it. Neither pairs rows.
+    reads_index = False
+    aligns_by_label = False
     cacheable = True
 
 
@@ -46,7 +50,11 @@ class RenameOp(MetadataOp):
     has none.
     """
     fields = ["columns", "index", "errors", "label", "as_frame"]
-    index_effect = IndexEffect.KEEP
+
+    @property
+    def index_effect(self):
+        # Relabelled rows keep their place, not their labels.
+        return IndexEffect.KEEP if self.index is None else IndexEffect.NEW
 
     def __init__(self, columns=None, index=None, errors="ignore", label: tuple | None = None,
                  as_frame: bool = False, inputs: list[Op] = None, outputs: list[Op] = None):
@@ -104,7 +112,7 @@ class RowLabelsOp(MetadataOp):
 
     @property
     def index_effect(self):
-        return IndexEffect.DEFAULT if self.keys is None and self.labels is None else IndexEffect.NEW
+        return IndexEffect.DEFAULT if self.keys is None and self.labels is None else IndexEffect.FRESH
 
     @property
     def labels_source(self) -> Op | None:

@@ -19,6 +19,8 @@ class SplitOp(Op):
     from.
     """
     logical_family = "Split"
+    # A fold's rows are taken by position.
+    reads_index = False
 
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
         super().__init__(name="Train/Test", is_X=False, is_y=False, inputs=inputs, outputs=outputs)
@@ -57,6 +59,7 @@ class SplitOutput(Op):
     op: the training side depends on the training rows only, and the splitter that
     chose them does not matter.
     """
+    reads_index = False
     cacheable = True
 
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, train=False):
@@ -98,6 +101,19 @@ class SplitOutput(Op):
                 hashlib.blake2b(rows.tobytes(), digest_size=16).digest())
 
 
+#: A :attr:`BoundaryOp.known_value` that no value has been given for.
+NOT_KNOWN = object()
+
+
+def known_operand(op: Op, value):
+    """``value``, a field of ``op``, as known at plan time: a graph-fed one is the
+    value of a :class:`BoundaryOp` it reads, if known; else ``NOT_KNOWN``."""
+    if not isinstance(value, OperandRef):
+        return value
+    source = op.inputs[value.k] if value.k < len(op.inputs) else None
+    return source.known_value if isinstance(source, BoundaryOp) else NOT_KNOWN
+
+
 class BoundaryOp(Op):
     """An op before the split, as the retained plan after the split reads it.
 
@@ -108,6 +124,7 @@ class BoundaryOp(Op):
     output has the frame library that op's has, and its index the same origin.
     """
     logical_family = "Boundary"
+    reads_index = False
 
     def __init__(self, stands_for: Op):
         super().__init__(name=str(stands_for), is_X=stands_for.is_X, is_y=stands_for.is_y)
@@ -116,6 +133,9 @@ class BoundaryOp(Op):
         self.stands_for = stands_for
         self.output_type = stands_for.output_type
         self.output_schema = stands_for.output_schema
+        #: That op's value, where it is a plain scalar the plan is compiled
+        #: knowing (see ``FoldTemplate.compile``); else ``NOT_KNOWN``.
+        self.known_value = NOT_KNOWN
 
     @classmethod
     def output_frame_lib(cls, op, libs):
@@ -135,6 +155,8 @@ class BuildSplitterOp(Op):
     the pool for the scheduler to cut the folds with.
     """
     logical_family = "BuildSplitter"
+    # A splitter takes ``groups`` by position.
+    reads_index = False
     fields = ("cv", "split_kwargs")
 
     def __init__(self, cv, split_kwargs, inputs: list[Op]=None, outputs: list[Op]=None):

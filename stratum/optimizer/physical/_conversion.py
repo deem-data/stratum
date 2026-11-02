@@ -2,8 +2,9 @@
 
 pandas -> polars is always admitted (polars has no index). polars -> pandas
 yields a RangeIndex, so it is admitted only where the pandas plan also has a
-default index (:func:`has_default_index`); otherwise the producer
-runs on pandas. Strings convert to pandas' ``str`` dtype.
+default index (:func:`has_default_index`) or where the index is not used (see
+``_index_use``); otherwise the producer runs on pandas. Strings convert to
+pandas' ``str`` dtype.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ class ConversionOp(PhysicalOp):
 
     logical_family = "Conversion"
     index_effect = IndexEffect.KEEP
+    reads_index = False
     cacheable = True
 
     def __init__(self, source: FrameLib, target: FrameLib, inputs=None, outputs=None):

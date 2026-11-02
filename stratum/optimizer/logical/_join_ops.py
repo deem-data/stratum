@@ -42,6 +42,9 @@ class JoinOp(Op):
         self.suffixes = suffixes
         self.output_type = OutputType.FRAME
 
+    # An index join pairs rows by label (``aligns_by_label``); a key join, by value.
+    reads_index = False
+
     @property
     def index_effect(self):
         # A merge numbers its rows 0..n-1; an index join keeps labels.
@@ -51,6 +54,19 @@ class JoinOp(Op):
     def aligns_by_label(self):
         # Index joins key on labels; key joins on column values.
         return self.left_index or self.right_index
+
+    @property
+    def keyed_inputs(self):
+        # Keyed on one side's labels, a left or inner join gives its rows the
+        # other side's labels.
+        if self.left_index != self.right_index and self.how in ("left", "inner"):
+            return (1,) if self.right_index else (0,)
+        return None
+
+    @property
+    def index_passed_from(self):
+        keyed = self.keyed_inputs
+        return None if keyed is None else (1 - keyed[0],)
 
     def propagate_output_schema(self):
         """Merge the two sides; `how` is part of the schema, since a null-padded
@@ -122,6 +138,7 @@ class FilteringJoinOp(Op):
     # Keeps the left rows' labels, and matches key values, never labels.
     index_effect = IndexEffect.NEW
     aligns_by_label = False
+    reads_index = False
     cacheable = True
 
     def __init__(

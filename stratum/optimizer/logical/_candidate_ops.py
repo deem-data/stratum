@@ -20,7 +20,7 @@ from __future__ import annotations
 import polars as pl
 
 from stratum.optimizer.logical import _schema
-from stratum.optimizer.logical._base import OutputType, _resolve_operand, clone_value
+from stratum.optimizer.logical._base import IndexEffect, OutputType, _resolve_operand, clone_value
 from stratum.optimizer.logical._ops import Op, OperandRef
 from stratum.optimizer.logical._scoring import Metric, read_response
 
@@ -42,6 +42,9 @@ class DeclaredScoringOp(Op):
 
     logical_family = "DeclaredScoring"
     fields = ["scorers"]
+    # ``pred``, unchanged.
+    index_effect = IndexEffect.KEEP
+    reads_index = False
 
     def __init__(self, scorers: list, inputs: list | None = None):
         super().__init__(inputs=list(inputs) if inputs else [])
@@ -60,6 +63,8 @@ class CandidateSetOp(Op):
 
     logical_family = "CandidateSet"
     fields = ["candidate_names"]
+    # The candidates' values go on as they are, or are scored by position.
+    reads_index = False
 
     def __init__(self, candidate_names: list[str], inputs: list | None = None):
         super().__init__(inputs=list(inputs) if inputs else [])
@@ -149,6 +154,18 @@ class ScoreCandidatesOp(CandidateSetOp):
                             kwargs_refs=clone_value(self.kwargs_refs))
         new_op.was_cloned = True
         return new_op
+
+    @property
+    def aligns_by_label(self):
+        # Stratum's and scikit-learn's metrics read arrays, so they pair values
+        # and labels by position; a user's callable may align them.
+        return None if self.metric.source == "callable" else False
+
+    @property
+    def index_effect(self):
+        # A polars table of scores; the candidates' values, if it emits them, go
+        # in as they are, index and all.
+        return IndexEffect.NEW if self.emit_predictions else IndexEffect.DEFAULT
 
     def process(self, mode: str, inputs: list):
         y_true = inputs[self.y_ref.k]

@@ -27,7 +27,7 @@ from stratum.optimizer.logical._ops import (
     BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType,
     UnaryOp)
 from .test_dataframe_ops import (
-    PolarsTestCase, _inp, optimize, run_op, force_polars, make_map_op)
+    _inp, optimize, run_op, force_polars, make_map_op)
 
 
 def _one(test, ops, cls):
@@ -1111,42 +1111,6 @@ class TestApplyUDFOp(unittest.TestCase):
         op = ApplyUDFOp(args=(lambda x: x * 2,), kwargs={})
         result = run_op(op, pd.DataFrame({"a": [1, 2], "b": [3, 4]}))
         self.assertEqual([2, 4], result["a"].tolist())
-
-    def test_polars_sin_rewrite(self):
-        with force_polars():
-            op = ApplyUDFOp(args=(np.sin,), kwargs={})
-            result = run_op(op, pl.Series("a", [0.0, np.pi / 2]))
-            self.assertAlmostEqual(1.0, result[1], places=5)
-
-    def test_polars_cos_rewrite(self):
-        with force_polars():
-            op = ApplyUDFOp(args=(np.cos,), kwargs={})
-            result = run_op(op, pl.Series("a", [0.0]))
-            self.assertAlmostEqual(1.0, result[0], places=5)
-
-    def test_polars_single_col_general_func(self):
-        with force_polars():
-            op = ApplyUDFOp(args=(lambda x: x + 1,), kwargs={})
-            result = run_op(op, pl.Series("a", [1, 2, 3]))
-            self.assertEqual([2, 3, 4], result.to_list())
-
-    def test_polars_multi_col_map_rows(self):
-        with force_polars():
-            op = ApplyUDFOp(args=(lambda row: (row[0] + row[1],),), kwargs={})
-            result = run_op(op, pl.DataFrame({"a": [1, 2], "b": [3, 4]}))
-            self.assertIsNotNone(result)
-
-
-class TestAssignOpPolars(PolarsTestCase):
-    def test_polars_series(self):
-        op = AssignOp(args=(), kwargs={"b": pl.Series([10, 20])})
-        result = run_op(op, pl.DataFrame({"a": [1, 2]}))
-        self.assertIn("b", result.columns)
-
-    def test_pandas_series_converted_to_polars(self):
-        op = AssignOp(args=(), kwargs={"b": pd.Series([10, 20])})
-        result = run_op(op, pl.DataFrame({"a": [1, 2]}))
-        self.assertIn("b", result.columns)
 
 
 class TestDatetimeConversionOp(unittest.TestCase):

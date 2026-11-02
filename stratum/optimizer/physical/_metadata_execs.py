@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import pandas as pd
 
+from stratum.optimizer.logical import _schema
 from stratum.optimizer.logical._base import _resolve_args, _resolve_kwargs
 from stratum.optimizer.logical._metadata_ops import (
     ColumnNamesOp, RenameOp, RowLabelsOp, ShapeOp)
+from stratum.optimizer.logical._split_ops import NOT_KNOWN, known_operand
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 
@@ -49,6 +51,9 @@ class PolarsRenameOp(RenameOp, PhysicalOp):
             # pandas' (`a + b` keeps a's name in polars, has none in pandas).
             op._unsupported_reason = "labels the column by the series' pandas name"
             return False
+        if not names_stay_distinct(op):
+            op._unsupported_reason = "may give two columns one name, which polars refuses"
+            return False
         return True
 
     def process(self, mode: str, inputs: list):
@@ -58,6 +63,28 @@ class PolarsRenameOp(RenameOp, PhysicalOp):
             return inputs[0].rename(self.label[0])
         kwargs = _resolve_kwargs({"columns": self.columns, "errors": self.errors}, inputs)
         return inputs[0].rename(kwargs["columns"], strict=kwargs["errors"] == "raise")
+
+
+def names_stay_distinct(op: RenameOp) -> bool:
+    """Whether a column rename is known to leave every column a name of its own.
+
+    pandas keeps two columns of one name; polars refuses them. A function, or a
+    graph-fed new name whose value is not known (``known_operand``), may map two
+    names to one. Without a schema, only the new names are checked against each
+    other.
+    """
+    columns = op.columns
+    if columns is None:
+        return True
+    if not isinstance(columns, dict):
+        return False
+    columns = {old: known_operand(op, new) for old, new in columns.items()}
+    if any(new is NOT_KNOWN for new in columns.values()):
+        return False
+    schema = op.inputs[0].output_schema if op.inputs else None
+    names = ([columns.get(name, name) for name in schema] if _schema.is_known(schema)
+             else list(columns.values()))
+    return len(set(names)) == len(names)
 
 
 # --- RowLabelsOp ----------------------------------------------------------------

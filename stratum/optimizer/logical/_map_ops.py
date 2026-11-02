@@ -43,6 +43,7 @@ class MapOp(Op):
     """Base for column-map operators: row-preserving, computes column values."""
     logical_family = "Map"
     index_effect = IndexEffect.KEEP
+    reads_index = False
 
     def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)
@@ -56,6 +57,8 @@ class CallMapOp(MapOp):
     operand 0. Only the subclasses are built; each says which call it replays.
     """
     fields = ["args", "kwargs"]
+    # The recorded call may read anything, a UDF or a callable assign included.
+    reads_index = True
 
     def __init__(self, args: tuple | list = (), kwargs: dict | None = None,
                  inputs: list[Op] = None, outputs: list[Op] = None):
@@ -227,6 +230,8 @@ class AttributeReadOp(Op):
     fields = ["attr_name"]
     # `.T` turns the columns into rows and `.values` drops the labels.
     index_effect = IndexEffect.NEW
+    # ``.loc`` and ``.T`` do read it.
+    reads_index = True
 
     def __init__(self, attr_name: list[str] = None, inputs: list[Op] = None,
                  outputs: list[Op] = None):

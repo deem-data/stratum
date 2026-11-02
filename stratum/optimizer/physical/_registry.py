@@ -144,6 +144,7 @@ def physical_impl(of: type[IRNode], backend: BackendName,
         if "frame_lib" not in vars(cls):
             from stratum.optimizer.physical._representation import BACKEND_FRAME_LIB
             cls.frame_lib = BACKEND_FRAME_LIB.get(backend)
+        cls.backend_name = backend
         _DECORATED_IMPLS.append(PhysicalImpl(
             op_type=of,
             backend_name=backend,
@@ -171,6 +172,7 @@ def rust_impl(of: type[IRNode], input_format: str = "frame",
     registry entry and the operator carry the same values.
     """
     def deco(cls):
+        cls.backend_name = "rust"
         _DECORATED_IMPLS.append(RustPhysicalImpl(
             op_type=of,
             backend_name="rust",
