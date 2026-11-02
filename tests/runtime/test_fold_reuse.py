@@ -118,9 +118,9 @@ def test_the_test_rows_are_keyed_alike_whatever_the_scorer_calls(csv_path, cache
 
     run(model(), scoring="accuracy")
     _, taken = run(model(), scoring="roc_auc")
-    # The model answers with another method, but the scaler is fitted and applied
-    # the same way.
-    assert taken == [["PassthroughTransformer_fit", "PassthroughTransformer_predict"]] * 3
+    # The model answers with another method, but it is fitted the same way, so its
+    # fit is taken, and the scaler's fit with it; the scaled test rows are too.
+    assert taken == [["PassthroughTransformer_predict", "SklearnLogisticRegression_fit"]] * 3
 
 
 def test_a_hit_takes_only_the_parts_left_to_read(csv_path, cache_dir, run, monkeypatch):

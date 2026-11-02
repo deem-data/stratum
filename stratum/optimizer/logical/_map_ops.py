@@ -14,7 +14,8 @@ Two kinds of map:
   is restricted to natively-lazy computations (arithmetic, boolean logic,
   ``.str``/``.dt`` accessors, datetime parsing); on polars all entries compile
   into one ``with_columns`` kernel. Anything outside the grammar stays in the
-  graph and feeds the map through an ``OperandLeaf`` input.
+  graph and feeds the map through an ``OperandLeaf`` input. :class:`SeriesMapOp`
+  is the same for one series that no assign takes in.
 * Call-based maps (:class:`CallMapOp` and its subclasses) replay one recorded
   pandas call; :class:`StringMethodOp`, :class:`DatetimeFieldOp`,
   :class:`DatetimeConversionOp` and the ``ColumnMethodOp`` family hold one parsed
@@ -27,11 +28,13 @@ import pandas as pd
 import polars as pl
 
 from stratum.optimizer.logical._base import IndexEffect, Uncacheable
-from stratum.optimizer.logical._ops import (CallOp, GetAttrOp, MethodCallOp, Op,
-                                            OperandRef, OutputType, substitute_op)
-from stratum.optimizer.logical._column_expr import ColumnExpr, Const
+from stratum.optimizer.logical._ops import (CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op,
+                                            OperandRef, OutputType, ValueOp, substitute_op)
+from stratum.optimizer.logical._column_expr import (
+    UFUNCS, BinOpExpr, Col, ColumnExpr, Const, OperandLeaf)
 from stratum.optimizer.logical._index_ops import IndexAccessOp
 from stratum.optimizer.logical._metadata_ops import make_structure_read_op
+from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.frontend._pandas_calls import bind_pandas_function
 from stratum.optimizer.logical import _schema
 
@@ -253,7 +256,104 @@ class AssignMapOp(MapOp):
                                                  list(self.entries))
 
 
+#: The name of a series fed in from elsewhere, which only its values tell.
+UNKNOWN_NAME = object()
+#: What a scalar operand contributes to a series name: nothing.
+_NO_NAME = object()
+
+
+class SeriesMapOp(MapOp):
+    """A series computed row by row from columns of one frame (not ``Series.map``).
+
+    ``expr`` is the folded :class:`~stratum.optimizer.logical._column_expr.ColumnExpr`
+    over the source frame, operand 0: ``df["a"] * 2 + df["b"]``,
+    ``df["s"].str.upper()``, ``df["a"].fillna(0)``. What it cannot fold feeds it
+    through an ``OperandLeaf``: a scalar (``df["a"].mean()``), another series map
+    of the same frame, or a series of other rows, which pandas aligns by label.
+    """
+    fields = ["expr"]
+    cacheable = True
+
+    def __init__(self, expr: ColumnExpr, inputs: list[Op] = None, outputs: list[Op] = None):
+        super().__init__(name="series_map", inputs=inputs, outputs=outputs)
+        self.output_type = OutputType.SERIES
+        self.expr = expr
+
+    @property
+    def index_effect(self):
+        """The source's rows, unless a series of other rows joins them by label."""
+        return (IndexEffect.KEEP if all(self.reads_source_rows(leaf.ref.k)
+                                        for leaf in self._leaves())
+                else IndexEffect.COMMON)
+
+    def reads_source_rows(self, k: int) -> bool:
+        """Whether operand ``k`` pairs with the source's rows by position as well
+        as by label: a scalar, or a series map of the same rows."""
+        if k == 0:
+            return False  # the whole frame, as a value of its own
+        leaf = self.inputs[k]
+        return leaf.output_type is OutputType.SCALAR or (
+            isinstance(leaf, SeriesMapOp) and leaf.inputs[0] is self.inputs[0]
+            and leaf.index_effect is IndexEffect.KEEP)
+
+    def result_name(self):
+        """The name pandas gives the result, or :data:`UNKNOWN_NAME`.
+
+        A column keeps its name through every method and through arithmetic with
+        a scalar; two series combined keep it only when both have it, else the
+        result has none (``None``).
+        """
+        return self._name_of(self.expr)
+
+    def _name_of(self, expr):
+        if isinstance(expr, Col):
+            return expr.name
+        if isinstance(expr, Const):
+            return _NO_NAME
+        if isinstance(expr, OperandLeaf):
+            k = expr.ref.k
+            if k and self.inputs[k].output_type is OutputType.SCALAR:
+                return _NO_NAME
+            return self.inputs[k].result_name() if self.reads_source_rows(k) else UNKNOWN_NAME
+        if isinstance(expr, BinOpExpr):
+            left, right = self._name_of(expr.left), self._name_of(expr.right)
+            if left is _NO_NAME:
+                return right
+            if right is _NO_NAME:
+                return left
+            if left is UNKNOWN_NAME or right is UNKNOWN_NAME:
+                return UNKNOWN_NAME
+            return left if left == right else None
+        # Every other node (a unary operator, a .str/.dt call, a column method)
+        # keeps the name of the series it is called on.
+        operand = getattr(expr, "operand", None)
+        return self._name_of(operand) if isinstance(operand, ColumnExpr) else UNKNOWN_NAME
+
+    def _leaves(self):
+        stack = [self.expr]
+        while stack:
+            expr = stack.pop()
+            if isinstance(expr, OperandLeaf):
+                yield expr
+            stack.extend(expr.children())
+
+    def propagate_output_schema(self):
+        """One column under the result's name, Unknown-typed; unknown when the
+        name is not a string."""
+        name = self.result_name()
+        self.output_schema = (pl.Schema({name: _schema.UNKNOWN_DTYPE})
+                              if isinstance(name, str) else None)
+
+
 # --- Extraction: recorded calls -> call-based maps ----------------------------
+
+def ufunc_name(op: Op) -> str | None:
+    """The :data:`~stratum.optimizer.logical._column_expr.UFUNCS` name of a call
+    ``np.<func>(x)`` on its one operand, with nothing else passed; else ``None``."""
+    if not isinstance(op, CallOp) or op.kwargs or list(op.args or ()) != [OperandRef(0)]:
+        return None
+    return next((name for name, func in UFUNCS.items() if op.func is func), None)
+
 
 #: The ``pd.to_datetime`` arguments a :class:`DatetimeConversionOp` holds.
 _DATETIME_OPTIONS = frozenset({"format", "exact", "cache", "errors"})
@@ -407,3 +507,100 @@ def make_assign_map_op(op: MethodCallOp) -> AssignMapOp | None:
                          inputs=[src, *folder.leaf_ops], outputs=list(op.outputs))
     folder.install(new_op, replaced=[op])
     return new_op
+
+
+# --- Folding: standalone series chains -> SeriesMapOp ---------------------------
+
+def fold_series_maps(ops: list[Op], root: Op) -> Op:
+    """Fold each chain of row-local series ops left standing into a :class:`SeriesMapOp`.
+
+    Runs once frame extraction is done: the chains an assign, a mask or a
+    grouping absorbed are gone, so what is left stands alone. ``ops`` is the
+    plan in topological order; consumers are visited first, so a chain folds
+    from its last op. An op feeding two chains has a consumer outside each, so
+    it stays an operand of both and becomes a series map of its own after them.
+    Returns the root, which a fold may replace.
+    """
+    from stratum.optimizer.logical._expr_folding import _Folder
+    probe = _Folder(src=None)
+    absorbed: set[int] = set()
+    for op in reversed(ops):
+        if id(op) in absorbed or not _is_chain_op(op, probe):
+            continue
+        if op.outputs and all(_is_chain_op(out, probe) for out in op.outputs):
+            continue  # a consumer's chain takes it in
+        src = _chain_source(op, probe)
+        if src is None:
+            continue
+        folder = _Folder(src)
+        expr = folder.fold_many([op], root_consumer=None)[0]
+        expr, leaf_ops = _inline_column_reads(expr, src, folder.leaf_ops)
+        consumers = list(op.outputs)
+        new_op = SeriesMapOp(expr, inputs=[src, *leaf_ops], outputs=consumers)
+        for consumer in consumers:
+            consumer.replace_input(op, new_op)
+        folder.install(new_op, replaced=[])
+        absorbed.update(id(node) for node in folder.absorbed)
+        if root is op:
+            root = new_op
+    return root
+
+
+def _is_chain_op(op: Op, probe) -> bool:
+    """A series op the folder can take in that computes something: not a column
+    read or a constant, which are the chain's leaves."""
+    return (op.output_type is OutputType.SERIES and probe._is_foldable(op)
+            and not isinstance(op, ValueOp))
+
+
+def _column_read_of(op: Op) -> Op | None:
+    """The frame ``op`` reads one column of by name, if it does."""
+    if (isinstance(op, (GetItemOp, ColumnProjectionOp)) and isinstance(op.key, str)
+            and op.inputs and op.inputs[0].output_type is OutputType.FRAME):
+        return op.inputs[0]
+    return None
+
+
+def _chain_source(root: Op, probe) -> Op | None:
+    """The frame most of the chain's columns are read from; the first one read
+    on a tie. ``None`` when it reads no column."""
+    counts: dict[int, list] = {}
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        frame = _column_read_of(node)
+        if frame is not None:
+            counts.setdefault(id(frame), [frame, 0])[1] += 1
+        elif probe._is_foldable(node):
+            # Reversed, so operands are visited left to right.
+            stack.extend(reversed(probe._producer_ops(node)))
+    if not counts:
+        return None
+    return max(counts.values(), key=lambda entry: entry[1])[0]
+
+
+def _inline_column_reads(expr: ColumnExpr, src: Op, leaf_ops: list[Op]):
+    """``expr`` with every operand that reads one column of ``src`` as a ``Col``.
+
+    The folder keeps a column read that something else reads too as an operand;
+    reading it again in the expression costs nothing and keeps it one of the
+    source's columns, by name. Returns the expression and the remaining operands.
+    """
+    refs, kept = {}, []
+    for k, leaf in enumerate(leaf_ops, start=1):
+        if _column_read_of(leaf) is src:
+            refs[k] = Col(leaf.key)
+        else:
+            kept.append(leaf)
+            refs[k] = OperandLeaf(OperandRef(len(kept)))
+    return _replace_leaves(expr, refs), kept
+
+
+def _replace_leaves(expr: ColumnExpr, refs: dict) -> ColumnExpr:
+    if isinstance(expr, OperandLeaf):
+        return refs.get(expr.ref.k, expr)
+    return expr.map_children(lambda child: _replace_leaves(child, refs))

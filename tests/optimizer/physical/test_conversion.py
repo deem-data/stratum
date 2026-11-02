@@ -76,13 +76,13 @@ def test_a_series_converts_with_its_name():
 # --- conversions in plans -------------------------------------------------------
 
 def test_a_pandas_call_on_a_default_index_reads_a_conversion(source):
-    plan = source.assign(c=source["x"].where(source["x"] > 0))
+    plan = source.assign(c=source["x"].mask(source["x"] > 0))
     ops, result = _greedy(plan)
-    where = next(op for op in ops if type(op).__name__ == "MethodCallExec")
+    mask = next(op for op in ops if type(op).__name__ == "MethodCallExec")
     assert all(isinstance(i, ConversionOp) and i.target is FrameLib.PANDAS
-               for i in where.inputs)
+               for i in mask.inputs)
     # and back, explicitly, into the polars assign
-    assert [o.target for o in where.outputs] == [FrameLib.POLARS]
+    assert [o.target for o in mask.outputs] == [FrameLib.POLARS]
     assert isinstance(result, pl.DataFrame)
     pd.testing.assert_frame_equal(_as_pandas(result), _pandas(plan), check_dtype=False)
 
@@ -134,7 +134,7 @@ def test_a_filtered_series_is_aligned_by_label_not_by_position(source):
 def test_columns_of_the_same_frame_stay_on_polars(source):
     # Same rows, same order: positional pairing is label alignment here.
     filtered = source[source["k"] > 1]
-    plan = filtered.assign(y=filtered["x"] * 2, z=filtered["x"].where(filtered["x"] > 0))
+    plan = filtered.assign(y=filtered["x"] * 2, z=filtered["x"].where(filtered["x"] > 0, 0.0))
     ops, result = _greedy(plan)
     assign = next(op for op in ops if type(op).__name__.endswith("AssignMapOp"))
     assert frame_lib(assign) is FrameLib.POLARS

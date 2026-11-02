@@ -11,8 +11,8 @@ import stratum as st
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._map_ops import (
     ApplyUDFOp, AssignMapOp, AssignOp, AttributeReadOp, CallMapOp,
-    DatetimeConversionOp, DatetimeFieldOp, StringMethodOp, make_datetime_conversion_op,
-    make_frame_get_attr, make_string_method_op)
+    DatetimeConversionOp, DatetimeFieldOp, SeriesMapOp, StringMethodOp,
+    make_datetime_conversion_op, make_frame_get_attr, make_string_method_op)
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._column_expr import (
     AstypeExpr, BinOpExpr, ClipExpr, Col, Const, DatetimeExpr, DtExpr, FillnaExpr,
@@ -167,7 +167,7 @@ class TestAssignMapFolding(unittest.TestCase):
         map_op = _one(self, ops, AssignMapOp)
         self.assertIsInstance(map_op.entries["keep"], OperandLeaf)
         self.assertEqual(2, len(map_op.inputs))  # [selection frame, shared mask]
-        self.assertTrue(any(isinstance(o, BinOp) for o in ops))
+        self.assertIsInstance(map_op.inputs[1], SeriesMapOp)
 
     def test_transformed_column_stays_as_leaf(self):
         # A fitted transformer is outside the native-lazy grammar: the apply
@@ -755,7 +755,7 @@ class TestMissingValueMethods(unittest.TestCase):
         src = st.as_data_op(self.df)
         for method, cls in (("isna", IsnaOp), ("isnull", IsnaOp),
                             ("notna", NotnaOp), ("notnull", NotnaOp)):
-            with self.subTest(method=method):
+            with self.subTest(method=method), make_map_op(False):
                 ops = optimize(getattr(src["a"], method)(),
                                OptConfig(dataframe_ops=True))
                 method_op = _one(self, ops, ColumnMethodOp)
@@ -768,7 +768,7 @@ class TestMissingValueMethods(unittest.TestCase):
         src = st.as_data_op(self.df)
         for func, method in ((pd.isna, "isna"), (pd.isnull, "isna"),
                              (pd.notna, "notna"), (pd.notnull, "notna")):
-            with self.subTest(func=func.__name__):
+            with self.subTest(func=func.__name__), make_map_op(False):
                 ops = optimize(src["a"].skb.apply_func(func),
                                OptConfig(dataframe_ops=True))
                 method_op = _one(self, ops, ColumnMethodOp)
@@ -880,6 +880,13 @@ class TestColumnMethodFields(unittest.TestCase):
                     self.assertEqual(fields, tuple(getattr(op, f) for f in op.fields))
                     self.assertIs(OutputType.SERIES, op.output_type)
 
+    def test_where_without_other_fills_nan(self):
+        # pandas fills the dtype's missing value, as an explicit NaN does.
+        for op in (self._parse("where", OperandRef(0)), self._parse("where", cond=OperandRef(0))):
+            self.assertIsInstance(op, WhereOp)
+            self.assertEqual(OperandRef(0), op.cond)
+            self.assertTrue(np.isnan(op.other))
+
     def test_a_frame_admits_astype_and_a_per_column_fillna(self):
         frame = OutputType.FRAME
         self.assertEqual("int32", self._parse("astype", "int32", output_type=frame).dtype)
@@ -897,7 +904,6 @@ class TestColumnMethodFields(unittest.TestCase):
             ("fillna", ([0, 1],), {}),
             ("clip", (), {}),
             ("clip", (1,), {"axis": 0}),
-            ("where", (OperandRef(0),), {}),  # pandas' implicit NaN
             ("isin", ("ab",), {}),
             ("map", (lambda v: v,), {}),
             ("map", ({1: 2},), {"na_action": "all"}),
@@ -963,12 +969,14 @@ def _cases():
     for path in ("standalone", "assign", "selection"):
         for name, build in cases.items():
             gap = name.startswith("computed") and path != "standalone"
-            yield pytest.param(build, path, id=f"{path}-{name}",
+            # pandas names `a / b` None, which no polars series is.
+            unnamed = name.startswith("computed") and path == "standalone"
+            yield pytest.param(build, path, not unnamed, id=f"{path}-{name}",
                                marks=[_FOLDED_NAN_GAP] if gap else [])
 
 
-@pytest.mark.parametrize("build,path", _cases())
-def test_missing_value_methods_match_pandas(build, path):
+@pytest.mark.parametrize("build,path,on_polars", _cases())
+def test_missing_value_methods_match_pandas(build, path, on_polars):
     expected_mask = build(_MISSING, lambda x, func: func(x))
     expected = {"standalone": expected_mask,
                 "assign": _MISSING.assign(m=expected_mask),
@@ -978,7 +986,12 @@ def test_missing_value_methods_match_pandas(build, path):
         mask = build(src, lambda x, func: x.skb.apply_func(func))
         plan = {"standalone": mask, "assign": src.assign(m=mask),
                 "selection": src[mask]}[path]
-    result = _evaluate_on_polars(plan)
+    if on_polars:
+        result = _evaluate_on_polars(plan)
+    else:
+        with st.config(scheduler=True, implementation_selector="greedy"):
+            result = st._api.evaluate(plan)
+        assert result.name is None
     if path == "standalone":
         assert expected.tolist() == result.tolist()
     else:
@@ -1037,7 +1050,8 @@ class TestMapRewrites(unittest.TestCase):
 
     def test_supported_series_method_gets_typed_op(self):
         data = st.as_data_op(self.df)["x"].astype("float32")
-        ops = optimize(data, OptConfig(dataframe_ops=True))
+        with make_map_op(False):
+            ops = optimize(data, OptConfig(dataframe_ops=True))
         method = next(op for op in ops if isinstance(op, ColumnMethodOp))
         self.assertEqual("astype", method.method)
         self.assertIs(OutputType.SERIES, method.output_type)

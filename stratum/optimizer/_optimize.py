@@ -8,6 +8,8 @@ from typing import Any
 
 from .logical.rewrites._cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
+from .logical._map_ops import fold_series_maps
+from .logical.rewrites._expressions import simplify_expressions
 from .logical.rewrites._literal_inlining import literal_inlining
 from .logical.rewrites._fit_predict_unrolling import unroll_fit_predict
 from .logical._numeric_ops import extract_numeric_op
@@ -309,6 +311,10 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
     if config.propagate_schema:
         propagate_output_schema(root)
 
+    # The exact expression rewrites need the column dtypes the schemas carry.
+    if config.algebraic_rewrites:
+        root = simplify_expressions(root, config.algebraic_rewrite_config)
+
     # Shape rewrites after the expression ones, and after CSE, so the build side
     # a promoted join reads is already shared with whatever else produced it.
     root = relational_rewrites(root, semi_join=config.semi_join_rewrite,
@@ -388,6 +394,9 @@ def extract_frame_operators(root):
     for op in topological_iterator(root):
         root, _ = extract_dataframe_op(op, root, FLAGS.make_selection_op,
                                        FLAGS.make_map_op, FLAGS.make_column_projection)
+    if FLAGS.make_map_op:
+        # After the loop, once assigns, masks and groupings have taken in their chains.
+        root = fold_series_maps(list(topological_iterator(root)), root)
     log_time("dataframe_rewrite took", start)
     _debug_show_graph(root, "frame_rewrite")
     return root

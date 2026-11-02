@@ -16,6 +16,7 @@ from stratum.optimizer.logical._ops import (
 from stratum.optimizer.logical._column_expr import (
     Col, Const, BinOpExpr, IsinExpr, UnaryOpExpr, OperandLeaf, StrExpr)
 from stratum.optimizer.physical._expressions import to_pandas_query
+from stratum.optimizer.logical._map_ops import SeriesMapOp
 from stratum.optimizer.physical._source_execs import rechunk_pl_frame
 from .test_dataframe_ops import (
     optimize, run_op, force_polars, pandas_query, plan_context)
@@ -308,7 +309,8 @@ class TestMaskFolding(unittest.TestCase):
         sel = self._mask(ops)
         self.assertIsInstance(sel.predicate, OperandLeaf)
         self.assertEqual(2, len(sel.inputs))            # [src, shared comparison]
-        self.assertTrue(any(isinstance(o, BinOp) for o in ops))  # comparison kept
+        # The comparison is kept, folded into a series map of its own.
+        self.assertIsInstance(sel.inputs[1], SeriesMapOp)
 
     def test_get_item_multiple_consumers(self):
         # The shared column df["x"] feeds two comparisons, but both live inside the

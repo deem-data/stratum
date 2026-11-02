@@ -238,8 +238,8 @@ def test_a_window_by_calendar_offset_is_keyed(tmp_path):
 
 
 def test_standalone_arithmetic_is_keyed(tmp_path):
-    # Arithmetic no assign or mask consumes stays a NumericOp: a number, a string
-    # concatenation, a calendar offset, a numpy ufunc.
+    # Arithmetic no assign or mask consumes: on columns a series map (a number, a
+    # string concatenation, a calendar offset), else a NumericOp (a numpy ufunc).
     path = tmp_path / "lots.parquet"
     pd.DataFrame({"boro": ["1", "2"], "block": ["7", "88"], "x": [1.5, 2.0],
                   "d": pd.to_datetime(["2020-02-29", "2021-03-01"])}).to_parquet(path)
@@ -251,14 +251,28 @@ def test_standalone_arithmetic_is_keyed(tmp_path):
         assert all(key is not None for _, key in keys), reasons
 
 
-def test_numeric_ops_are_keyed_by_operation_and_operands(csv_path):
+def test_arithmetic_is_keyed_by_operation_and_operands(csv_path):
     data = read_csv(csv_path)
-    x, y = data["x"], data["y"]
+    x, y, frame = data["x"], data["y"], data[["x", "y"]]
     variants = [x + 1, x - 1, 1 - x, x * 2, x / 2, x ** 3, x + y, y + x,
-                x.skb.apply_func(np.exp), x.skb.apply_func(np.sqrt)]
+                x.skb.apply_func(np.exp), x.skb.apply_func(np.sqrt), frame + 1, frame * 2]
     final_keys = [plan_keys(v)[-1][1] for v in variants]
     assert None not in final_keys
     assert len(set(final_keys)) == len(variants)
+
+
+def test_series_maps_are_keyed_by_their_expression(csv_path):
+    data = read_csv(csv_path)
+    x, y = data["x"], data["y"]
+    # The same expression spelled twice, and two that differ only in a constant or
+    # in a column.
+    finals = [plan_keys(dag)[-1] for dag in (
+        (x * 2).fillna(0), (data["x"] * 2).fillna(0), (x * 2).fillna(1), (y * 2).fillna(0))]
+    assert all("series_map" in op for op, _ in finals), finals
+    keys = [key for _, key in finals]
+    assert None not in keys
+    assert keys[0] == keys[1]
+    assert len(set(keys)) == 3
 
 
 def test_an_unknown_numpy_function_is_uncacheable(csv_path):

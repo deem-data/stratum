@@ -14,7 +14,7 @@ from stratum.optimizer.logical._dataframe_ops import (
     AggregateOp, AssignMapOp, AssignOp, ColumnProjectionOp, ConcatOp, InMemoryFrameOp,
     ReadCSVOp, ReadParquetOp,
     DatetimeConversionOp, DatetimeFieldOp, DropOp, AttributeReadOp, JoinOp, RenameOp,
-    ResetIndexOp,
+    RowLabelsOp,
     DropLabelsSelectionOp, SelectionOp, SliceSelectionOp, SplitOp, SplitOutput)
 from stratum.optimizer.logical._source_ops import make_read_op
 from stratum.optimizer.logical._ops import (
@@ -29,6 +29,7 @@ from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, BinOpExpr, Col, DtExpr)
 from stratum.optimizer.logical._scoring import Metric
 from tests._helpers import csv_file
+from .test_dataframe_ops import make_map_op
 
 
 def _logical_ops(dag):
@@ -237,8 +238,16 @@ class TestSchemaPropagation(unittest.TestCase):
 
     def test_reset_index_keeps_the_columns(self):
         # only the dropping form is extracted: the old labels do not become a column.
-        op = _schema_op(st.as_data_op(self.df).reset_index(drop=True), ResetIndexOp)
+        op = _schema_op(st.as_data_op(self.df).reset_index(drop=True), RowLabelsOp)
         self.assertEqual(["x", "y", "z"], list(op.output_schema.keys()))
+
+    def test_to_frame_relabels_the_series_column(self):
+        op = _schema_op(st.as_data_op(self.df)["x"].to_frame("a"), RenameOp)
+        self.assertEqual(["a"], list(op.output_schema.keys()))
+
+    def test_set_index_moves_the_keys_out(self):
+        op = _schema_op(st.as_data_op(self.df).set_index(["x", "z"]), RowLabelsOp)
+        self.assertEqual(["y"], list(op.output_schema.keys()))
 
     def test_single_column_selection_is_one_column_schema(self):
         op = _schema_op(st.as_data_op(self.df)["x"], ColumnProjectionOp)
@@ -998,7 +1007,8 @@ class TestSchemaPropagation(unittest.TestCase):
     def test_datetime_conversion_is_datetime_typed(self):
         dt_df = pd.DataFrame({"d": ["2025-11-01", "2025-11-02"]})
         date = st.as_data_op(dt_df)["d"].skb.apply_func(pd.to_datetime)
-        op = _schema_op(date, DatetimeConversionOp)
+        with make_map_op(False):  # else it folds into a series map, schema and all
+            op = _schema_op(date, DatetimeConversionOp)
         self.assertEqual(["d"], list(op.output_schema.keys()))
         # The column *name* survives, but the Datetime unit is backend-dependent
         # (pandas -> ns, polars -> us) and pl.Schema has no unit-less Datetime, so

@@ -21,15 +21,15 @@ import polars as pl
 
 from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.logical._column_expr import (
-    BINARY_SYMBOLS, UNARY_SYMBOLS, AggExpr, AllCols, AstypeExpr, BinOpExpr, Col,
-    ColumnExpr, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, OperandLeaf, StrExpr, UnaryOpExpr,
-    map_exprs)
+    BINARY_SYMBOLS, UFUNCS, UNARY_SYMBOLS, AggExpr, AllCols, AstypeExpr, BinOpExpr, Col,
+    ColumnExpr, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, OperandLeaf, StrExpr,
+    UfuncExpr, UnaryOpExpr, WhereExpr, map_exprs)
 from stratum.optimizer.logical._column_methods import normalize_dtype
 from stratum.optimizer.logical._ops import apply_binary
 from stratum.optimizer.physical._polars_translate import (
     polars_column_method, polars_dt_attribute,
     polars_dt_attribute_unsupported, polars_str_method_unsupported,
-    polars_string_method, polars_to_datetime)
+    polars_string_method, polars_to_datetime, polars_where_unsupported)
 
 
 class EvalContext:
@@ -88,6 +88,11 @@ def _(expr: BinOpExpr, ctx):
 @to_pandas.register
 def _(expr: UnaryOpExpr, ctx):
     return expr.op(to_pandas(expr.operand, ctx))
+
+
+@to_pandas.register
+def _(expr: UfuncExpr, ctx):
+    return UFUNCS[expr.func](to_pandas(expr.operand, ctx))
 
 
 @to_pandas.register
@@ -246,6 +251,13 @@ def _(expr: UnaryOpExpr, ctx):
 
 
 @to_polars.register
+def _(expr: UfuncExpr, ctx):
+    # numpy's own kernel, not polars' `.log()`/`.exp()`: those round some values
+    # differently in the last bit.
+    return UFUNCS[expr.func](to_polars(expr.operand, ctx))
+
+
+@to_polars.register
 def _(expr: StrExpr, ctx):
     return polars_string_method(to_polars(expr.operand, ctx), expr.method, expr.params)
 
@@ -390,6 +402,11 @@ def _(expr: StrExpr):
 @_polars_unsupported_here.register
 def _(expr: DtExpr):
     return polars_dt_attribute_unsupported(expr.attr)
+
+
+@_polars_unsupported_here.register
+def _(expr: WhereExpr):
+    return polars_where_unsupported(expr.other)
 
 
 @_polars_unsupported_here.register

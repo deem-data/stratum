@@ -29,18 +29,18 @@ def _optimize(plan, selector):
 
 
 def test_an_opaque_call_fed_polars_gets_converted_input(source):
-    # #226, first example: `where` without `other` stays the recorded pandas
-    # call; the greedy plan converts its polars inputs explicitly (#227).
-    plan = source.assign(c=source["x"].where(source["x"] > 0))
+    # #226: `mask` stays the recorded pandas call; the greedy plan converts its
+    # polars inputs explicitly (#227).
+    plan = source.assign(c=source["x"].mask(source["x"] > 0))
     ops = _optimize(plan, "greedy")
-    where = next(op for op in ops if type(op).__name__ == "MethodCallExec")
+    mask = next(op for op in ops if type(op).__name__ == "MethodCallExec")
     assert all(isinstance(i, ConversionOp) and i.target is FrameLib.PANDAS
-               for i in where.inputs)
+               for i in mask.inputs)
     with st.config(scheduler=True, implementation_selector="greedy"):
         result = evaluate(plan)
     with st.config(scheduler=True):
         expected = evaluate(plan)
-    assert isinstance(result, pl.DataFrame), "where keeps the rows: the assign stays on polars"
+    assert isinstance(result, pl.DataFrame), "mask keeps the rows: the assign stays on polars"
     pd.testing.assert_frame_equal(result.to_pandas(), expected, check_dtype=False)
 
 

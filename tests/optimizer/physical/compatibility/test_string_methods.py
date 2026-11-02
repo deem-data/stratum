@@ -12,7 +12,8 @@ from stratum._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.physical._conversion import ConversionOp
-from stratum.optimizer.physical._map_execs import PolarsAssignMapOp, PolarsStringMethodOp
+from stratum.optimizer.physical._map_execs import (
+    PolarsAssignMapOp, PolarsSeriesMapOp, PolarsStringMethodOp)
 
 FRAME = pd.DataFrame({"s": ["abcdef", "ab", "", "-42", "a,b", "Ａ"]})
 
@@ -90,7 +91,7 @@ def _assert_matches(result, expected):
 @pytest.mark.parametrize("method,args,kwargs", TRANSLATED)
 def test_translated_method_matches_pandas(method, args, kwargs, path):
     ops, result = _evaluate(_plan(method, args, kwargs, path))
-    native = PolarsStringMethodOp if path == "standalone" else PolarsAssignMapOp
+    native = PolarsSeriesMapOp if path == "standalone" else PolarsAssignMapOp
     assert any(isinstance(op, native) for op in ops)
     assert isinstance(result, (pl.Series, pl.DataFrame))
     _assert_matches(result, _expected(method, args, kwargs, path))
@@ -100,6 +101,7 @@ def test_translated_method_matches_pandas(method, args, kwargs, path):
 @pytest.mark.parametrize("method,args,kwargs", REFUSED)
 def test_untranslatable_method_runs_on_pandas(method, args, kwargs, path):
     ops, result = _evaluate(_plan(method, args, kwargs, path))
-    assert not any(isinstance(op, PolarsStringMethodOp) for op in ops)
+    assert not any(isinstance(op, (PolarsStringMethodOp, PolarsSeriesMapOp, PolarsAssignMapOp))
+                   for op in ops)
     assert any(isinstance(op, ConversionOp) for op in ops)
     _assert_matches(result, _expected(method, args, kwargs, path))

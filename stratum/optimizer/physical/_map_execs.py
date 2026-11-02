@@ -24,7 +24,8 @@ from stratum.optimizer.logical._column_methods import (
     WhereOp)
 from stratum.optimizer.logical._map_ops import (
     ApplyUDFOp, AssignMapOp, AssignOp, AttributeReadOp, DatetimeConversionOp,
-    DatetimeFieldOp, StringMethodOp)
+    DatetimeFieldOp, SeriesMapOp, StringMethodOp)
+from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.physical._expressions import (
     EvalContext, pandas_column_method, pandas_to_datetime, refuse_unsupported_exprs,
     to_pandas, to_polars)
@@ -32,7 +33,7 @@ from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._polars_translate import (
     polars_column_method, polars_dt_attribute, polars_dt_attribute_unsupported,
     polars_frame_fillna_unsupported, polars_str_method_unsupported, polars_string_method,
-    polars_to_datetime)
+    polars_to_datetime, polars_where_unsupported)
 from stratum.optimizer.physical._registry import physical_impl
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,49 @@ class PolarsAssignMapOp(AssignMapOp, PhysicalOp):
         # The keyword API accepts expressions, series, arrays and scalars,
         # broadcasting the latter just like pandas.DataFrame.assign.
         return ctx.frame.with_columns(**columns)
+
+
+# --- SeriesMapOp (a folded series chain) -------------------------------------------
+
+@physical_impl(of=SeriesMapOp, backend="pandas")
+class PandasSeriesMapOp(SeriesMapOp, PhysicalOp):
+    def process(self, mode: str, inputs: list):
+        # pandas' own operators give the result its name and align its operands.
+        return to_pandas(self.expr, EvalContext.of(inputs, mode))
+
+
+@physical_impl(of=SeriesMapOp, backend="polars")
+class PolarsSeriesMapOp(SeriesMapOp, PhysicalOp):
+    @classmethod
+    def supports(cls, op: SeriesMapOp, ctx) -> bool:
+        if not all(op.reads_source_rows(leaf.ref.k) for leaf in op._leaves()):
+            op._unsupported_reason = "an operand's rows pair with the source's only by label"
+            return False
+        # The plan's result is read by the caller, name and all.
+        name_read = not op.outputs or not all(_reads_no_name(out, op) for out in op.outputs)
+        if not isinstance(op.result_name(), str) and name_read:
+            # polars names every series by a string, and names `a + b` after a.
+            op._unsupported_reason = "pandas gives the result no string name"
+            return False
+        return refuse_unsupported_exprs(op, [op.expr])
+
+    def process(self, mode: str, inputs: list):
+        ctx = EvalContext.of(inputs, mode)
+        result = to_polars(self.expr, ctx)
+        name = self.result_name()
+        # Without a string name, no consumer reads it (see `supports`).
+        return ctx.frame.select(result.alias(name) if isinstance(name, str) else result).to_series()
+
+
+def _reads_no_name(consumer, series) -> bool:
+    """Whether ``consumer`` ignores ``series``' name, on either backend.
+
+    A mask keeps the rows it marks, and an assign names the column itself. Either
+    keeps the name of the data it filters or assigns to, so ``series`` must be
+    another operand. A series map would read it if it ran on pandas.
+    """
+    return (isinstance(consumer, (AssignMapOp, MaskSelectionOp))
+            and consumer.inputs[0] is not series)
 
 
 # --- ColumnMethodOp (astype/fillna/clip/where/isin/isna/notna/map) ---------------
@@ -137,7 +181,13 @@ class PandasWhereOp(WhereOp, _PandasColumnMethodExec):
 
 @physical_impl(of=WhereOp, backend="polars")
 class PolarsWhereOp(WhereOp, _PolarsColumnMethodExec):
-    pass
+    @classmethod
+    def supports(cls, op: WhereOp, ctx) -> bool:
+        reason = polars_where_unsupported(op.other)
+        if reason is not None:
+            op._unsupported_reason = reason
+            return False
+        return True
 
 
 @physical_impl(of=IsinOp, backend="pandas")

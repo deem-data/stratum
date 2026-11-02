@@ -5,10 +5,10 @@ aggregations (reductions). Expressions are immutable value types and compare
 structurally.
 
 The grammar is restricted to natively lazy, row-local computations (column
-references, literals, arithmetic and boolean operators, the ``.str``/``.dt``
-namespaces, datetime parsing, registered column methods, and one reduction at
-the root of an aggregation entry), so a whole tree compiles into a single
-backend kernel. Anything outside the grammar (fitted transformers, UDFs, data
+references, literals, arithmetic and boolean operators, elementwise numpy
+functions, the ``.str``/``.dt`` namespaces, datetime parsing, registered column
+methods, and one reduction at the root of an aggregation entry), so a whole tree
+compiles into a single backend kernel. Anything outside the grammar (fitted transformers, UDFs, data
 from other frames) is referenced through an :class:`OperandLeaf`.
 
 The nodes are pure data. Running them is the physical layer's job
@@ -17,6 +17,8 @@ folding an op subgraph into a tree is ``_expr_folding.py``'s.
 """
 from __future__ import annotations
 import operator
+
+import numpy as np
 
 from stratum.optimizer.logical._base import OperandRef, Uncacheable, config_key
 
@@ -233,6 +235,28 @@ class UnaryOpExpr(ColumnExpr):
 
     def __repr__(self):
         return f"{UNARY_SYMBOLS.get(self.op, self.op)}({self.operand!r})"
+
+
+#: The numpy functions a :class:`UfuncExpr` applies, by name: elementwise, one
+#: value in and one out.
+UFUNCS = {"abs": np.abs, "exp": np.exp, "expm1": np.expm1, "log": np.log,
+          "log1p": np.log1p, "sqrt": np.sqrt, "square": np.square}
+
+
+class UfuncExpr(ColumnExpr):
+    """A numpy function of :data:`UFUNCS` applied to every value
+    (``df["a"].skb.apply_func(np.log)``), named by its key there."""
+    __slots__ = ("operand", "func")
+
+    def __init__(self, operand: ColumnExpr, func: str):
+        self.operand = operand
+        self.func = func
+
+    def _key(self):
+        return (self.operand, self.func)
+
+    def __repr__(self):
+        return f"np.{self.func}({self.operand!r})"
 
 
 class StrExpr(ColumnExpr):

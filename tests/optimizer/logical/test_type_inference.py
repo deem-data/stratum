@@ -10,7 +10,7 @@ from stratum.optimizer.logical._dataframe_ops import (
 from stratum.optimizer.logical._ops import GetItemOp, OutputType, BinOp
 from stratum.optimizer.logical._source_ops import LoadNumpyOp
 from tests._helpers import npy_file
-from .test_dataframe_ops import optimize
+from .test_dataframe_ops import make_map_op, optimize
 
 
 class TestOutputTypeInference(unittest.TestCase):
@@ -23,6 +23,12 @@ class TestOutputTypeInference(unittest.TestCase):
                          "2025-11-02 15:30:00",
                          "2025-11-03 09:45:00"],
         })
+
+    def _extracted(self, dag, **config):
+        """The plan's ops as frame extraction types them: without map folding,
+        which takes a standalone series chain into one op."""
+        with make_map_op(False):
+            return optimize(dag, OptConfig(dataframe_ops=True, **config))
 
     def _find(self, ops, op_type):
         return [o for o in ops if isinstance(o, op_type)]
@@ -49,7 +55,7 @@ class TestOutputTypeInference(unittest.TestCase):
 
     def test_comparison_on_column_is_series(self):
         # df["x"] > 1 : the column is a SERIES, so the comparison is a SERIES too.
-        ops = optimize(st.as_data_op(self.df)["x"] > 1, OptConfig(dataframe_ops=True))
+        ops = self._extracted(st.as_data_op(self.df)["x"] > 1)
         binops = self._find(ops, BinOp)
         self.assertEqual(1, len(binops))
         self.assertIs(OutputType.SERIES, binops[0].output_type)
@@ -74,7 +80,7 @@ class TestOutputTypeInference(unittest.TestCase):
         # DatetimeConversionOp that must stay a SERIES (not reset to FRAME).
         date = st.as_data_op(self.dt_df)["datetime"].skb.apply_func(
             pd.to_datetime, format="%Y-%m-%d %H:%M:%S")
-        ops = optimize(date, OptConfig(dataframe_ops=True))
+        ops = self._extracted(date)
         self.assertIs(OutputType.SERIES, self._one(ops, DatetimeConversionOp).output_type)
 
     def test_getattr_after_datetime_conversion_is_series(self):
@@ -82,7 +88,7 @@ class TestOutputTypeInference(unittest.TestCase):
         # keeps it a SERIES -> the fused DatetimeFieldOp is a SERIES.
         date = st.as_data_op(self.dt_df)["datetime"].skb.apply_func(
             pd.to_datetime, format="%Y-%m-%d %H:%M:%S")
-        ops = optimize(date.dt.year, OptConfig(dataframe_ops=True))
+        ops = self._extracted(date.dt.year)
         self.assertIs(OutputType.SERIES, self._one(ops, DatetimeFieldOp).output_type)
 
     def test_getattr_on_frame_stays_frame(self):
@@ -108,8 +114,7 @@ class TestOutputTypeInference(unittest.TestCase):
         # `df["x"] + df["y"]` is still a BinOp over columns (pandas/polars world,
         # not a matrix) -> SERIES. Disable numeric_ops to observe it pre-folding.
         data = st.as_data_op(self.df)
-        ops = optimize(data["x"] + data["y"],
-                       OptConfig(dataframe_ops=True, numeric_ops=False))
+        ops = self._extracted(data["x"] + data["y"], numeric_ops=False)
         self.assertIs(OutputType.SERIES, self._one(ops, BinOp).output_type)
 
     def test_two_axis_loc_with_a_column_list_is_frame(self):

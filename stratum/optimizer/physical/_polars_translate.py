@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 import numpy as np
+import pandas as pd
 import polars as pl
 
 from stratum.optimizer.logical._base import OperandRef
@@ -395,6 +396,19 @@ def _polars_where(obj, cond, other, *, obj_dtype=None):
             other = pl.Series([other] * len(obj), dtype=obj.dtype)
         return obj.zip_with(cond, other)
     return pl.when(cond).then(obj).otherwise(other)
+
+
+def polars_where_unsupported(other) -> str | None:
+    """Why ``where(cond, other)`` has no exact polars translation, or ``None``.
+
+    A missing ``other`` (NaN, None, NA, NaT, and ``where(cond)`` itself) puts the
+    dtype's missing value in pandas, and changes the dtype with it: an int column
+    becomes float, a bool one object, a string one keeps its kind of missing. The
+    operand's dtype is not known at plan time (#216), so pandas runs it.
+    """
+    if pd.api.types.is_scalar(other) and pd.isna(other):
+        return "a missing `other` fills by the operand's pandas dtype"
+    return None
 
 
 def _polars_isin(obj, values, *, obj_dtype=None):

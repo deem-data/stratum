@@ -30,12 +30,13 @@ from stratum.optimizer.logical._projection_ops import (
     drop_targets_columns, make_column_projection_op, make_column_selector_op,
     make_drop_op)
 from stratum.optimizer.logical._metadata_ops import (
-    MetadataOp, RenameOp, ResetIndexOp, make_rename_op, make_reset_index_op)
+    MetadataOp, RenameOp, RowLabelsOp, make_rename_op, make_reset_index_op,
+    make_set_axis_op, make_set_index_op, make_to_frame_op)
 from stratum.optimizer.logical._map_ops import (
     MapOp, ApplyUDFOp, AssignMapOp, AssignOp, AttributeReadOp, DatetimeConversionOp,
     DatetimeFieldOp,
     StringMethodOp, make_assign_map_op, make_datetime_conversion_op,
-    make_frame_get_attr, make_string_method_op)
+    make_frame_get_attr, make_string_method_op, ufunc_name)
 from stratum.optimizer.logical._column_methods import (
     COLUMN_METHODS, ColumnMethodOp, IsnaOp, NotnaOp, make_column_method_op)
 from stratum.optimizer.logical._join_ops import (
@@ -157,6 +158,13 @@ def _make_scalar_comparison(op: MethodCallOp) -> BinOp | None:
                          keep_kind=True)
 
 
+#: Methods that reduce a series to one value, whatever their arguments.
+_SERIES_REDUCTIONS = frozenset({
+    "all", "any", "count", "max", "mean", "median", "min", "nunique", "prod", "sem",
+    "std", "sum", "var",
+})
+
+
 def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
     """Infer only the container kind of pandas methods we leave as calls.
 
@@ -168,6 +176,10 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
     keeps_kind, _ = MethodCallOp.OPAQUE_METHODS.get(op.method_name, (False, False))
     if keeps_kind:
         return source
+    if (op.method_name in _SERIES_REDUCTIONS and source is OutputType.SERIES
+            and not isinstance(op.inputs[0], AttributeReadOp)):
+        # Not through an accessor: `s.str.count(pat)` counts per row.
+        return OutputType.SCALAR
     if op.method_name == "to_frame" and source is OutputType.SERIES:
         return OutputType.FRAME
     if op.method_name == "reset_index":
@@ -300,6 +312,9 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                     op.output_type = OutputType.SERIES
             elif op.func in (pd.isna, pd.notna):
                 new_op = _make_missing_value_method(op)
+            elif ufunc_name(op) is not None and op.inputs[0].output_type is OutputType.SERIES:
+                # np.log(column): a column again, which the folder can take in.
+                op.output_type = OutputType.SERIES
 
         elif isinstance(op, MethodCallOp):
             if isinstance(op.inputs[0], AttributeReadOp) and op.inputs[0].attr_name == ["str"]:
@@ -324,10 +339,16 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 new_op = make_value_counts_ops(op)
             elif op.method_name == "reset_index":
                 new_op = make_reset_index_op(op)
+            elif op.method_name == "set_index":
+                new_op = make_set_index_op(op)
+            elif op.method_name == "set_axis":
+                new_op = make_set_axis_op(op)
             elif op.method_name == "sort_values":
                 new_op = make_sort_op(op)
             elif op.method_name == "rename":
                 new_op = make_rename_op(op)
+            elif op.method_name == "to_frame":
+                new_op = make_to_frame_op(op)
             elif op.method_name == "drop":
                 # Columns are a projection, rows (the pandas default) a selection.
                 # An unknown axis, both axes at once, or a "column" drop on a

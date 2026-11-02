@@ -224,7 +224,10 @@ def _clip_fields(call: dict, frame: bool) -> dict | None:
 
 
 def _where_fields(call: dict, frame: bool) -> dict | None:
-    # Without `other`, pandas fills NaN, which not every polars dtype can hold.
+    # Without `other`, pandas fills the dtype's missing value, as an explicit NaN
+    # does on every dtype (int and bool change dtype alike), so that is the field.
+    # The polars impls refuse a missing `other`: see polars_where_unsupported.
+    call = {"other": np.nan, **call}
     if (frame or call.keys() != {"cond", "other"}
             or not all(_is_ref_or_scalar(v) for v in call.values())):
         return None

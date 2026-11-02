@@ -2,8 +2,9 @@
 
 Mask selections, assign maps and aggregations absorb the row-local ops feeding
 them into one expression tree, so the whole computation is one operator (and one
-kernel on a lazy backend). This module is the shared folder; each family's
-factory decides which roots to fold and installs the operator it builds.
+kernel on a lazy backend); a chain none of them absorbs becomes a series map. This
+module is the shared folder; each family's factory decides which roots to fold and
+installs the operator it builds.
 """
 from __future__ import annotations
 import datetime
@@ -11,14 +12,14 @@ import decimal
 
 import numpy as np
 
-from stratum.optimizer.logical._ops import (OperandRef, BinOp, UnaryOp, GetItemOp, Op,
-                                            ValueOp)
+from stratum.optimizer.logical._ops import (OperandRef, BinOp, CallOp, UnaryOp, GetItemOp,
+                                            Op, OutputType, ValueOp)
 from stratum.optimizer.logical._column_expr import (
     BINARY_SYMBOLS, UNARY_SYMBOLS, BinOpExpr, Col, ColumnExpr, Const,
-    DatetimeExpr, DtExpr, OperandLeaf, StrExpr, UnaryOpExpr)
+    DatetimeExpr, DtExpr, OperandLeaf, StrExpr, UfuncExpr, UnaryOpExpr)
 from stratum.optimizer.logical._column_methods import ColumnMethodOp
 from stratum.optimizer.logical._map_ops import (
-    DatetimeConversionOp, DatetimeFieldOp, StringMethodOp)
+    DatetimeConversionOp, DatetimeFieldOp, StringMethodOp, ufunc_name)
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 
 # Values a ``ValueOp`` may carry into a ``Const``. A ``Const`` is a scalar
@@ -55,9 +56,14 @@ class _Folder:
     def fold(self, root: Op, root_consumer: Op) -> ColumnExpr:
         return self.fold_many([root], root_consumer)[0]
 
-    def fold_many(self, roots: list[Op], root_consumer: Op) -> list[ColumnExpr]:
+    def fold_many(self, roots: list[Op], root_consumer: Op | None) -> list[ColumnExpr]:
+        """Fold ``roots``, which feed ``root_consumer``.
+
+        ``None`` when the new operator replaces the roots themselves, so every
+        consumer of a root becomes the new operator's.
+        """
         for root in roots:
-            assert any(o is root_consumer for o in root.outputs)
+            assert root_consumer is None or any(o is root_consumer for o in root.outputs)
         subgraph, child_ops = self._discover(roots)
         absorbable = self._absorbable(roots, root_consumer, subgraph, child_ops)
         memo: dict[int, ColumnExpr] = {}
@@ -109,6 +115,9 @@ class _Folder:
             return True
         if isinstance(node, DatetimeFieldOp):
             return True
+        if isinstance(node, CallOp):
+            # np.log(column), typed by extraction; on a frame it is not one column.
+            return ufunc_name(node) is not None and node.output_type is OutputType.SERIES
         return False
 
     def _producer_ops(self, node: Op) -> list[Op]:
@@ -121,7 +130,7 @@ class _Folder:
                 return [node.inputs[node.operand.k]]
             return []
         if isinstance(node, (StringMethodOp, DatetimeConversionOp,
-                             DatetimeFieldOp)):
+                             DatetimeFieldOp, CallOp)):
             return [node.inputs[0]]
         if isinstance(node, ColumnMethodOp):
             # Every remaining input is referenced by a field. Returning all
@@ -150,7 +159,7 @@ class _Folder:
 
     # --- pass 2: which subgraph nodes have no external consumers ---------------
 
-    def _absorbable(self, roots: list[Op], root_consumer: Op,
+    def _absorbable(self, roots: list[Op], root_consumer: Op | None,
                     subgraph: dict[int, Op], child_ops: dict[int, list[Op]]) -> set[int]:
         """Return foldable nodes with no external consumers."""
         root_ids = {id(r) for r in roots}
@@ -159,7 +168,8 @@ class _Folder:
         for nid, node in subgraph.items():
             for consumer in node.outputs:
                 internal = (id(consumer) in subgraph
-                            or (nid in root_ids and consumer is root_consumer))
+                            or (nid in root_ids
+                                and (root_consumer is None or consumer is root_consumer)))
                 if not internal:
                     dropped.add(nid)
                     stack.append(node)
@@ -234,6 +244,9 @@ class _Folder:
         if isinstance(node, DatetimeFieldOp):
             operand = self._resolve(node.inputs[0], absorbable, memo)
             return DtExpr(operand, node.field)
+        if isinstance(node, CallOp):
+            operand = self._resolve(node.inputs[0], absorbable, memo)
+            return UfuncExpr(operand, ufunc_name(node))
         raise AssertionError(f"unfoldable node reached _make_expr: {node!r}")
 
     def _operand(self, operand, parent: Op, absorbable: set[int],

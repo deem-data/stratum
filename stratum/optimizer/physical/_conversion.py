@@ -89,6 +89,10 @@ def _index_origin(op: IRNode, memo: dict):
     if stands_for is not None:
         # A BoundaryOp: the index is that of the op before the split it reads.
         return index_origin(stands_for, memo)
+    labels_source = getattr(op, "labels_source", None)
+    if labels_source is not None:
+        # It takes another op's labels, row by row (``set_axis(x.index)``).
+        return index_origin(labels_source, memo)
     effect = op.index_effect
     if effect is IndexEffect.DEFAULT:
         return DEFAULT
