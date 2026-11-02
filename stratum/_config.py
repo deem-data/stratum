@@ -159,20 +159,20 @@ def set_config(rust_backend: bool | None = None,
     allow_patch: bool | None = None,
     stats: bool | None = None,
     stats_top_k: int | None = None,
-    scheduler: bool = False,
-    debug_graph: bool = False,
-    open_graph: bool = False,
-    graph_format: str = "svg",
+    scheduler: bool | None = None,
+    debug_graph: bool | None = None,
+    open_graph: bool | None = None,
+    graph_format: str | None = None,
     explain: bool | str | list[str] | None = None,
     DEBUG: bool | None = None,
-    cse: bool = True,
-    validate_dag: bool = True,
-    make_selection_op: bool = True,
-    make_map_op: bool = True,
-    make_column_projection: bool = True,
-    rechunk: bool = True,
+    cse: bool | None = None,
+    validate_dag: bool | None = None,
+    make_selection_op: bool | None = None,
+    make_map_op: bool | None = None,
+    make_column_projection: bool | None = None,
+    rechunk: bool | None = None,
     buffer_pool_memory_fraction: float | None = None,
-    implementation_selector: str = "default",
+    implementation_selector: str | None = None,
     reuse_cache: bool | None = None,
     reuse_cache_dir: str | os.PathLike | None = None,
     reuse_cache_memory_fraction: float | None = None,
@@ -181,6 +181,9 @@ def set_config(rust_backend: bool | None = None,
     reuse_cache_eviction: str | None = None,
                ) -> None:
     """Runtime toggles (synced env for Rust to read).
+
+    Only the arguments given change; ``None`` keeps a setting as it is. The
+    defaults below are those of a fresh process.
 
     Parameter:
     -----------
@@ -210,7 +213,7 @@ def set_config(rust_backend: bool | None = None,
             Set the number of heavy hitters to print when stats is enabled.
             Their percentages use all operator processing time as the denominator.
 
-        open_graph: bool, default true
+        open_graph: bool, default false
             Open the graph after optimization.
 
         graph_format: str, default "svg"
@@ -222,8 +225,9 @@ def set_config(rust_backend: bool | None = None,
             10x faster, and leaves the labels as real text the browser can
             search.
 
-        explain: bool | str | list[str], default None
-            Print text-based linear execution plans during optimization. ``True``
+        explain: bool | str | list[str], default off
+            Print text-based linear execution plans during optimization. ``False``
+            turns it off; ``True``
             prints the executable plan (equivalent to ``["physical_impl"]``); a
             list selects which IR levels to print, any of ``"logical"`` (after
             logical rewrites), ``"physical"`` (after lowering) and
@@ -268,7 +272,10 @@ def set_config(rust_backend: bool | None = None,
             ``"cost_size"`` (cheapest to recompute per byte). Fixed when the
             process's cache is created.
     """
-    implementation_selector = _read_implementation_selector(implementation_selector)
+    if implementation_selector is not None:
+        implementation_selector = _read_implementation_selector(implementation_selector)
+    if explain is not None:
+        explain = _read_explain_levels(explain)
     if buffer_pool_memory_fraction is not None:
         buffer_pool_memory_fraction = _read_memory_fraction(buffer_pool_memory_fraction)
     if reuse_cache_memory_fraction is not None:
@@ -306,22 +313,23 @@ def set_config(rust_backend: bool | None = None,
     if DEBUG is not None:
         FLAGS.DEBUG = bool(DEBUG)
         os.environ["STRATUM_DEBUG"] = "1" if FLAGS.DEBUG else "0"
-    FLAGS.implementation_selector = implementation_selector
-    os.environ["STRATUM_IMPLEMENTATION_SELECTOR"] = implementation_selector
+    if implementation_selector is not None:
+        FLAGS.implementation_selector = implementation_selector
+        os.environ["STRATUM_IMPLEMENTATION_SELECTOR"] = implementation_selector
     # TODO: Select between multiple schedulers in the future.
-    FLAGS.scheduler = bool(scheduler)
-    FLAGS.cse = bool(cse)
-    FLAGS.debug_graph = bool(debug_graph)
-    FLAGS.open_graph = bool(open_graph)
-    FLAGS.graph_format = str(graph_format)
+    toggles = {"scheduler": scheduler, "cse": cse, "debug_graph": debug_graph,
+               "open_graph": open_graph, "make_selection_op": make_selection_op,
+               "make_map_op": make_map_op, "make_column_projection": make_column_projection,
+               "rechunk": rechunk, "validate_dag": validate_dag}
+    for name, value in toggles.items():
+        if value is not None:
+            setattr(FLAGS, name, bool(value))
+    if graph_format is not None:
+        FLAGS.graph_format = str(graph_format)
     if buffer_pool_memory_fraction is not None:
         FLAGS.buffer_pool_memory_fraction = buffer_pool_memory_fraction
-    FLAGS.explain = _read_explain_levels(explain)
-    FLAGS.make_selection_op = bool(make_selection_op)
-    FLAGS.make_map_op = bool(make_map_op)
-    FLAGS.make_column_projection = bool(make_column_projection)
-    FLAGS.rechunk = bool(rechunk)
-    FLAGS.validate_dag = bool(validate_dag)
+    if explain is not None:
+        FLAGS.explain = explain
     if reuse_cache is not None:
         FLAGS.reuse_cache = bool(reuse_cache)
     if reuse_cache_dir is not None:

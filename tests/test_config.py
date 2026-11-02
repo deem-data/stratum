@@ -41,3 +41,17 @@ def test_config_restores_partial_changes_when_setup_raises(monkeypatch):
             pass
     assert get_config() == original
     assert "SKRUB_RUST" not in os.environ
+
+
+def test_config_changes_only_what_it_is_given():
+    with st.config(implementation_selector="greedy", cse=False, explain=True,
+                   graph_format="png"):
+        outer = get_config()
+        with st.config(scheduler=True):
+            inner = get_config()
+            assert inner["scheduler"] is True
+            assert {k: v for k, v in inner.items() if k != "scheduler"} == {
+                k: v for k, v in outer.items() if k != "scheduler"}
+            assert os.environ["STRATUM_IMPLEMENTATION_SELECTOR"] == "greedy"
+        with st.config(explain=False):
+            assert get_config()["explain"] == ()

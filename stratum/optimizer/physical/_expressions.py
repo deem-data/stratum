@@ -270,7 +270,8 @@ def _(expr: DtExpr, ctx):
 @to_polars.register
 def _(expr: DatetimeExpr, ctx):
     return polars_to_datetime(to_polars(expr.operand, ctx), expr.format, expr.exact,
-                              expr.cache, expr.errors)
+                              expr.cache, expr.errors,
+                              obj_dtype=_polars_expr_dtype(expr.operand, ctx))
 
 
 # Reduction -> polars ``Expr`` method. `sem` is deliberately absent (polars has no
