@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import logging
 
+from stratum.runtime._eviction_policy import EVICTION_POLICIES
+
 def _env_bool(name, default=False):
     val = os.getenv(name)
     if val is None:
@@ -25,6 +27,10 @@ def _env_int(name, default=0):
 #: ``physical_impl`` (after implementation selection, i.e.,  the executable plan).
 EXPLAIN_LEVELS = ("logical", "physical", "physical_impl")
 IMPLEMENTATION_SELECTOR_MODES = ("default", "greedy")
+#: Reuse-cache admission policies (see stratum/optimizer/_reuse_planning.py) and
+#: eviction policies (see stratum/runtime/_eviction_policy.py), by config name.
+REUSE_CACHE_ADMISSION_POLICIES = ("all", "none")
+REUSE_CACHE_EVICTION_POLICIES = tuple(EVICTION_POLICIES)
 
 
 def _read_implementation_selector(value: str) -> str:
@@ -61,17 +67,26 @@ def _read_explain_levels(value) -> tuple[str, ...]:
 
 # Memory fraction of host memory to use for the buffer pool.
 _DEFAULT_BUFFER_POOL_MEMORY_FRACTION = 0.7 # default 70%
+# Memory fraction of host memory to use for the reuse cache's memory tier.
+_DEFAULT_REUSE_CACHE_MEMORY_FRACTION = 0.1
+_DEFAULT_REUSE_CACHE_DISK_BUDGET = 10 * 1024**3  # 10 GiB
 
-def _read_memory_fraction(value) -> float:
+def _read_memory_fraction(value, name="buffer_pool_memory_fraction") -> float:
     try:
         fraction = float(value)
     except (TypeError, ValueError):
         raise ValueError(
-            f"buffer_pool_memory_fraction must be a float in (0, 1], got {value!r}.")
+            f"{name} must be a float in (0, 1], got {value!r}.")
     if not 0 < fraction <= 1:
         raise ValueError(
-            f"buffer_pool_memory_fraction must be in (0, 1], got {value!r}.")
+            f"{name} must be in (0, 1], got {value!r}.")
     return fraction
+
+
+def _read_choice(value, name, choices) -> str:
+    if value not in choices:
+        raise ValueError(f"Invalid {name} {value!r}; valid values are {list(choices)}.")
+    return value
 
 
 # FIXME: Not all flags need environment variables, only the ones that are shared across backends
@@ -98,6 +113,12 @@ class _Flags:
     make_column_projection: bool = True
     rechunk: bool = True
     buffer_pool_memory_fraction: float = _DEFAULT_BUFFER_POOL_MEMORY_FRACTION
+    reuse_cache: bool = _env_bool("STRATUM_REUSE_CACHE", False)
+    reuse_cache_dir: str = os.getenv("STRATUM_REUSE_CACHE_DIR", ".stratum/reuse_cache")
+    reuse_cache_memory_fraction: float = _DEFAULT_REUSE_CACHE_MEMORY_FRACTION
+    reuse_cache_disk_budget: int = _DEFAULT_REUSE_CACHE_DISK_BUDGET
+    reuse_cache_admission: str = "all"
+    reuse_cache_eviction: str = "lru"
 
 FLAGS = _Flags()
 
@@ -152,6 +173,12 @@ def set_config(rust_backend: bool | None = None,
     rechunk: bool = True,
     buffer_pool_memory_fraction: float | None = None,
     implementation_selector: str = "default",
+    reuse_cache: bool | None = None,
+    reuse_cache_dir: str | os.PathLike | None = None,
+    reuse_cache_memory_fraction: float | None = None,
+    reuse_cache_disk_budget: int | None = None,
+    reuse_cache_admission: str | None = None,
+    reuse_cache_eviction: str | None = None,
                ) -> None:
     """Runtime toggles (synced env for Rust to read).
 
@@ -216,10 +243,46 @@ def set_config(rust_backend: bool | None = None,
             Share of the detected system memory used as the buffer pool's memory
             budget. The byte budget is resolved when a BufferPool is constructed
             (fixed 2 GiB fallback when host memory cannot be detected).
+
+        reuse_cache: bool, default false
+            Keep intermediates of the pre-split part of a plan in a persistent
+            reuse cache, and read them back instead of recomputing them in later
+            plans, in this process or in later ones using the same directory.
+
+        reuse_cache_dir: path, default ".stratum/reuse_cache"
+            Where the reuse cache keeps its disk tier and manifest.
+
+        reuse_cache_memory_fraction: float in (0, 1], default 0.1
+            Share of the detected system memory used as the reuse cache's memory
+            budget. Entries beyond it are spilled to its disk tier.
+
+        reuse_cache_disk_budget: int >= 0, default 10 GiB
+            Bytes the reuse cache may keep on disk; 0 means unlimited.
+
+        reuse_cache_admission: str, default "all"
+            Which intermediates to add to the reuse cache: ``"all"`` (every
+            keyed one but constants) or ``"none"`` (read the cache only).
+
+        reuse_cache_eviction: str, default "lru"
+            What the reuse cache evicts first, in both tiers: ``"lru"`` or
+            ``"cost_size"`` (cheapest to recompute per byte). Fixed when the
+            process's cache is created.
     """
     implementation_selector = _read_implementation_selector(implementation_selector)
     if buffer_pool_memory_fraction is not None:
         buffer_pool_memory_fraction = _read_memory_fraction(buffer_pool_memory_fraction)
+    if reuse_cache_memory_fraction is not None:
+        reuse_cache_memory_fraction = _read_memory_fraction(
+            reuse_cache_memory_fraction, "reuse_cache_memory_fraction")
+    if reuse_cache_disk_budget is not None and not (
+            isinstance(reuse_cache_disk_budget, int) and reuse_cache_disk_budget >= 0):
+        raise ValueError("reuse_cache_disk_budget must be an int >= 0")
+    if reuse_cache_admission is not None:
+        _read_choice(reuse_cache_admission, "reuse_cache_admission",
+                     REUSE_CACHE_ADMISSION_POLICIES)
+    if reuse_cache_eviction is not None:
+        _read_choice(reuse_cache_eviction, "reuse_cache_eviction",
+                     REUSE_CACHE_EVICTION_POLICIES)
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
         os.environ["SKRUB_RUST"] = "1" if FLAGS.rust_backend else "0"
@@ -259,6 +322,18 @@ def set_config(rust_backend: bool | None = None,
     FLAGS.make_column_projection = bool(make_column_projection)
     FLAGS.rechunk = bool(rechunk)
     FLAGS.validate_dag = bool(validate_dag)
+    if reuse_cache is not None:
+        FLAGS.reuse_cache = bool(reuse_cache)
+    if reuse_cache_dir is not None:
+        FLAGS.reuse_cache_dir = os.fspath(reuse_cache_dir)
+    if reuse_cache_memory_fraction is not None:
+        FLAGS.reuse_cache_memory_fraction = reuse_cache_memory_fraction
+    if reuse_cache_disk_budget is not None:
+        FLAGS.reuse_cache_disk_budget = reuse_cache_disk_budget
+    if reuse_cache_admission is not None:
+        FLAGS.reuse_cache_admission = reuse_cache_admission
+    if reuse_cache_eviction is not None:
+        FLAGS.reuse_cache_eviction = reuse_cache_eviction
 
 
 def get_config() -> dict:

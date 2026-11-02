@@ -165,8 +165,11 @@ def _iter_operand_refs(value):
 def validate_operands(op: Op) -> None:
     """Assert every OperandRef stored on `op` indexes a valid entry of op.inputs.
 
-    Catches rewrites that drop/reorder inputs without renumbering operand refs.
+    Catches rewrites that drop/reorder inputs without renumbering operand refs. A
+    cache hit is exempt: it lost its inputs, and its fields never run.
     """
+    if op.cache_hit is not None:
+        return
     n = len(op.inputs)
     for attr, value in op.__dict__.items():
         if attr in ("inputs", "outputs", "remove_after"):

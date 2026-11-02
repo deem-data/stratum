@@ -20,6 +20,7 @@ from .logical.rewrites._relational import relational_rewrites
 from ._linearization import linearize_dag
 from ._fit_pass_planning import mark_fit_dead_ops
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
+from ._reuse_planning import AdmissionPolicy, apply_reuse_cache, make_admission_policy
 from .physical._plan_context import PlanContext
 from .physical._lowering import lower_to_physical
 from .physical._impl_selection import (ImplementationSelector, get_implementation_selector, select_implementations)
@@ -83,6 +84,7 @@ class OptConfig():
         selector: ImplementationSelector | None = None,
         pandas_query: bool = False,
         literal_inlining: bool = True,
+        reuse_admission: AdmissionPolicy | None = None,
     ):
         """``selector`` overrides the implementation-selection policy for this
         plan. Left ``None``, the policy named by ``FLAGS.implementation_selector``
@@ -96,7 +98,11 @@ class OptConfig():
         optimizer's own config, because it is a technical impl choice between two
         pandas selection kernels rather than anything a user should reason about:
         no ``set_config`` parameter reaches it, and ``make_grid_search`` (a skrub
-        drop-in, ADR 0002) builds its plan with the default."""
+        drop-in, ADR 0002) builds its plan with the default.
+
+        ``reuse_admission`` overrides the reuse-cache admission policy, which is
+        otherwise the one named by ``FLAGS.reuse_cache_admission``; like
+        ``selector``, it is how a caller reaches a policy without a config name."""
         self.cse = cse
         self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
@@ -111,6 +117,7 @@ class OptConfig():
         self.selector = selector
         self.pandas_query = pandas_query
         self.literal_inlining = literal_inlining
+        self.reuse_admission = reuse_admission
 
 def _debug_show_graph(root: Op, name: str):
     if diagnostics_enabled():
@@ -145,7 +152,7 @@ def _debug_validate_dag(root: Op):
         validate_dag(root)
 
 def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
-             search: SearchConfig | None = None):
+             search: SearchConfig | None = None, reuse_cache=None):
     """Entry point for the optimizer. Runs the three planning phases and returns
     the linearized physical plan ``(linearized_dag, split_pos, flagged_ops)``.
 
@@ -157,7 +164,9 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
     2. :func:`~stratum.optimizer.physical._lowering.lower_to_physical` -- lower
        logical ops to physical ops (one logical op may become several).
     3. :func:`physical_optimize` -- select a concrete implementation per
-       physical op, then linearize and plan intermediate last use as the final step.
+       physical op, take what ``reuse_cache`` (a
+       :class:`~stratum.runtime._reuse_cache.ReuseCache`, when given) holds of the
+       plan, then linearize and plan intermediate last use as the final step.
 
     ``env`` (variable name -> value), when supplied, lets the converter resolve
     variables to compile-time constants (ValueOps) instead of VariableOps. ``search``,
@@ -183,7 +192,11 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
 
     # Step 3: physical optimization (implementation selection + linearization).
     # TODO: May need physical-level rewrites before or after operator selection
-    result = physical_optimize(root, ctx, selector=config.selector)
+    admission = None
+    if reuse_cache is not None:
+        admission = config.reuse_admission or make_admission_policy(FLAGS.reuse_cache_admission)
+    result = physical_optimize(root, ctx, selector=config.selector,
+                               reuse_cache=reuse_cache, admission=admission)
 
     log_time("Optimization took in total", start)
     return result
@@ -254,18 +267,25 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 
 
 def physical_optimize(root: Op, ctx: PlanContext, registry=None,
-                      selector: ImplementationSelector | None = None):
-    """Step 3: select concrete implementations, then linearize and plan removals.
+                      selector: ImplementationSelector | None = None,
+                      reuse_cache=None, admission: AdmissionPolicy | None = None):
+    """Step 3: select concrete implementations, plan reuse, then linearize and
+    plan removals.
     Implementation selection resolves each op with registered candidates to a
     concrete implementation (consulting the default PhysicalRegistry unless one
-    is injected). Linearization and buffer-removal planning run last, as the
-    final step of the whole pipeline."""
+    is injected). With a ``reuse_cache``, reuse planning then takes the cached
+    intermediates out of it and flags what ``admission`` adds to it.
+    Linearization and buffer-removal planning run last, as the final step of the
+    whole pipeline."""
 
     # TODO: add physical rewrites here (or afterwards)
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
     root = select_implementations(root, ctx, registry=registry, selector=selector)
     _debug_validate_dag(root)
+    if reuse_cache is not None:
+        apply_reuse_cache(root, reuse_cache, admission or make_admission_policy("all"))
+        _debug_validate_dag(root)
     _debug_show_graph(root, "physical_impl")
     # similarly we can do the things like parallelization planning here
 

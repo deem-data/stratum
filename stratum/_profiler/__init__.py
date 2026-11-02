@@ -8,4 +8,5 @@ calling a hook, so a disabled profiler is never started.
 """
 from stratum._profiler._run import (
     enabled, execution_started, optimization_started, record_run, record_timings,
+    reuse_cache_attached,
 )

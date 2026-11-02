@@ -1,15 +1,12 @@
 """Eviction policies: *which* entries a memory store gives up first.
 
-A store (the BufferPool, the reuse cache) decides *when* it has to evict and *how
-much*; a policy only ranks its entries. Keeping the two apart is what lets one
-memory manager later decide how much each store must free while every store keeps
-its own notion of what is worth keeping.
-
-A store reports every entry's lifecycle to its policy (``on_insert``,
-``on_access``, ``on_remove``) and asks for ``victims()`` when it needs room. The
-policy yields candidates best-victim-first; the store skips the ones it cannot
-evict right now (pinned, already spilled, unspillable) and stops once it has freed
-enough, so a policy never needs to know about pins or tiers.
+- A store (BufferPool, reuse cache) decides *when* and *how much* to evict; a
+  policy only ranks entries. A future memory manager can then set how much each
+  store frees while every store keeps its own notion of what is worth keeping.
+- The store reports each entry's lifecycle (``on_insert``, ``on_access``,
+  ``on_remove``) and asks for ``victims()``, best victim first, when it needs room.
+- The store skips victims it cannot evict right now (pinned, spilled,
+  unspillable), so a policy never knows about pins or tiers.
 """
 from __future__ import annotations
 
@@ -60,3 +57,45 @@ class LRUPolicy(EvictionPolicy):
         # FIXME(perf): this copies every key even when only a few victims are
         # needed. Iterate in bounded chunks once stores hold thousands of entries.
         return iter(list(self._order))
+
+
+class CostSizePolicy(EvictionPolicy):
+    """Cheapest to recompute per byte first: the entry whose eviction loses least.
+
+    An entry's value is ``cost / size``, the seconds of work its bytes save. Ties,
+    including the common case of entries without a measured cost, fall back to
+    least recently used.
+    """
+
+    def __init__(self):
+        self._entries: dict = {}  # key -> [cost / size, last access]
+        self._clock = 0
+
+    def _tick(self) -> int:
+        self._clock += 1
+        return self._clock
+
+    def on_insert(self, key: Hashable, size: int, cost: float = 0.0) -> None:
+        self._entries[key] = [cost / max(size, 1), self._tick()]
+
+    def on_access(self, key: Hashable) -> None:
+        entry = self._entries.get(key)
+        if entry is not None:
+            entry[1] = self._tick()
+
+    def on_remove(self, key: Hashable) -> None:
+        self._entries.pop(key, None)
+
+    def victims(self) -> Iterator[Hashable]:
+        return iter(sorted(self._entries, key=lambda k: tuple(self._entries[k])))
+
+
+EVICTION_POLICIES = {"lru": LRUPolicy, "cost_size": CostSizePolicy}
+
+
+def make_eviction_policy(name: str) -> EvictionPolicy:
+    try:
+        return EVICTION_POLICIES[name]()
+    except KeyError:
+        raise ValueError(f"Unknown eviction policy {name!r}; "
+                         f"valid policies are {sorted(EVICTION_POLICIES)}.") from None

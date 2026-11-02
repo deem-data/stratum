@@ -343,6 +343,24 @@ class BaseEstimatorOp(Op):
                                          if hasattr(self.estimator, m))
         self.parallelism = os.cpu_count() # TODO:this will should be set during physical planning phase
 
+    #: Keyed when the estimator is one stratum knows, and seeded where it needs to
+    #: be (see :mod:`stratum.optimizer._estimator_lineage`).
+    cacheable = True
+
+    def lineage_config(self):
+        """The op's fields, with the estimator named by its class and parameters.
+
+        The prototype is named, not the estimator last fitted: a fit always starts
+        from a clone of it. ``supported_modes`` follows from the estimator and the
+        pass's mode is not configuration, so neither is encoded.
+        """
+        from stratum.optimizer._estimator_lineage import estimator_lineage, selector_lineage
+        config = {name: getattr(self, name) for name in type(self).fields}
+        config["estimator"] = estimator_lineage(self.original_estimator)
+        config["cols"] = selector_lineage(self.cols)
+        config["exclude_cols"] = selector_lineage(self.exclude_cols)
+        return config
+
     def effective_mode(self, mode: str) -> str:
         """The method ``mode`` actually calls on this op's estimator.
 
@@ -617,6 +635,9 @@ class ChoiceOp(Op):
 
 class ValueOp(Op):
     fields = ["value"]
+    # A constant: cacheable whenever the value is plain (a path, a scalar), never
+    # when it is data, which the lineage encoder refuses.
+    cacheable = True
 
     @property
     def index_effect(self):
@@ -737,6 +758,7 @@ def _elementwise_schema(op: "Op", operands) -> "pl.Schema | None":
 
 class GetItemOp(Op):
     fields = ["key", "is_filter"]
+    cacheable = True
     
     def __init__(self, key=None, name=None, is_filter=False):
         # key is either a constant or an OperandRef (when the key is graph-fed).

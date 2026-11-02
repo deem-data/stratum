@@ -239,6 +239,12 @@ def estimator_key(est: BaseEstimator):
     return ("__estimator__", type(est), frozenset(items))
 
 
+class Uncacheable(Exception):
+    """An op's output has no lineage key: the op is not one stratum vouches for, or
+    its configuration cannot be named exactly and cheaply. See
+    :mod:`stratum.optimizer._lineage`."""
+
+
 def clone_value(value):
     if isinstance(value, dict):
         return rebuild_dict(value, ((k, clone_value(v)) for k, v in value.items()))
@@ -297,6 +303,13 @@ class IRNode:
         self.remove_after: list[IRNode] = []
         #: Set by fit-pass planning: nothing the fitting pass runs needs this output.
         self.dead_in_fit = False
+        #: Set by reuse planning: the lineage key to admit this op's output to the
+        #: reuse cache under, once the plan no longer needs its buffer.
+        self.cache_key: str | None = None
+        #: Set by reuse planning when the cache holds this op's output: the op has no
+        #: inputs left and does not run; the scheduler pools the value instead
+        #: (see ``_reuse_planning.CacheHit``).
+        self.cache_hit = None
 
     def propagate_output_schema(self):
         """Default rule for the schema-propagation pass: the output is unknown.
@@ -308,6 +321,25 @@ class IRNode:
         ``PhysicalOp``, not an ``Op``).
         """
         self.output_schema = None
+
+    #: Whether the reuse cache may key this op's output. Set only by operators
+    #: stratum understands, never by generic calls or UDFs: the op vouches that its
+    #: output is a deterministic function of its inputs and ``lineage_config()``.
+    cacheable = False
+
+    def lineage_config(self):
+        """Everything besides its inputs that this op's output depends on.
+
+        The reuse cache digests it into the op's lineage key (see
+        :mod:`stratum.optimizer._lineage`), so it must be complete: two ops with the
+        same class, inputs and config compute the same value. For a cacheable op it
+        is the declared ``fields``, the same contract CSE relies on; ops whose
+        fields are not plain values, or that are deterministic only under some
+        configurations, override this. Raises :class:`Uncacheable`.
+        """
+        if not self.cacheable:
+            raise Uncacheable(f"{type(self).__name__} is not a cacheable operator")
+        return {name: getattr(self, name) for name in type(self).fields}
 
     def to_str_helper(self):
         class_name = (self.__class__.__name__ if self._is_physical

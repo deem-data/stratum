@@ -30,6 +30,7 @@ class SortOp(Op):
     """
     logical_family = "Sort"
     fields = ["by", "ascending", "na_position", "ignore_index"]
+    cacheable = True
 
     def __init__(self, by: tuple | list = (), ascending: bool | tuple | list = True,
                  na_position: str = "last",

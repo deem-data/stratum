@@ -10,6 +10,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def is_recomputed(op: Op) -> bool:
+    """Whether ``op`` is re-executed in every pass (an ImplOp with an EvalMode),
+    wherever it sits in the plan."""
+    return isinstance(op, ImplOp) and isinstance(op.skrub_impl, EvalMode)
+
+
 def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None, list[Op]]:
     """Topologically sort a DAG and enforce the split invariant.
 
@@ -43,7 +49,7 @@ def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None, list[Op]]:
 
         if op.is_split_op:
             split_pos = i
-        if isinstance(op, ImplOp) and isinstance(op.skrub_impl, EvalMode):
+        if is_recomputed(op):
             flagged_ops.append(op)
 
         linearized_ops.append(op)

@@ -7,6 +7,7 @@ from stratum import _profiler as profiler
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import SearchConfig, optimize
 from stratum.optimizer.logical._scoring import resolve_declared_scoring, resolve_scoring
+from stratum.runtime._reuse_cache import active_reuse_cache
 from stratum.runtime._scheduler import SequentialScheduler
 from stratum.frontend._skrub_graph import get_data
 from time import perf_counter
@@ -74,15 +75,24 @@ def evaluate(dag: DataOp, seed: int = 42, test_size = 0.2):
 
 def _execute(dag, env, t0, execute, search=None):
     profiling = profiler.enabled()
+    cache = active_reuse_cache()
     if profiling:
+        if cache is not None:
+            profiler.reuse_cache_attached(cache)
         profiler.optimization_started()
     optimize_start = perf_counter()
-    linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search)
+    linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search,
+                                                      reuse_cache=cache)
     optimize_end = perf_counter()
-    sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0)
+    sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0,
+                                reuse_cache=cache)
     if profiling:
         profiler.execution_started(sched)
-    out = execute(sched)
+    try:
+        out = execute(sched)
+    finally:
+        if cache is not None:
+            cache.save_manifest()
     execution_end = perf_counter()
     run = RunTimings(
         total=execution_end - optimize_start,
@@ -119,4 +129,6 @@ def stats_printer(sched: SequentialScheduler, run: RunTimings):
         print("=" * 80)
         print("BufferPool detail (serialize/deserialize times are included in Execution):")
         print(sched.pool.stats)
+        if sched.reuse_cache is not None:
+            print(sched.reuse_cache.stats)
         print("=" * 80 + "\n")

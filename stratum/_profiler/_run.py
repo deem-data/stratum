@@ -47,6 +47,13 @@ def optimization_started():
         diagnostics.optimization_start = perf_counter()
 
 
+def reuse_cache_attached(cache):
+    """Report the reuse cache's activity in the run's ``reuse_cache`` section."""
+    diagnostics = current_diagnostics()
+    if diagnostics is not None:
+        diagnostics.attach_reuse_cache(cache)
+
+
 def execution_started(sched):
     """Attach the per-operator observer to the scheduler about to run."""
     diagnostics, tracker = current_diagnostics(), get_hardware_tracker()

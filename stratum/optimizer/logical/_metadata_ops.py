@@ -29,6 +29,7 @@ class MetadataOp(Op):
     logical_family = "Metadata"
     # A structure read is not a frame; a relabelling says how it relabels.
     index_effect = IndexEffect.NEW
+    cacheable = True
 
 
 class RenameOp(MetadataOp):

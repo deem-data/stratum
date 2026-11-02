@@ -219,6 +219,21 @@ class BufferPool:
         assert self.memory_usage >= 0, "Memory usage is negative"
         return True
 
+    def detach(self, key: Hashable) -> _Entry | None:
+        """Remove ``key`` and hand its entry to the caller, or None if absent.
+
+        Unlike ``remove``, a spilled entry keeps its file: the returned entry's
+        ``handle`` now belongs to the caller (the reuse cache takes it over).
+        """
+        entry = self.live_variable_map.pop(key, None)
+        if entry is None:
+            return None
+        self.eviction_policy.on_remove(key)
+        if not entry.is_spilled:
+            self.memory_usage -= entry.size
+        self._removed_count += 1
+        return entry
+
     def _drop(self, key: Hashable) -> None:
         """Internal: free in-memory bytes and any spilled file, then unlink the entry."""
         entry = self.live_variable_map.pop(key)

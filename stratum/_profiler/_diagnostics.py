@@ -91,6 +91,32 @@ def diagnostics_enabled():
     return _active_run.get() is not None or _plan_capture.get() is not None
 
 
+def record_reuse_plan(ops, region, keys, reasons, hits, admitted):
+    """Remember what reuse planning decided for each op, for the run's ``reuse_cache``.
+
+    ``ops`` is the plan before hits pruned parts of it, so the pruned ops are
+    listed too; only those still in the executed plan are exported.
+    """
+    run = _active_run.get()
+    if run is None:
+        return
+    plan = {}
+    for op in ops:
+        if op not in region:
+            plan[op] = {"status": "outside"}
+        elif keys.get(op) is None:
+            plan[op] = {"status": "unkeyed", "reason": reasons.get(op)}
+        else:
+            plan[op] = {"status": "keyed", "key": keys[op]}
+    for op in admitted:
+        plan[op] = {"status": "admitted", "key": keys[op]}
+    for op in hits:
+        hit = op.cache_hit
+        plan[op] = {"status": "hit", "key": hit.key, "cost": hit.cost, "tier": hit.tier,
+                    "load_seconds": hit.load_seconds}
+    run.reuse_plan = plan
+
+
 @contextmanager
 def capture_plans(*, include_svg=False):
     """Capture optimizer checkpoints in memory without a scheduler or disk export.
@@ -126,6 +152,42 @@ class RunDiagnostics:
         self.optimization_start = None
         self.execution_start = None
         self.hardware = None
+        self.reuse_cache = None
+        self.reuse_stats_before = None
+        self.reuse_plan = None
+
+    def attach_reuse_cache(self, cache):
+        """Report ``cache``'s activity during this run (counts from here on)."""
+        self.reuse_cache = cache
+        self.reuse_stats_before = asdict(cache.stats)
+
+    def reuse_cache_report(self, sched):
+        """The run's cache counts, the cache's state after it, and per executed node
+        (by ``physical_impl`` position) what reuse planning decided."""
+        cache = self.reuse_cache
+        nodes = {}
+        if sched is not None and self.reuse_plan is not None:
+            for i, op in enumerate(sched.linearized_dag):
+                decision = self.reuse_plan.get(op)
+                if decision is None:
+                    continue
+                node = dict(decision)
+                if node["status"] in ("hit", "admitted"):
+                    record = cache.history.get(node["key"])
+                    node["label"] = record.label if record is not None else None
+                if node["status"] == "admitted":
+                    entry = cache.entries.get(node["key"])
+                    node["stored"] = entry is not None
+                    if entry is not None:
+                        node["size"] = entry.size
+                        node["cost"] = entry.cost
+                nodes[str(i)] = node
+        return {
+            "stats": cache.stats.since(self.reuse_stats_before),
+            "entries": len(cache), "memory_usage": cache.memory_usage,
+            "disk_usage": cache.disk_usage, "memory_budget": cache.memory_budget,
+            "disk_budget": cache.disk_budget, "nodes": nodes,
+        }
 
     def partial_timings(self, start):
         """Timings of a run that did not reach ``record_timings``, split by stage marks."""
@@ -152,7 +214,10 @@ class RunDiagnostics:
             "timings": self.timings,
             "node_timings": {}, "heavy_hitters": [], "buffer_pool": None,
             "hardware": self.hardware,
+            "reuse_cache": None,
         }
+        if self.reuse_cache is not None:
+            document["reuse_cache"] = self.reuse_cache_report(sched)
         if sched is not None:
             node_timings = (sched.observer.node_timings if sched.observer is not None else None) or {}
             document["node_timings"] = {

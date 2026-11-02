@@ -14,6 +14,7 @@ class IndexAccessOp(Op):
     logical_family = "IndexAccess"
     fields = []
     index_effect = IndexEffect.NEW
+    cacheable = True
 
     def __init__(self, inputs=None, outputs=None):
         super().__init__(inputs=inputs, outputs=outputs)
@@ -26,6 +27,7 @@ class GroupKeysOp(Op):
     logical_family = "GroupKeys"
     fields = ["key"]
     index_effect = IndexEffect.NEW
+    cacheable = True
 
     def __init__(self, key: str, inputs=None, outputs=None):
         super().__init__(name=key, inputs=inputs, outputs=outputs)

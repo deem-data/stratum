@@ -5,6 +5,9 @@ from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._dataframe_ops import SplitOp
 from stratum.optimizer.logical._ops import FITTING_MODE, Op
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._object_serialization import delete_object, deserialize_object
+import numpy as np
+import pandas as pd
 import polars as pl
 
 import logging
@@ -14,7 +17,7 @@ logger = logging.getLogger(__name__)
 class Scheduler:
     """Scheduler for executing pre-planned Op DAGs in linearized order."""
 
-    def __init__(self, print_heavy_hitters=False, t0=None):
+    def __init__(self, print_heavy_hitters=False, t0=None, reuse_cache=None):
         self.mode = "fit_transform"
         self.linearized_dag = None
         self.recompute_ops: list[Op] = []
@@ -27,9 +30,25 @@ class Scheduler:
         self.t0 = t0 if t0 is not None else perf_counter()
         self._pinned_ops: set[Op] = set()
         self.buffer_pool_overhead = 0
+        #: Where buffers of ops flagged by reuse planning go once released.
+        self.reuse_cache = reuse_cache
+        #: op -> seconds to recompute its output from the plan's sources (or from
+        #: cache hits, at the cost the entry took to compute). Kept with a cache only.
+        self._lineage_cost: dict = {}
+
+    def _pool_cache_hits(self) -> None:
+        """Put the values reuse planning took from the cache into the empty pool."""
+        for op in self.linearized_dag:
+            if op.cache_hit is not None:
+                self.pool.put(op, op.cache_hit.take())
+                self._lineage_cost[op] = op.cache_hit.cost
 
     def _finish(self):
-        """End of execution. Remove all buffers."""
+        """End of execution. Remove all buffers, handing flagged ones to the cache."""
+        if self.reuse_cache is not None:
+            for key in list(self.pool.live_variable_map):
+                if getattr(key, "cache_key", None) is not None:
+                    self._release(key)
         self.pool.remove_all()
         self.log_memory_usage()
         logger.debug(f"Scheduler finished: {self.pool.total_removed} buffers removed total")
@@ -41,8 +60,7 @@ class Scheduler:
             split_op = self.compute_xy()
         except RuntimeError as e:
             if "X and y nodes not found in the DAG" in str(e):
-                logger.warning("X and y nodes not found in the DAG, returning the last node")
-                return self.pool.pin(self.linearized_dag[-1])
+                return self._result_without_split()
             else:
                 raise e
 
@@ -149,14 +167,29 @@ class Scheduler:
     def log_memory_usage(self):
         logger.debug(f"Pool size: {self.pool.active_count}. Memory usage: {self.pool.total_size}")
 
+    def _result_without_split(self):
+        """The sink's value, for a plan without X/y: ``compute_xy`` ran all of it."""
+        logger.warning("X and y nodes not found in the DAG, returning the last node")
+        sink = self.linearized_dag[-1]
+        out = self.pool.pin(sink)
+        shared = self.reuse_cache is not None and (
+            sink.cache_key is not None or sink.cache_hit is not None)
+        self._finish()
+        # The cache holds the very object returned: give the caller its own.
+        return _shielded(out) if shared else out
+
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
+        if op.cache_hit is not None:
+            # Its value is in the pool since the scheduler started, and it has no
+            # inputs to release.
+            return op
         if self.mode == FITTING_MODE and op.dead_in_fit:
             # Nothing this pass runs reads its output, so it is not pinned, run or
             # stored. Its removals still happen: it is the last consumer of those
             # buffers, and skipping it is the only reason no one else drops them.
             for in_op in op.remove_after:
-                self.pool.remove(in_op)
+                self._release(in_op)
             return op
         logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
 
@@ -181,11 +214,17 @@ class Scheduler:
 
             # 4. remove unnecessary intermediates from buffer pool
             for in_op in op.remove_after:
-                self.pool.remove(in_op)
+                self._release(in_op)
 
             # 5. add output to the buffer pool
             self.pool.put(op, result)
             self.log_memory_usage()
+
+            if self.reuse_cache is not None:
+                # Shared inputs are counted once per path, so this overestimates a
+                # diamond. It ranks entries for eviction; it is not an exact measure.
+                self._lineage_cost[op] = (t2 - t1) + sum(
+                    self._lineage_cost.get(in_op, 0.0) for in_op in op.inputs)
 
             t3 = perf_counter()
             process_duration = t2 - t1
@@ -209,14 +248,53 @@ class Scheduler:
         """The candidate-set sink's labelled rows as a frame."""
         return pl.DataFrame(rows)
 
+    def _release(self, key) -> bool:
+        """Drop a buffer the plan no longer needs, or hand it to the reuse cache.
+
+        A flagged op's buffer moves into the cache instead of being freed, so the
+        object is never held by both. A spilled buffer hands over its file; a
+        container spill cannot move, so it is loaded and admitted in memory.
+        """
+        cache_key = getattr(key, "cache_key", None)
+        if cache_key is None or self.reuse_cache is None:
+            return self.pool.remove(key)
+        entry = self.pool.detach(key)
+        if entry is None:
+            return False
+        cost = self._lineage_cost.get(key, 0.0)
+        label = str(key)
+        if not entry.is_spilled:
+            self.reuse_cache.put(cache_key, entry.data, cost, label)
+        elif not self.reuse_cache.put_spilled(cache_key, entry.handle, entry.size, cost, label):
+            if cache_key not in self.reuse_cache:
+                self.reuse_cache.put(cache_key, deserialize_object(entry.handle), cost, label)
+            delete_object(entry.handle)
+        return True
+
+
+def _shielded(value):
+    """A copy of ``value`` its holder can mutate without touching the original.
+
+    Cheap where the library allows: a shallow pandas copy is copy-on-write and a
+    polars clone shares its buffers.
+    """
+    if isinstance(value, (pd.DataFrame, pd.Series)):
+        return value.copy(deep=False)
+    if isinstance(value, (pl.DataFrame, pl.Series)):
+        return value.clone()
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
+
 
 class SequentialScheduler(Scheduler):
     def __init__(self, linearized_dag, split_pos, recompute_ops,
-                 print_heavy_hitters=False, t0=None):
-        super().__init__(print_heavy_hitters, t0=t0)
+                 print_heavy_hitters=False, t0=None, reuse_cache=None):
+        super().__init__(print_heavy_hitters, t0=t0, reuse_cache=reuse_cache)
         self.linearized_dag = linearized_dag
         self.pos_split_op = split_pos
         self.recompute_ops = recompute_ops
+        self._pool_cache_hits()
 
     def evaluate(self, seed: int = 42, test_size=0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
@@ -225,8 +303,7 @@ class SequentialScheduler(Scheduler):
             split_op = self.compute_xy()
         except RuntimeError as e:
             if "X and y nodes not found in the DAG" in str(e):
-                logger.warning("X and y nodes not found in the DAG, returning the last node")
-                return self.pool.pin(self.linearized_dag[-1])
+                return self._result_without_split()
             else:
                 raise e
 
@@ -251,7 +328,7 @@ class SequentialScheduler(Scheduler):
 
         sink = self.linearized_dag[-1]
         out = self.pool.pin(sink) if mode != "fit_transform" else None
-        self.pool.remove(sink)
+        self._release(sink)
         self.log_memory_usage()
         return out
 

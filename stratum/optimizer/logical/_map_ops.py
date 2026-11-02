@@ -26,7 +26,7 @@ from __future__ import annotations
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._base import IndexEffect, Uncacheable
 from stratum.optimizer.logical._ops import (CallOp, GetAttrOp, MethodCallOp, Op,
                                             OperandRef, OutputType, substitute_op)
 from stratum.optimizer.logical._column_expr import ColumnExpr, Const
@@ -69,6 +69,7 @@ class ApplyUDFOp(CallMapOp):
 
 class AssignOp(CallMapOp):
     """``df.assign(...)`` that does not fold into an :class:`AssignMapOp`."""
+    cacheable = True
 
     def propagate_output_schema(self):
         """``df.assign(a=..., b=...)`` adds/overwrites the kwargs-named columns,
@@ -87,6 +88,7 @@ class DatetimeConversionOp(MapOp):
     ``OperandRef`` when graph-fed.
     """
     fields = ["format", "exact", "cache", "errors"]
+    cacheable = True
 
     ERRORS = ("raise", "coerce")
 
@@ -136,6 +138,7 @@ class StringMethodOp(MapOp):
     ``physical/_polars_translate.py``).
     """
     fields = ["method", "params"]
+    cacheable = True
 
     def __init__(self, method: str = None, params: dict = None,
                  inputs: list[Op] = None, outputs: list[Op] = None):
@@ -160,6 +163,11 @@ class StringMethodOp(MapOp):
         "isspace", "istitle", "isupper",
     })
 
+    def lineage_config(self):
+        if self.method not in self.ONE_TO_ONE_METHODS:
+            raise Uncacheable(f"str.{self.method} is not a known string method")
+        return super().lineage_config()
+
     def propagate_output_schema(self):
         """A one-to-one method keeps the column names, dtype Unknown (per-method,
         and the backends disagree on some). A method that fans the column out into
@@ -177,6 +185,7 @@ class DatetimeFieldOp(MapOp):
     ``physical/_polars_translate.py``).
     """
     fields = ["field"]
+    cacheable = True
 
     # The `.dt` properties that yield one value per datetime, so the read keeps
     # the input's columns and only changes their dtype. Extraction sees *any*
@@ -229,6 +238,7 @@ class AssignMapOp(MapOp):
     columns pass through unchanged.
     """
     fields = ["entries"]
+    cacheable = True
 
     def __init__(self, entries: dict[str, ColumnExpr],
                  inputs: list[Op] = None, outputs: list[Op] = None):

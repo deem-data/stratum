@@ -8,11 +8,13 @@ the pipeline reads with pandas. An option without a field goes to
 ``pandas_options``, which only the pandas impl can run. The physical impls in
 ``physical/_source_execs.py`` translate the fields per library.
 """
-from stratum.optimizer.logical._base import IndexEffect, has_default_labels
+from stratum.optimizer.logical._base import IndexEffect, Uncacheable, has_default_labels
 from stratum.optimizer.logical._ops import OperandRef, Op, OutputType, ValueOp, VariableOp, CallOp
 from stratum.frontend._pandas_calls import bind_pandas_function
 from stratum.optimizer.logical import _schema
 import inspect
+import os
+from pathlib import PurePath
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -35,6 +37,78 @@ class SourceOp(Op):
     index_effect = IndexEffect.DEFAULT
 
 
+def file_fingerprint(path, storage_options=None) -> tuple:
+    """Name a file (or a directory of files) by path and ``os.stat`` metadata.
+
+    Input files are assumed static apart from what their metadata shows, so this is
+    the whole cost of keying a source for the reuse cache: one ``stat`` per file,
+    independent of its size. A GCS path is named by its object listing instead
+    (see :func:`_gcs_fingerprint`), with ``storage_options`` as the read's
+    credentials. Raises :class:`Uncacheable` for anything else.
+    """
+    if not isinstance(path, (str, PurePath)):
+        raise Uncacheable(f"source path of type {type(path).__name__}")
+    path = os.fspath(path)
+    if _is_gcs_path(path):
+        return _gcs_fingerprint(path, storage_options)
+    if "://" in path:
+        raise Uncacheable(f"remote source {path!r}")
+    path = os.path.abspath(path)
+    try:
+        st = os.stat(path)
+    except OSError as exc:  # missing, or a glob pattern
+        raise Uncacheable(f"cannot stat source {path!r}: {exc}")
+    if not os.path.isdir(path):
+        return path, st.st_size, st.st_mtime_ns
+    files = []
+    for root, dirs, names in os.walk(path):
+        dirs.sort()
+        for name in sorted(names):
+            full = os.path.join(root, name)
+            fst = os.stat(full)
+            files.append((os.path.relpath(full, path), fst.st_size, fst.st_mtime_ns))
+    return path, tuple(files)
+
+
+def _gcs_fingerprint(path: str, storage_options) -> tuple:
+    """Name a GCS object (or a prefix of objects) by size and generation per object.
+
+    GCS gives an object a new generation on every write, so the generation plays
+    the part ``st_mtime_ns`` plays for a local file. Costs one listing, never reads
+    data. The listings cache is off: in a long-lived process (``python -m stratum
+    serve``) a cached listing would hide an overwritten object.
+    """
+    if storage_options is not None and not isinstance(storage_options, dict):
+        raise Uncacheable(f"storage_options of type {type(storage_options).__name__}")
+    try:
+        import gcsfs
+    except ImportError:
+        raise Uncacheable(f"gcsfs is not installed to list {path!r}") from None
+    fs = gcsfs.GCSFileSystem(**(storage_options or {}), use_listings_cache=False)
+    try:
+        objects = fs.find(path, detail=True)
+    except (OSError, ValueError) as exc:
+        raise Uncacheable(f"cannot list source {path!r}: {exc}")
+    if not objects:
+        raise Uncacheable(f"no objects at {path!r}")
+    prefix = path.split("://", 1)[1].rstrip("/")
+    files = []
+    for name, info in sorted(objects.items()):
+        generation = info.get("generation")
+        if generation is None:
+            raise Uncacheable(f"no generation for gs://{name}")
+        files.append((name[len(prefix):].lstrip("/"), info["size"], str(generation)))
+    return path, tuple(files)
+
+
+def _file_lineage_config(op) -> dict:
+    """A read's fields, its path named by :func:`file_fingerprint`."""
+    if isinstance(op.file_path, OperandRef):
+        raise Uncacheable("graph-fed source path")
+    fingerprint = file_fingerprint(op.file_path, getattr(op, "storage_options", None))
+    return {**Op.lineage_config(op), "file_path": fingerprint}
+
+
 def _path_name(file_path) -> str | None:
     """A read is named by its path; a graph-fed one is only known at run time."""
     if file_path is None or isinstance(file_path, OperandRef):
@@ -55,6 +129,10 @@ class InMemoryFrameOp(SourceOp):
         self.data = data
         self.output_type = OutputType.FRAME
 
+    def lineage_config(self):
+        # TODO(reuse-cache): in-memory inputs need a cheap content fingerprint.
+        raise Uncacheable("in-memory input frame")
+
     def propagate_output_schema(self):
         """Read off the frame itself."""
         self.output_schema = _schema.schema_of_frame(self.data)
@@ -68,6 +146,7 @@ class FileReadOp(SourceOp):
     has a field for, each with the value that means it was not given.
     """
     OPTIONS: dict = {}
+    cacheable = True
 
     def __init__(self, file_path=None, inputs: list[Op] = None, outputs: list[Op] = None,
                  pandas_options: dict | None = None, **options):
@@ -80,6 +159,9 @@ class FileReadOp(SourceOp):
             setattr(self, name, options.get(name, unset))
         self.pandas_options = dict(pandas_options or {})
         self.output_type = OutputType.FRAME
+
+    def lineage_config(self):
+        return _file_lineage_config(self)
 
     def given_options(self) -> dict:
         """The option fields given a value."""
@@ -155,6 +237,7 @@ class LoadNumpyOp(SourceOp):
     """``np.load``: an ndarray (a MATRIX), not a frame. ``options`` are
     ``np.load``'s keyword arguments."""
     fields = ["file_path", "options"]
+    cacheable = True
 
     def __init__(self, file_path=None, inputs: list[Op] = None, outputs: list[Op] = None,
                  options: dict | None = None):
@@ -162,6 +245,9 @@ class LoadNumpyOp(SourceOp):
         self.file_path = file_path
         self.options = dict(options or {})
         self.output_type = OutputType.MATRIX
+
+    def lineage_config(self):
+        return _file_lineage_config(self)
 
 
 def pandas_read_kwargs(op: FileReadOp) -> dict:

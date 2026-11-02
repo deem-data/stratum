@@ -18,7 +18,7 @@ folding an op subgraph into a tree is ``_expr_folding.py``'s.
 from __future__ import annotations
 import operator
 
-from stratum.optimizer.logical._base import OperandRef, config_key
+from stratum.optimizer.logical._base import OperandRef, Uncacheable, config_key
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
 # corresponding map is not foldable into a column expression.
@@ -82,6 +82,17 @@ class ColumnExpr:
         the root of an aggregation entry.
         """
         return any(child.has_aggregate() for child in self.children())
+
+    def lineage(self):
+        """This expression as plain values, for the reuse cache's lineage key.
+
+        The node's class and its slots; nested expressions name themselves the
+        same way, and the lineage encoder refuses any other slot value it does not
+        know. A node holding a callable overrides this to name it.
+        """
+        return (type(self).__name__,
+                *(getattr(self, name, None) for cls in type(self).__mro__
+                  for name in getattr(cls, "__slots__", ())))
 
 
 def _nested_exprs(value):
@@ -195,6 +206,11 @@ class BinOpExpr(ColumnExpr):
     def _key(self):
         return (self.op, self.left, self.right)
 
+    def lineage(self):
+        if self.op not in BINARY_SYMBOLS:
+            raise Uncacheable(f"binary operator {self.op!r} is not a known operator")
+        return (type(self).__name__, BINARY_SYMBOLS[self.op], self.left, self.right)
+
     def __repr__(self):
         return f"({self.left!r} {BINARY_SYMBOLS.get(self.op, self.op)} {self.right!r})"
 
@@ -209,6 +225,11 @@ class UnaryOpExpr(ColumnExpr):
 
     def _key(self):
         return (self.op, self.operand)
+
+    def lineage(self):
+        if self.op not in UNARY_SYMBOLS:
+            raise Uncacheable(f"unary operator {self.op!r} is not a known operator")
+        return (type(self).__name__, UNARY_SYMBOLS[self.op], self.operand)
 
     def __repr__(self):
         return f"{UNARY_SYMBOLS.get(self.op, self.op)}({self.operand!r})"
