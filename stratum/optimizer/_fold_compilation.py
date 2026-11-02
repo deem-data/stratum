@@ -11,17 +11,24 @@ selection takes as given.
 
 Compiling the template gives a :class:`FoldPlan`, which each fold runs a fresh
 copy of (:meth:`FoldPlan.instantiate`), with the fold's rows bound to its split.
+With a reuse cache, the copy is where reuse is planned for the fold: its keys
+follow from its rows, and what the cache holds of it is taken and pruned.
 
-Today the compile at the split decides what the initial compile did; it is where
-decisions made from what the run has measured will go.
+The template is compiled again after the first fold, with what that fold
+measured (a :class:`FoldProfile`, which implementation selection reads from the
+plan context). The remaining folds run the plan that compile gives, or keep the
+one they had if it decides the same. No selector reads the profile yet, so today
+they always keep it.
 """
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 
 from stratum.optimizer._input_removal_planning import plan_input_removals
 from stratum.optimizer._linearization import linearize_dag
 from stratum.optimizer._op_utils import topological_iterator
+from stratum.optimizer._reuse_planning import plan_fold_reuse, post_split_region
 from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.logical._split_ops import BoundaryOp
 from stratum.optimizer.physical._conversion import ConversionOp
@@ -31,19 +38,6 @@ from stratum.utils._utils import start_time, log_time
 
 import logging
 logger = logging.getLogger(__name__)
-
-
-def post_split_region(ops: list[IRNode]) -> set[IRNode]:
-    """The split op and everything downstream of it: what runs once per fold."""
-    split = next((op for op in ops if op.is_split_op), None)
-    post_split = set()
-    stack = [split] if split is not None else []
-    while stack:
-        op = stack.pop()
-        if op not in post_split:
-            post_split.add(op)
-            stack.extend(op.outputs)
-    return post_split
 
 
 def copy_op(op: IRNode) -> IRNode:
@@ -120,12 +114,20 @@ class FoldTemplate:
 
         ``live`` are the ops before the split whose values the pool keeps for the
         folds. A conversion of one of them that the plan before the split already
-        made is read from there rather than repeated in every fold.
+        made is read from there rather than repeated in every fold. An op before
+        the split the pool did not keep is read through a conversion of it that it
+        kept, converted back if the plan needs it so.
         """
         start = start_time()
         # The boundaries are the template's sources, so they are copied too.
         copies = _copy_region(list(topological_iterator(self.root)))
-        root = lower_to_physical(copies[self.root], ctx)
+        for op, new in copies.items():
+            if isinstance(new, BoundaryOp):
+                new.stands_for = _kept(op.stands_for, live)
+        replaced = {}
+        root = lower_to_physical(copies[self.root], ctx, replaced)
+        for op, new in copies.items():
+            replaced.get(new, new).origin = op
         root = select_implementations(root, ctx, registry=registry, selector=selector)
 
         order, _ = linearize_dag(root)
@@ -144,18 +146,26 @@ class FoldTemplate:
             fold.append(op)
         for op in fold:
             op.inputs = [before[in_] if in_ in before
-                         else _live(in_.stands_for, live) if isinstance(in_, BoundaryOp)
+                         else in_.stands_for if isinstance(in_, BoundaryOp)
                          else in_ for in_ in op.inputs]
         log_time("compiling the plan after the split took", start)
         return FoldPlan(fold)
 
 
-def _live(op: IRNode, live: set[IRNode]) -> IRNode:
-    if op not in live:
-        raise RuntimeError(
-            f"The plan after the split reads {op}, which the plan before it did not"
-            " keep for the folds")
-    return op
+def _kept(op: IRNode, live: set[IRNode]) -> IRNode:
+    """``op``, or a conversion of it, whichever the pool keeps for the folds.
+
+    The plan before the split frees an op read only through a conversion of it,
+    which a compile choosing other libraries may no longer read.
+    """
+    if op in live:
+        return op
+    for out in op.outputs:
+        if isinstance(out, ConversionOp) and out in live:
+            return out
+    raise RuntimeError(
+        f"The plan after the split reads {op}, which the plan before it did not"
+        " keep for the folds")
 
 
 def _done_conversion(conversion: ConversionOp, source: IRNode,
@@ -169,15 +179,28 @@ def _done_conversion(conversion: ConversionOp, source: IRNode,
 
 class FoldPlan:
     """The plan of one fold, compiled: ops in execution order, from the split op to
-    the root. Inputs from before the split are those ops themselves."""
+    the root. Inputs from before the split are those ops themselves.
 
-    def __init__(self, ops: list[IRNode]):
+    ``reuse``, when given, is the ``(cache, admission policy)`` to plan each fold's
+    reuse with.
+    """
+
+    def __init__(self, ops: list[IRNode], reuse=None):
         self.ops = ops
+        self.reuse = reuse
+
+    def decides_as(self, other: FoldPlan) -> bool:
+        """Whether the two plans run the same implementations in the same order on
+        the same inputs: compiled from the same template ops, with the same
+        choices made for them."""
+        return _decisions(self.ops) == _decisions(other.ops)
 
     def instantiate(self, indices) -> list[IRNode]:
         """A copy of the plan to run one fold, whose rows are ``indices``, the
         ``(train, test)`` row positions. Each copy's ``instance_of`` is the op it
         copies, and its buffers are released after their last reader in the fold.
+        With ``reuse``, a copy the cache holds is a hit, and what only hits read is
+        left out.
         """
         copies = _copy_region(self.ops)
         fold = []
@@ -187,8 +210,47 @@ class FoldPlan:
             if new.is_split_op:
                 new.indices = indices
             fold.append(new)
+        if self.reuse is not None:
+            fold = plan_fold_reuse(fold, *self.reuse)
         # Read by every fold: what comes before the split stays in the pool.
         members = set(fold)
         plan_input_removals(fold, {in_ for op in fold for in_ in op.inputs
                                    if in_ not in members})
         return fold
+
+
+def _decisions(ops: list[IRNode]) -> list[tuple]:
+    at = {op: i for i, op in enumerate(ops)}
+    return [(type(op), getattr(op, "_frame_lib", None), op.origin, op.stage, op.mode,
+             tuple(("fold", at[in_]) if in_ in at else ("before", id(in_))
+                   for in_ in op.inputs))
+            for op in ops]
+
+
+@dataclass
+class Measured:
+    """What running an op in a fold measured: ``seconds`` it took, and the bytes
+    of its output (``size``) and of the state it fitted (``state_size``), each 0
+    if it kept none."""
+    seconds: float
+    size: int = 0
+    state_size: int = 0
+
+
+class FoldProfile:
+    """What running one fold measured, for the compile after it to decide from.
+
+    ``ops`` maps each template op (see ``IRNode.origin``) to what its compiled op
+    measured. An op the fold took from the cache did not run and is not measured,
+    nor is an op compiling added that no template op stands for, such as a
+    conversion. ``peak`` is the most bytes the fold's outputs and states held at
+    once, over what the pool held when the fold started.
+    """
+
+    def __init__(self):
+        self.ops: dict[IRNode, Measured] = {}
+        self.peak = 0
+
+    def of(self, op: IRNode) -> Measured | None:
+        """What was measured of the template op ``op`` was compiled from."""
+        return self.ops.get(op.origin) if op.origin is not None else None

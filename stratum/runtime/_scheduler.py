@@ -4,9 +4,11 @@ from typing import Any
 from sklearn.model_selection import train_test_split, check_cv
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._dataframe_ops import SplitOp
-from stratum.optimizer._fold_compilation import FoldPlan
+from stratum.optimizer._fold_compilation import FoldPlan, FoldProfile, Measured
+from stratum.optimizer._lineage import state_key
 from stratum.optimizer.logical._ops import Op
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._object_size import get_size
 from stratum.runtime._object_serialization import delete_object, deserialize_object
 import numpy as np
 import pandas as pd
@@ -26,6 +28,14 @@ class Scheduler:
         self.fold_plan: FoldPlan | None = None
         #: The copy the last fold ran, for inspection.
         self.fold_ops: list[Op] | None = None
+        #: Compiles the fold plan, at the split and again after the first fold
+        #: (see ``CompiledPlan.compile_folds``); None to run the plan as compiled.
+        self._compile_folds = None
+        #: What the fold running now measures, if it is measured; the pool's bytes
+        #: when it started; and the bytes of the states it holds in the store.
+        self._profile: FoldProfile | None = None
+        self._profile_base = 0
+        self._state_sizes: dict[Op, int] = {}
         self.timings = [] if print_heavy_hitters else None
         self.observer = None  # Inspection-only hooks, see stratum._profiler.
         self.results_ = None
@@ -43,15 +53,23 @@ class Scheduler:
         #: cache hits, at the cost the entry took to compute). Kept with a cache only.
         self._lineage_cost: dict = {}
 
-    def _pool_cache_hits(self) -> None:
-        """Put the values reuse planning took from the cache into the empty pool."""
-        for op in self.linearized_dag:
-            if op.cache_hit is not None:
-                self.pool.put(op, op.cache_hit.take())
-                self._lineage_cost[op] = op.cache_hit.cost
+    def _pool_cache_hits(self, ops: list[Op]) -> None:
+        """Put the values reuse planning took from the cache for ``ops`` into the
+        pool, and the states into the state store."""
+        for op in ops:
+            hit = op.cache_hit
+            if hit is None:
+                continue
+            if hit.has_output:
+                self.pool.put(op, hit.take())
+            if hit.has_state:
+                self.state_store[op] = hit.take_state()
+            self._lineage_cost[op] = hit.cost
 
     def _finish(self):
-        """End of execution. Remove all buffers, handing flagged ones to the cache."""
+        """End of execution. Remove all buffers and states, handing flagged ones to
+        the cache."""
+        self._release_states(list(self.state_store))
         if self.reuse_cache is not None:
             for key in list(self.pool.live_variable_map):
                 if getattr(key, "cache_key", None) is not None:
@@ -132,10 +150,17 @@ class Scheduler:
             self.cv_id = i
             logger.debug(f"CV Fold Nr. {i + 1}")
 
-            fold = self.run_fold((self.pool.pin(train_ids_handle), self.pool.pin(test_ids_handle)))
+            # The first fold is measured, for the plan of the others to be compiled
+            # again from what it measured.
+            profile = (FoldProfile() if i == 0 and len(splits) > 1
+                       and self._compile_folds is not None else None)
+            fold = self.run_fold((self.pool.pin(train_ids_handle), self.pool.pin(test_ids_handle)),
+                                 profile)
             for handle in (train_ids_handle, test_ids_handle):
                 self.pool.unpin(handle)
                 self.pool.remove(handle)
+            if profile is not None:
+                self._recompile_folds(profile)
             logger.debug("\n" + "="*100 + "\n" + "Fold " + str(i+1) + " done" + "\n" + "="*100 + "\n")
             if return_predictions:
                 predictions.append(fold.select("id", "vals"))
@@ -193,25 +218,35 @@ class Scheduler:
                 if not op.reads_state(k):
                     self.pool.unpin(in_op)
 
-            # 4. remove unnecessary intermediates from buffer pool and state store
-            for in_op in op.remove_after:
-                self._release(in_op)
-            for in_op in op.release_state_after:
-                del self.state_store[in_op]
-
-            # 5. add output to the buffer pool, and a fitted state to the store
-            if op.stage == "fit":
-                self.state_store[op] = result.state
-                result = result.output
-            if op.stage != "fit" or _has_data_consumer(op):
-                self.pool.put(op, result)
-            self.log_memory_usage()
-
             if self.reuse_cache is not None:
                 # Shared inputs are counted once per path, so this overestimates a
                 # diamond. It ranks entries for eviction; it is not an exact measure.
                 self._lineage_cost[op] = (t2 - t1) + sum(
                     self._lineage_cost.get(in_op, 0.0) for in_op in op.inputs)
+
+            # 4. remove unnecessary intermediates from buffer pool and state store
+            if self._profile is not None:
+                held = self.pool.memory_usage + sum(self._state_sizes.values())
+            for in_op in op.remove_after:
+                self._release(in_op)
+            for in_op in op.release_state_after:
+                self._state_sizes.pop(in_op, None)
+                self._release_state(in_op, self.state_store.pop(in_op))
+
+            # 5. add output to the buffer pool, and a fitted state to the store
+            state = None
+            if op.stage == "fit":
+                state = result.state
+                if op.has_state_reader():
+                    self.state_store[op] = state
+                else:
+                    self._release_state(op, state)
+                result = result.output
+            if op.stage != "fit" or op.has_data_reader():
+                self.pool.put(op, result)
+            if self._profile is not None:
+                self._measure(op, t2 - t1, state, held)
+            self.log_memory_usage()
 
             t3 = perf_counter()
             process_duration = t2 - t1
@@ -230,6 +265,22 @@ class Scheduler:
             raise RuntimeError(f"[{mode}] Error processing '{op}': {e}")
 
         return op
+
+    def _measure(self, op: Op, seconds: float, state, held: int) -> None:
+        """Record what running ``op`` measured in the profile of the fold.
+
+        ``held`` is what the pool and the state store held while it ran, before its
+        inputs were released: with its output and state, the fold's peak so far.
+        """
+        entry = self.pool.live_variable_map.get(op)
+        measured = Measured(seconds, int(entry.size) if entry is not None else 0,
+                            int(get_size(state)) if state is not None else 0)
+        if op in self.state_store:
+            self._state_sizes[op] = measured.state_size
+        if op.origin is not None:
+            self._profile.ops[op.origin] = measured
+        self._profile.peak = max(self._profile.peak, held + measured.size
+                                 + measured.state_size - self._profile_base)
 
     def _format_predict_result(self, rows):
         """The candidate-set sink's labelled rows as a frame."""
@@ -258,11 +309,19 @@ class Scheduler:
             delete_object(entry.handle)
         return True
 
+    def _release_states(self, ops) -> None:
+        """Release the states of ``ops`` still in the store. A plan releases each
+        after its last reader; one left there has none that ran."""
+        for op in ops:
+            if op in self.state_store:
+                logger.debug(f"Releasing the state of {op}, which nothing read")
+                self._release_state(op, self.state_store.pop(op))
 
-def _has_data_consumer(op: Op) -> bool:
-    """Whether an op reads ``op``'s output, not only the state it fitted."""
-    return any(in_op is op and not out.reads_state(k)
-               for out in op.outputs for k, in_op in enumerate(out.inputs))
+    def _release_state(self, op: Op, state) -> None:
+        """Drop the state ``op`` fitted, or hand it to the reuse cache if flagged."""
+        if self.reuse_cache is not None and op.cache_key is not None:
+            self.reuse_cache.put(state_key(op.cache_key), state,
+                                 self._lineage_cost.get(op, 0.0), f"{op} state")
 
 
 def _shielded(value):
@@ -290,7 +349,7 @@ class SequentialScheduler(Scheduler):
         self.linearized_dag = linearized_dag
         self.pos_split_op = split_pos
         self._compile_folds = compile_folds
-        self._pool_cache_hits()
+        self._pool_cache_hits(linearized_dag)
 
     def evaluate(self, seed: int = 42, test_size=0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
@@ -310,16 +369,24 @@ class SequentialScheduler(Scheduler):
         self._finish()
         return self._format_predict_result(rows)["vals"][0]
 
-    def run_fold(self, indices):
+    def run_fold(self, indices, profile: FoldProfile | None = None):
         """Run a copy of the fold plan on the fold whose ``(train, test)`` row
-        positions are ``indices``, and return its sink's value."""
+        positions are ``indices``, and return its sink's value. ``profile``, if
+        given, records what the run measures."""
         self.fold_ops = self.fold_plan.instantiate(indices)
+        self._profile, self._profile_base = profile, self.pool.memory_usage
+        self._pool_cache_hits(self.fold_ops)
         try:
             return self.compute(self.fold_ops)
         finally:
+            self._profile = None
+            self._state_sizes.clear()
+            self._release_states(self.fold_ops)
             for op in self.fold_ops:
                 if op.is_split_op:
                     op.indices = None
+                # The copies are not run again.
+                self._lineage_cost.pop(op, None)
 
     def compute(self, ops: list[Op]):
         """Run ``ops`` in order and return the value of the last, their sink."""
@@ -346,9 +413,19 @@ class SequentialScheduler(Scheduler):
     def _enter_folds(self) -> None:
         """Compile the fold plan; the plan the scheduler reports is the ops it ran
         before the split followed by it."""
-        before = self.linearized_dag[:self.pos_split_op]
         if self._compile_folds is not None:
-            self.fold_plan = self._compile_folds()
+            self._use_fold_plan(self._compile_folds())
         else:
-            self.fold_plan = FoldPlan(self.linearized_dag[self.pos_split_op:])
-        self.linearized_dag = before + self.fold_plan.ops
+            self._use_fold_plan(FoldPlan(self.linearized_dag[self.pos_split_op:]))
+
+    def _recompile_folds(self, profile: FoldProfile) -> None:
+        """Compile the fold plan again from what a fold measured; the next folds
+        run what it gives."""
+        plan = self._compile_folds(profile, self.fold_plan)
+        if plan is not self.fold_plan:
+            logger.debug("The plan of the remaining folds changed after the first")
+            self._use_fold_plan(plan)
+
+    def _use_fold_plan(self, plan: FoldPlan) -> None:
+        self.fold_plan = plan
+        self.linearized_dag = self.linearized_dag[:self.pos_split_op] + plan.ops

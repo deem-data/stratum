@@ -85,6 +85,63 @@ class TestBufferPool(unittest.TestCase):
         self.assertEqual(get_size(df), get_size(df.groupby("g")))
         self.assertEqual(get_size(df["v"]), get_size(df.groupby("g")["v"]))
 
+    def test_an_estimator_is_sized_by_all_it_retains(self):
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        from sklearn.neighbors import KNeighborsClassifier
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        import pickle
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(5000, 8))
+        y = (X[:, 0] > 0).astype(int)
+        # KNN keeps its training data privately (_fit_X, and its tree's copy); a
+        # pipeline holds its fitted steps in a list; boosting its trees as objects.
+        for est in (KNeighborsClassifier().fit(X, y),
+                    make_pipeline(StandardScaler(), KNeighborsClassifier()).fit(X, y),
+                    HistGradientBoostingRegressor(max_iter=10).fit(X, y)):
+            with self.subTest(est=type(est).__name__):
+                pickled = len(pickle.dumps(est))
+                self.assertGreater(get_size(est), 0.8 * pickled)
+                self.assertLess(get_size(est), 1.2 * pickled)
+
+    def test_an_estimator_counts_what_it_shares_once(self):
+        from sklearn.linear_model import Ridge
+        est = Ridge().fit(np.ones((10, 2)), np.arange(10.))
+        alone = get_size(est)
+        data = np.zeros(10_000)
+        est.a_, est.b_, est.view_ = data, data, data[:10]
+        names = sum(get_size(name) for name in ("a_", "b_", "view_"))
+        self.assertEqual(get_size(est), alone + data.nbytes + names)
+
+    def test_an_estimator_is_never_sized_by_user_code(self):
+        from sklearn.base import BaseEstimator
+        from sklearn.linear_model import Ridge
+        calls = []
+
+        class Net:
+            def __getstate__(self):
+                calls.append(self)
+                return {}
+
+        class Model(BaseEstimator):
+            pass
+
+        class MyRidge(Ridge):
+            pass
+
+        holding = Model()
+        holding.coef_, holding.net_ = np.zeros(1000), Net()
+        plain = Model()
+        plain.coef_ = np.zeros(1000)
+        ridge = MyRidge().fit(np.ones((10, 2)), np.arange(10.))
+        ridge.coef_ = np.zeros(1000)
+        # A user state builder is never called, and what holds it is not sized in part.
+        self.assertEqual(get_size(holding), UNKNOWN_SIZE)
+        self.assertEqual(calls, [])
+        # A user class keeping the default, or a library's, is sized as before.
+        self.assertGreater(get_size(plain), 8000)
+        self.assertGreater(get_size(ridge), 8000)
+
     def test_unknown_object_sizes(self):
         # An object we cannot size must not crash the plan that produced it (a
         # `df.index` intermediate used to). It is counted as UNKNOWN_SIZE instead,

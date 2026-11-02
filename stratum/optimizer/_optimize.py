@@ -3,7 +3,7 @@ from skrub._data_ops import DataOp
 from skrub._data_ops._data_ops import Apply
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .logical.rewrites._cse import apply_op_cse
@@ -19,7 +19,7 @@ from ._explain import explain_linear_plan
 from .logical.rewrites._algebraic import algebraic_rewrites, AlgebraicRewritesConfig
 from .logical.rewrites._relational import relational_rewrites
 from ._linearization import linearize_dag
-from ._fold_compilation import FoldPlan, FoldTemplate
+from ._fold_compilation import FoldPlan, FoldProfile, FoldTemplate
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
 from ._reuse_planning import AdmissionPolicy, apply_reuse_cache, make_admission_policy
 from .physical._plan_context import PlanContext
@@ -160,20 +160,32 @@ class CompiledPlan:
 
     def __init__(self, linearized_dag: list, split_pos: int | None,
                  template: FoldTemplate | None, ctx: PlanContext,
-                 selector: ImplementationSelector):
+                 selector: ImplementationSelector, reuse=None):
         self.linearized_dag = linearized_dag
         self.split_pos = split_pos
         self.template = template
         self.ctx = ctx
         self.selector = selector
+        #: ``(cache, admission policy)`` to plan each fold's reuse with, if any.
+        self.reuse = reuse
 
-    def compile_folds(self) -> FoldPlan:
+    def compile_folds(self, profile: FoldProfile | None = None,
+                      current: FoldPlan | None = None) -> FoldPlan:
         """The plan of a fold, compiled at the split: from the retained template if
-        there is one, else the initial plan's ops from the split on."""
+        there is one, else the initial plan's ops from the split on.
+
+        Compiled again after a fold, ``profile`` is what that fold measured and
+        ``current`` the plan it ran, which is returned if the new one decides as it
+        does.
+        """
         if self.template is None:
-            return FoldPlan(self.linearized_dag[self.split_pos:])
+            return current or FoldPlan(self.linearized_dag[self.split_pos:], self.reuse)
         before = self.linearized_dag[:self.split_pos]
-        fold = self.template.compile(self.ctx, self.selector, live=pinned_before_split(before))
+        ctx = self.ctx if profile is None else replace(self.ctx, profile=profile)
+        fold = self.template.compile(ctx, self.selector, live=pinned_before_split(before))
+        if current is not None and fold.decides_as(current):
+            return current
+        fold.reuse = self.reuse
         if diagnostics_enabled():
             # What runs: node IDs of the run refer to this plan.
             capture_plan("fold_impl", before + fold.ops, self.split_pos)
@@ -252,7 +264,8 @@ def compile_plan(dag_root: DataOp, config: OptConfig = None, env: dict = None,
         root, ctx, selector=selector, reuse_cache=reuse_cache, admission=admission)
 
     log_time("Optimization took in total", start)
-    return CompiledPlan(linearized_dag, split_pos, template, ctx, selector)
+    reuse = (reuse_cache, admission) if reuse_cache is not None else None
+    return CompiledPlan(linearized_dag, split_pos, template, ctx, selector, reuse)
 
 
 def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,

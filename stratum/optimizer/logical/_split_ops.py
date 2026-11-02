@@ -1,8 +1,10 @@
 from skrub._data_ops._estimator import _Splitter
 from sklearn.model_selection import check_cv
+from stratum.optimizer.logical._base import Uncacheable
 from stratum.optimizer.logical._ops import OperandBinder, OperandRef, OutputType, Op, SplitXOp, _resolve_operand
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.utils._utils import start_time, log_time
+import hashlib
 import pandas as pd
 import polars as pl
 import numpy as np
@@ -49,7 +51,13 @@ def _take(x, y, rows) -> tuple:
 
 
 class SplitOutput(Op):
-    """``X`` or ``y`` of the training or the test rows of a fold."""
+    """``X`` or ``y`` of the training or the test rows of a fold.
+
+    Keyed by the rows it takes and the X or y it takes them from, not by the split
+    op: the training side depends on the training rows only, and the splitter that
+    chose them does not matter.
+    """
+    cacheable = True
 
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, train=False):
         name = ("X" if is_x else "y") + ("_train" if train else "_test")
@@ -75,6 +83,19 @@ class SplitOutput(Op):
 
     def process(self, mode: str, inputs: list):
         return inputs[0][(0 if self.train else 2) + (0 if self.is_x else 1)]
+
+    @property
+    def lineage_inputs(self) -> list:
+        split = self.inputs[0]
+        return [split.inputs[0 if self.is_x else 1]]
+
+    def lineage_config(self):
+        indices = self.inputs[0].indices
+        if indices is None:
+            raise Uncacheable("the split has no rows bound yet")
+        rows = np.ascontiguousarray(indices[0 if self.train else 1], dtype=np.int64)
+        return (self.is_x, self.train,
+                hashlib.blake2b(rows.tobytes(), digest_size=16).digest())
 
 
 class BoundaryOp(Op):

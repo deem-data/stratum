@@ -23,7 +23,8 @@ is where memory estimates, available backends and cost models feed the selector.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from stratum._config import FLAGS
 
@@ -51,6 +52,10 @@ class PlanContext:
         Name of the implementation-selection policy to use during physical
         planning: ``"default"`` (pandas/sklearn-skrub-first) or ``"greedy"``
         (rust/polars-first).
+    profile:
+        What running a fold measured, when the plan after the split is compiled
+        again after one (a ``FoldProfile``; ``profile.of(op)`` is what was
+        measured of ``op``). None for every other compile.
     """
 
     pandas_query: bool
@@ -59,6 +64,7 @@ class PlanContext:
     rust_backend: bool
     allow_patch: bool
     implementation_selector: str = "default"
+    profile: Any = field(default=None, compare=False)
 
     @property
     def prefer_rust(self) -> bool:

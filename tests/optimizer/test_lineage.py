@@ -64,6 +64,40 @@ def test_distinct_values_encode_distinctly():
     assert len(set(digests)) == len(values)
 
 
+def test_dtypes_are_named_by_all_they_configure():
+    # Each pair stringifies alike: "category", "string".
+    values = [pd.CategoricalDtype(["a", "b"]), pd.CategoricalDtype(["a"]),
+              pd.CategoricalDtype(["a"], ordered=True), pd.CategoricalDtype([1, 2]),
+              pd.CategoricalDtype(), pd.StringDtype("python"), pd.StringDtype("pyarrow"),
+              pd.DatetimeTZDtype("ns", "UTC"), pd.DatetimeTZDtype("ns", "Europe/Berlin"),
+              pd.PeriodDtype("D"), pd.Int64Dtype()]
+    digests = [digest(v) for v in values]
+    assert len(set(digests)) == len(values)
+    assert digest(pd.CategoricalDtype(["a", "b"])) == digests[0]
+
+
+def test_calendar_offsets_are_named_by_all_they_configure():
+    # normalize is not in the repr; months=12 is another offset than years=1.
+    values = [pd.DateOffset(years=1), pd.DateOffset(months=12), pd.DateOffset(years=2),
+              pd.DateOffset(2, years=1), pd.DateOffset(years=1, normalize=True),
+              pd.DateOffset(years=1, months=2), pd.offsets.MonthEnd(2), pd.offsets.Day(3),
+              pd.offsets.Week(weekday=2), pd.offsets.Week(weekday=3), pd.DateOffset()]
+    digests = [digest(v) for v in values]
+    assert len(set(digests)) == len(values)
+    # The same offset spelled with its keywords in another order.
+    assert digest(pd.DateOffset(years=1, months=2)) == digest(pd.DateOffset(months=2, years=1))
+
+
+def test_offsets_of_unknown_code_are_never_encoded():
+    class Shifted(pd.DateOffset):
+        pass
+
+    # A user subclass, and a business calendar object inside an offset.
+    for value in (Shifted(years=1), pd.offsets.CustomBusinessDay(holidays=["2020-01-01"])):
+        with pytest.raises(Uncacheable):
+            digest(value)
+
+
 def test_containers():
     assert digest({"a": 1, "b": 2}) != digest({"b": 2, "a": 1})  # order is semantic
     assert digest({3, 1, 2}) == digest({2, 3, 1})
@@ -189,6 +223,49 @@ def test_touching_the_source_rekeys_everything(csv_path):
     base = plan_keys(csv_pipeline(csv_path))
     os.utime(csv_path, ns=(1, 1))
     assert all(a != b for (_, a), (_, b) in zip(base, plan_keys(csv_pipeline(csv_path))))
+
+
+def test_a_window_by_calendar_offset_is_keyed(tmp_path):
+    path = tmp_path / "events.parquet"
+    pd.DataFrame({"date": pd.to_datetime(["2020-03-01", "2021-06-01"]),
+                  "cutoff": pd.to_datetime(["2020-01-01", "2020-01-01"])}).to_parquet(path)
+    events = st.as_data_op(str(path)).skb.apply_func(pd.read_parquet)
+    in_window = ((events["date"] >= events["cutoff"])
+                 & (events["date"] < events["cutoff"] + pd.DateOffset(years=1)))
+    reasons = {}
+    keys = plan_keys(events[in_window], reasons)
+    assert all(key is not None for _, key in keys), reasons
+
+
+def test_standalone_arithmetic_is_keyed(tmp_path):
+    # Arithmetic no assign or mask consumes stays a NumericOp: a number, a string
+    # concatenation, a calendar offset, a numpy ufunc.
+    path = tmp_path / "lots.parquet"
+    pd.DataFrame({"boro": ["1", "2"], "block": ["7", "88"], "x": [1.5, 2.0],
+                  "d": pd.to_datetime(["2020-02-29", "2021-03-01"])}).to_parquet(path)
+    lots = st.as_data_op(str(path)).skb.apply_func(pd.read_parquet)
+    for dag in (lots["x"] * 2 + 1, lots["boro"] + lots["block"],
+                lots["d"] + pd.DateOffset(years=1), lots["x"].skb.apply_func(np.log)):
+        reasons = {}
+        keys = plan_keys(dag, reasons)
+        assert all(key is not None for _, key in keys), reasons
+
+
+def test_numeric_ops_are_keyed_by_operation_and_operands(csv_path):
+    data = read_csv(csv_path)
+    x, y = data["x"], data["y"]
+    variants = [x + 1, x - 1, 1 - x, x * 2, x / 2, x ** 3, x + y, y + x,
+                x.skb.apply_func(np.exp), x.skb.apply_func(np.sqrt)]
+    final_keys = [plan_keys(v)[-1][1] for v in variants]
+    assert None not in final_keys
+    assert len(set(final_keys)) == len(variants)
+
+
+def test_an_unknown_numpy_function_is_uncacheable(csv_path):
+    reasons = {}
+    keys = plan_keys(read_csv(csv_path)["x"].skb.apply_func(np.cumsum), reasons)
+    assert keys[-1][1] is None
+    assert any("cumsum" in str(why) for why in reasons.values())
 
 
 def test_in_memory_inputs_are_uncacheable():

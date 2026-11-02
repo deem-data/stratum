@@ -117,6 +117,29 @@ def record_reuse_plan(ops, region, keys, reasons, hits, admitted):
     run.reuse_plan = plan
 
 
+def record_fold_reuse(fold, kept, keys, reasons, hits, admitted):
+    """Count what reuse planning decided for a fold, per op of the fold plan.
+
+    ``fold`` is the fold's copy before hits pruned it, ``kept`` what is left to run.
+    """
+    run = _active_run.get()
+    if run is None:
+        return
+    hits, admitted = set(hits), set(admitted)
+    for op in fold:
+        counts = run.fold_reuse.setdefault(op.instance_of or op, {
+            "status": "fold", "folds": 0, "keyed": 0, "hits": 0, "admitted": 0,
+            "pruned": 0, "reason": None})
+        counts["folds"] += 1
+        if keys.get(op) is None:
+            counts["reason"] = reasons.get(op)
+        else:
+            counts["keyed"] += 1
+        counts["hits"] += op in hits
+        counts["admitted"] += op in admitted
+        counts["pruned"] += op not in kept
+
+
 @contextmanager
 def capture_plans(*, include_svg=False):
     """Capture optimizer checkpoints in memory without a scheduler or disk export.
@@ -170,6 +193,9 @@ class RunDiagnostics:
         self.reuse_cache = None
         self.reuse_stats_before = None
         self.reuse_plan = None
+        #: Op of the fold plan -> what reuse planning decided for its copies, summed
+        #: over the folds.
+        self.fold_reuse = {}
 
     def attach_reuse_cache(self, cache):
         """Report ``cache``'s activity during this run (counts from here on)."""
@@ -178,15 +204,13 @@ class RunDiagnostics:
 
     def reuse_cache_report(self, sched):
         """The run's cache counts, the cache's state after it, and per executed node
-        (by ``physical_impl`` position) what reuse planning decided."""
+        (by position in the plan the run reports) what reuse planning decided; for
+        a node after the split, summed over the folds."""
         cache = self.reuse_cache
         nodes = {}
         if sched is not None and self.reuse_plan is not None:
             for i, op in enumerate(sched.linearized_dag):
-                decision = self.reuse_plan.get(op)
-                if decision is None and sched.pos_split_op is not None and i >= sched.pos_split_op:
-                    # Compiled at the split, after reuse planning: what runs per fold.
-                    decision = {"status": "outside"}
+                decision = self.reuse_plan.get(op) or self.fold_reuse.get(op)
                 if decision is None:
                     continue
                 node = dict(decision)

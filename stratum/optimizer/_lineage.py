@@ -36,7 +36,7 @@ import pandas as pd
 
 from stratum.optimizer.logical._base import IRNode, OperandRef, Uncacheable
 
-__all__ = ["Uncacheable", "LineageEncoder", "compute_lineage_keys", "lineage_key"]
+__all__ = ["Uncacheable", "LineageEncoder", "compute_lineage_keys", "lineage_key", "state_key"]
 
 #: Bytes of a lineage key (hex-encoded to twice as many characters).
 KEY_BYTES = 16
@@ -50,8 +50,20 @@ MAX_ENCODED_VALUES = 100_000
 _SCALAR_TYPES = (np.generic, decimal.Decimal, datetime.date, datetime.time,
                  datetime.timedelta, type(pd.NaT), type(pd.NA))
 
-#: Data types, as passed to ``astype`` and the readers, named by type and string.
-_DTYPE_TYPES = (np.dtype, pd.api.extensions.ExtensionDtype)
+
+def _dtype_field(value):
+    """A field of an extension dtype as plain values, or ``value`` itself if the
+    encoder takes it as it is."""
+    if isinstance(value, pd.Index):
+        return ("Index", _dtype_field(value.dtype), value.tolist())
+    if isinstance(value, datetime.tzinfo):
+        return ("tz", str(value))
+    if isinstance(value, pd.offsets.BaseOffset):
+        return ("freq", value.freqstr)
+    if type(value).__module__.startswith("pyarrow"):
+        return ("pyarrow", str(value))
+    return value
+
 
 #: Python types that stand for a data type (``astype(float)``).
 _BUILTIN_DTYPES = {str: "str", int: "int", float: "float", bool: "bool", object: "object"}
@@ -66,9 +78,9 @@ class LineageEncoder:
     payloads are length-prefixed, so distinct values never encode alike. Plain
     values are ``None``, ``bool``, ``int``, ``float``, ``str``, ``bytes``, slices,
     tuples, lists, dicts and sets of plain values, ``OperandRef``s, the literals in
-    ``_SCALAR_TYPES`` and data types. An object can name itself by a ``lineage()``
-    method returning plain values, as column expressions do. Anything else raises
-    :class:`Uncacheable`.
+    ``_SCALAR_TYPES``, pandas' calendar offsets, and numpy and pandas data types. An object can name itself by
+    a ``lineage()`` method returning plain values, as column expressions do.
+    Anything else raises :class:`Uncacheable`.
     """
 
     def __init__(self):
@@ -143,10 +155,31 @@ class LineageEncoder:
             self._tag(b"~")
             self._str(type(value).__qualname__)
             self._str(repr(value))
-        elif isinstance(value, _DTYPE_TYPES):
+        elif isinstance(value, pd.offsets.BaseOffset):
+            # A calendar offset (``DateOffset(years=1)``) is what pandas compares it
+            # by; its repr leaves out ``normalize``. Only pandas' own classes: a
+            # subclass may move dates by code of its own.
+            cls = type(value)
+            if cls.__module__.partition(".")[0] != "pandas":
+                raise Uncacheable(f"no lineage encoding for {cls.__qualname__}")
+            self._tag(b"O")
+            self._str(cls.__qualname__)
+            self.encode(value.n)
+            self.encode(value.normalize)
+            self.encode(dict(sorted(value.kwds.items())))
+        elif isinstance(value, np.dtype):
             self._tag(b"D")
             self._str(type(value).__qualname__)
             self._str(str(value))
+        elif isinstance(value, pd.api.extensions.ExtensionDtype):
+            # Named by the fields pandas compares dtypes by: its string leaves out
+            # the categories of a categorical, and a string dtype's storage.
+            self._tag(b"E")
+            self._str(type(value).__qualname__)
+            fields = type(value)._metadata
+            self._str(str(len(fields)))
+            for name in fields:
+                self.encode(_dtype_field(getattr(value, name)))
         elif isinstance(value, type) and value in _BUILTIN_DTYPES:
             self._tag(b"t")
             self._str(_BUILTIN_DTYPES[value])
@@ -185,9 +218,10 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     lib = getattr(op, "_frame_lib", None)
     enc.encode(None if lib is None else str(lib))
     enc.encode(op.lineage_config())
-    if op.stage is not None or op.pass_mode is not None:
+    if op.stage is not None:
         # Fixed by fit/predict unrolling, not configuration: which call a stage
-        # makes, and in which mode.
+        # makes, and in which mode. Of the ops that can be keyed, only a stage
+        # reads its mode; the others compute the same in every mode.
         enc.raw(b"stage", f"{op.stage}:{op.mode}".encode())
     enc._str(str(len(input_keys)))
     for key in input_keys:
@@ -195,19 +229,28 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     return enc.hexdigest()
 
 
+def state_key(key: str) -> str:
+    """The key of the state a "fit" stage keyed ``key`` fitted, beside its output."""
+    enc = LineageEncoder()
+    enc.raw(b"state", key.encode())
+    return enc.hexdigest()
+
+
 def compute_lineage_keys(ops: Iterable[IRNode], region: set | None = None,
-                         reasons: dict | None = None) -> dict[IRNode, str | None]:
+                         reasons: dict | None = None,
+                         known: dict | None = None) -> dict[IRNode, str | None]:
     """Lineage keys for ``ops``, given in topological order (inputs first).
 
     An op outside ``region`` (when given), one that is :class:`Uncacheable`, or one
-    with an input lacking a key gets ``None``. Pass a dict as ``reasons`` to learn
-    why each keyless op in the region has no key.
+    with an input lacking a key gets ``None``. ``known`` gives the keys of inputs
+    that are not in ``ops``. Pass a dict as ``reasons`` to learn why each keyless op
+    in the region has no key.
     """
-    keys: dict[IRNode, str | None] = {}
+    keys: dict[IRNode, str | None] = dict(known) if known else {}
     for op in ops:
         key = None
         if region is None or op in region:
-            input_keys = [keys.get(in_) for in_ in op.inputs]
+            input_keys = [keys.get(in_) for in_ in op.lineage_inputs]
             if any(k is None for k in input_keys):
                 if reasons is not None:
                     reasons[op] = "an input has no key"

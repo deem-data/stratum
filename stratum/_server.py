@@ -385,6 +385,9 @@ class StratumServer:
         if _alive(self.server_dir):
             raise RuntimeError(f"A stratum server is already running for {self.server_dir}.")
         FLAGS.reuse_cache = True
+        # Jobs run from their own directories: a relative cache directory names the
+        # one the server started in, for every job.
+        FLAGS.reuse_cache_dir = str(Path(FLAGS.reuse_cache_dir).resolve())
         cache = active_reuse_cache()
         if self.diagnostics_dir is not None:
             self.recorder = SessionRecorder(self.diagnostics_dir, cache, self.server_dir,

@@ -334,8 +334,11 @@ class IRNode:
         #: estimator calls, what ``eval_mode()`` evaluates to. None is the fitting
         #: mode; read it through ``mode``.
         self.pass_mode: str | None = None
-        #: Set by reuse planning: the lineage key to admit this op's output to the
-        #: reuse cache under, once the plan no longer needs its buffer.
+        #: Set by reuse planning: the op's lineage key, if it has one.
+        self.lineage: str | None = None
+        #: Set by reuse planning: the lineage key to admit this op's output (and a
+        #: "fit" stage's state) to the reuse cache under, once the plan no longer
+        #: needs it.
         self.cache_key: str | None = None
         #: Set by reuse planning when the cache holds this op's output: the op has no
         #: inputs left and does not run; the scheduler pools the value instead
@@ -350,6 +353,21 @@ class IRNode:
     def reads_state(self, k: int) -> bool:
         """Whether input ``k`` is the fitted state this op applies, not data."""
         return self.state_ref is not None and self.state_ref.k == k
+
+    def has_data_reader(self) -> bool:
+        """Whether an op reads this op's output, not only the state it fitted."""
+        return any(in_op is self and not out.reads_state(k)
+                   for out in self.outputs for k, in_op in enumerate(out.inputs))
+
+    def has_state_reader(self) -> bool:
+        """Whether an op reads the state this op fitted."""
+        return any(out.reads_state(k) and in_op is self
+                   for out in self.outputs for k, in_op in enumerate(out.inputs))
+
+    @property
+    def lineage_inputs(self) -> list:
+        """The inputs this op's output depends on, whose keys its lineage key digests."""
+        return self.inputs
 
     def propagate_output_schema(self):
         """Default rule for the schema-propagation pass: the output is unknown.
@@ -369,6 +387,11 @@ class IRNode:
     #: For the copy a fold runs (see ``FoldPlan.instantiate``): the op of the
     #: compiled plan it copies, which profiling attributes its runs to.
     instance_of: "IRNode | None" = None
+
+    #: For an op of a plan compiled from a ``FoldTemplate``: the template op it
+    #: was lowered from, the same in every compile of the template. What a fold
+    #: measured of an op is looked up by it (see ``FoldProfile``).
+    origin: "IRNode | None" = None
 
     #: Whether the reuse cache may key this op's output. Set only by operators
     #: stratum understands, never by generic calls or UDFs: the op vouches that its

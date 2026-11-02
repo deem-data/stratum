@@ -173,6 +173,18 @@ def test_a_plan_without_split_is_cached_whole(csv_path, cache_dir):
     pd.testing.assert_frame_equal(evaluate(features(csv_path)), first)
 
 
+def test_a_read_is_keyed_by_the_categories_it_reads_with(tmp_path, cache_dir):
+    path = tmp_path / "c.csv"
+    path.write_text("c\na\nb\na\n")
+
+    def read(categories):
+        return evaluate(st.as_data_op(str(path)).skb.apply_func(
+            pd.read_csv, dtype={"c": pd.CategoricalDtype(categories)}))["c"]
+
+    assert read(["a", "b"]).tolist() == ["a", "b", "a"]
+    assert read(["a"]).isna().tolist() == [False, True, False]
+
+
 def test_the_cache_may_evict_a_hit_before_the_plan_runs(csv_path, tmp_path):
     cache = ReuseCache(tmp_path / "c")
     dag = model(csv_path)
@@ -211,13 +223,18 @@ def test_runs_report_cache_activity_per_node(csv_path, cache_dir, tmp_path):
     admitted = [n for n in nodes.values() if n["status"] == "admitted"]
     assert admitted and all(n["stored"] and n["size"] > 0 for n in admitted)
     assert all(n["label"] for n in admitted)
-    assert any(n["status"] == "outside" for n in nodes.values()), "after the split"
+    # After the split, summed over the folds: one fold here.
+    per_fold = [n for n in nodes.values() if n["status"] == "fold"]
+    assert per_fold and all(n["folds"] == 1 for n in per_fold)
+    assert sum(n["admitted"] for n in per_fold) > 0
     executed = {n["id"] for n in first["plans"][-1]["nodes"]}
     assert {int(i) for i in nodes} <= executed
 
     report = second["reuse_cache"]
     taken = [n for n in report["nodes"].values() if n["status"] == "hit"]
-    assert taken and report["stats"]["planned_hits"] == len(taken)
+    fold_hits = sum(n["hits"] for n in report["nodes"].values() if n["status"] == "fold")
+    assert taken and fold_hits
+    assert report["stats"]["planned_hits"] == len(taken) + fold_hits
     assert report["stats"]["puts"] == 0, "counts are per run"
     assert all(n["tier"] == "memory" and n["load_seconds"] >= 0 for n in taken)
     assert all(n["label"] for n in taken), "a hit names the op that computed it"
@@ -260,11 +277,14 @@ def test_entries_survive_a_restart(csv_path, cache_dir):
 
 def test_an_edited_model_reuses_the_features(csv_path, cache_dir):
     evaluate(model(csv_path, alpha=1.0))
-    puts = active_reuse_cache().stats.puts
+    cache = active_reuse_cache()
+    entries = set(cache.entries)
     evaluate(model(csv_path, alpha=2.0))
-    assert active_reuse_cache().stats.planned_hits > 0
-    # Everything before the split is a hit, and nothing after it is cached yet.
-    assert active_reuse_cache().stats.puts == puts
+    assert cache.stats.planned_hits > 0
+    # Everything before the split is a hit; only the new model's fit and its
+    # predictions are added.
+    added = [cache.entries[key].label for key in set(cache.entries) - entries]
+    assert sorted(added) == ["SklearnRidge_fit state", "SklearnRidge_predict"]
 
 
 def test_an_evaluate_prefix_serves_a_grid_search(csv_path, cache_dir):

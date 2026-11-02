@@ -193,11 +193,11 @@ def test_run_call_applies_its_settings_only_while_it_runs(tmp_path):
 
 # --- the server -------------------------------------------------------------------
 
-def start_server(server_dir: Path, cache_dir: Path, *serve_args: str) -> subprocess.Popen:
+def start_server(server_dir: Path, cache_dir: Path, *serve_args: str, cwd=REPO) -> subprocess.Popen:
     proc = subprocess.Popen(
         [sys.executable, "-m", "stratum", "--server-dir", str(server_dir), "serve",
          "--cache-dir", str(cache_dir), *serve_args],
-        cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     deadline = time.monotonic() + 60
     while not (server_dir / SERVER_INFO).exists():
         if proc.poll() is not None or time.monotonic() > deadline:
@@ -269,6 +269,24 @@ def test_submitted_scripts_share_the_cache(tmp_path, job_dir):
         assert restarted == pred and reads > 0
     finally:
         stop_server(server_dir, proc)
+
+
+def test_a_relative_cache_directory_is_the_servers(tmp_path, job_dir):
+    # The jobs run from job_dir; the cache stays where the server started.
+    server_dir = tmp_path / "server"
+    proc = start_server(server_dir, Path("cache"), cwd=tmp_path)
+    try:
+        pred, _ = run(server_dir, "1.0")
+        with StratumClient(server_dir=server_dir) as client:
+            assert client.stats()["entries"] > 0, "the server reports the jobs' entries"
+            client.clear()
+            assert client.stats()["entries"] == 0
+        again, reads = run(server_dir, "1.0")
+        assert again == pred and reads == 0, "cleared where the jobs wrote"
+    finally:
+        stop_server(server_dir, proc)
+    assert (tmp_path / "cache" / "manifest.json").exists()
+    assert not (job_dir / "cache").exists()
 
 
 def test_a_server_records_its_session(tmp_path, job_dir):
