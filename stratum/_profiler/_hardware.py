@@ -102,7 +102,11 @@ class HardwareTracker:
 
     def end(self, op, mode, fold, token, start, end):
         cpu = max(0.0, process_time() - token)
-        node_id = self.ids[op]
+        node_id = self.ids.get(op)
+        if node_id is None:
+            # The plan after the split is compiled once the split is reached.
+            self.ids = {op: i for i, op in enumerate(self.scheduler.linearized_dag)}
+            node_id = self.ids[op]
         node = self.nodes.get(node_id)
         if node is None:
             node = self.nodes[node_id] = {}

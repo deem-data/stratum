@@ -37,11 +37,11 @@ def artifact(directory):
 def test_same_label_nodes_have_distinct_runtime_and_disabled_collection():
     a, b = SameLabelOp(), SameLabelOp()
     assert str(a) == str(b)
-    sched = SequentialScheduler([a, b], None, [], print_heavy_hitters=True)
+    sched = SequentialScheduler([a, b], None, print_heavy_hitters=True)
     node_timings = observe(sched).node_timings
     sched.process_op(a)
     sched.process_op(b)
-    sched.mode = "predict"
+    a.pass_mode = "predict"
     sched.cv_id = 2
     sched.process_op(a)
     assert node_timings[a].count == 2
@@ -49,7 +49,7 @@ def test_same_label_nodes_have_distinct_runtime_and_disabled_collection():
     assert node_timings[a].phases[("predict", 2)]["count"] == 1
     assert len(sched.timings) == 3
     sched.pool.remove_all()
-    disabled = SequentialScheduler([a], None, [])
+    disabled = SequentialScheduler([a], None)
     disabled.process_op(a)
     assert disabled.observer is None
     assert disabled.timings is None
@@ -72,9 +72,12 @@ def test_export_without_printed_stats_has_plan_node_cv_attribution(tmp_path, cap
             assert all(i < node["id"] for i in node["inputs"])
     assert sum(t["seconds"] for t in run["node_timings"].values()) == pytest.approx(
         sum(h["seconds"] for h in run["heavy_hitters"]))
-    fitted = [t for t in run["node_timings"].values() if {p["fold"] for p in t["phases"]} == {0, 1}]
-    assert fitted
-    assert any({p["mode"] for p in t["phases"]} >= {"fit_transform", "predict"} for t in fitted)
+    per_fold = [t for t in run["node_timings"].values() if {p["fold"] for p in t["phases"]} == {0, 1}]
+    assert per_fold
+    # Each op runs in the one mode fixed for it: the train copy fits, the test copy
+    # predicts (see fit/predict unrolling).
+    assert all(len({p["mode"] for p in t["phases"]}) == 1 for t in per_fold)
+    assert {p["mode"] for t in per_fold for p in t["phases"]} >= {"fit_transform", "predict"}
     assert run["buffer_pool"]["hits"] > 0
 
 
@@ -120,7 +123,7 @@ def test_failed_run_exports_partial_measurements_and_preserves_exception(tmp_pat
 def test_optimization_failure_exports_stage(tmp_path, monkeypatch):
     def fail_optimize(*args, **kwargs):
         raise ValueError("invalid plan")
-    monkeypatch.setattr(st._api, "optimize", fail_optimize)
+    monkeypatch.setattr(st._api, "compile_plan", fail_optimize)
     with st.dev_config(diagnostics_dir=tmp_path):
         with pytest.raises(ValueError, match="invalid plan"):
             evaluate(st.as_data_op(1))

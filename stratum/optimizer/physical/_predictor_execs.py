@@ -76,7 +76,8 @@ class PassthroughPredictor(PredictorOp, PhysicalOp):
         estimator = " ".join(str(self.original_estimator).split())
         if len(estimator) > 50:
             estimator = estimator[:50] + "..."
-        return "PredictorOp", f"({estimator})", is_df
+        label = f"PredictorOp_{self.stage}" if self.stage is not None else "PredictorOp"
+        return label, f"({estimator})", is_df
 
 
 # --- Random forest -----------------------------------------------------------

@@ -17,6 +17,7 @@ reference operands and carry an output kind.
 from __future__ import annotations
 import copy
 from enum import Enum, auto
+from typing import Any, NamedTuple
 
 from sklearn.base import BaseEstimator
 from skrub._data_ops._data_ops import DataOp
@@ -245,6 +246,23 @@ class Uncacheable(Exception):
     :mod:`stratum.optimizer._lineage`."""
 
 
+#: The mode an op runs in unless its ``pass_mode`` says otherwise: skrub's
+#: ``fit_transform``, the method that fits.
+FITTING_MODE = "fit_transform"
+
+
+class Fitted(NamedTuple):
+    """What a ``"fit"``-stage op returns.
+
+    ``output`` is what its data consumers read (None when nothing reads it, as for
+    a predictor that is only fitted) and ``state`` what its ``"predict"``-stage
+    consumers apply. The scheduler keeps the two apart: the output goes to the
+    buffer pool, the state to its state store.
+    """
+    output: Any
+    state: Any
+
+
 def clone_value(value):
     if isinstance(value, dict):
         return rebuild_dict(value, ((k, clone_value(v)) for k, v in value.items()))
@@ -301,8 +319,21 @@ class IRNode:
         self.is_split_op = False
         self.was_cloned = False
         self.remove_after: list[IRNode] = []
-        #: Set by fit-pass planning: nothing the fitting pass runs needs this output.
-        self.dead_in_fit = False
+        #: Like ``remove_after``, for the fitted states this op is the last to apply.
+        self.release_state_after: list[IRNode] = []
+        #: Set by fit/predict unrolling for an op with state: ``"fit"`` for the op
+        #: that fits it on the training fold (and returns :class:`Fitted`),
+        #: ``"predict"`` for one that applies it, read through ``state_ref``. None
+        #: for an op without state, or one that fits and applies in one call
+        #: because no fold separates the two.
+        self.stage: str | None = None
+        #: The input of a ``"predict"`` op that carries the state it applies: the
+        #: ``"fit"`` op's state, not its output.
+        self.state_ref: OperandRef | None = None
+        #: The mode this op runs in, fixed when the plan is built: what an
+        #: estimator calls, what ``eval_mode()`` evaluates to. None is the fitting
+        #: mode; read it through ``mode``.
+        self.pass_mode: str | None = None
         #: Set by reuse planning: the lineage key to admit this op's output to the
         #: reuse cache under, once the plan no longer needs its buffer.
         self.cache_key: str | None = None
@@ -310,6 +341,15 @@ class IRNode:
         #: inputs left and does not run; the scheduler pools the value instead
         #: (see ``_reuse_planning.CacheHit``).
         self.cache_hit = None
+
+    @property
+    def mode(self) -> str:
+        """The mode the scheduler runs this op in."""
+        return self.pass_mode or FITTING_MODE
+
+    def reads_state(self, k: int) -> bool:
+        """Whether input ``k`` is the fitted state this op applies, not data."""
+        return self.state_ref is not None and self.state_ref.k == k
 
     def propagate_output_schema(self):
         """Default rule for the schema-propagation pass: the output is unknown.
@@ -321,6 +361,14 @@ class IRNode:
         ``PhysicalOp``, not an ``Op``).
         """
         self.output_schema = None
+
+    #: Whether the op learns something when fitting that it applies when not: the
+    #: ops fit/predict unrolling splits into a "fit" and a "predict" stage.
+    has_state = False
+
+    #: For the copy a fold runs (see ``FoldPlan.instantiate``): the op of the
+    #: compiled plan it copies, which profiling attributes its runs to.
+    instance_of: "IRNode | None" = None
 
     #: Whether the reuse cache may key this op's output. Set only by operators
     #: stratum understands, never by generic calls or UDFs: the op vouches that its
@@ -344,6 +392,8 @@ class IRNode:
     def to_str_helper(self):
         class_name = (self.__class__.__name__ if self._is_physical
                       else self.logical_family or self.__class__.__name__)
+        if self.stage is not None:
+            class_name = f"{class_name}_{self.stage}"
         is_df = " [df]" if not self._is_physical and self.output_type is OutputType.FRAME else ""
         name = f"({self.name})" if self.name and len(self.name) > 0 else ""
         # truncate name if it is too long
@@ -417,6 +467,8 @@ class IRNode:
             new_value = remap_operand_refs(value, mapping)
             if new_value is not value:
                 setattr(self, field, new_value)
+        if self.state_ref is not None:
+            self.state_ref = remap_operand_refs(self.state_ref, mapping)
 
     def consumes_inputs_positionally(self) -> bool:
         """Whether this op addresses its inputs by position rather than OperandRef.

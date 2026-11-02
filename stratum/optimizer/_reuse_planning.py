@@ -2,13 +2,14 @@
 
 Runs on the physical plan, after implementation selection and before
 linearization, so the plan it changes is the one that executes and everything
-after it (linearization, removal planning, fit-pass planning) sees a cache hit as
+after it (linearization, removal planning) sees a cache hit as
 an ordinary source. In three steps:
 
 1. **Keys.** Every op in the cacheable region gets a lineage key (see
    :mod:`stratum.optimizer._lineage`). The region is what runs exactly once, in
    the fitting mode: every op that is not the split op or downstream of it, minus
-   the ops re-executed in every pass. Without a split op, that is the whole plan.
+   the ``eval_mode()`` sources the test rows read in their own mode. Without a
+   split op, that is the whole plan.
    Mode is therefore never part of a key, and an entry an ``evaluate`` wrote serves
    a ``grid_search`` reading the same prefix.
 2. **Probe.** Walking from the root towards the sources, the first op on each path
@@ -29,8 +30,8 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from stratum._profiler._diagnostics import diagnostics_enabled, record_reuse_plan
+from stratum.optimizer._fold_compilation import post_split_region
 from stratum.optimizer._lineage import compute_lineage_keys
-from stratum.optimizer._linearization import is_recomputed
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.logical._ops import ValueOp
@@ -113,20 +114,7 @@ def make_admission_policy(name: str) -> AdmissionPolicy:
 def cacheable_region(ops: list[IRNode]) -> set[IRNode]:
     """The ops that run exactly once, in the fitting mode."""
     post_split = post_split_region(ops)
-    return {op for op in ops if op not in post_split and not is_recomputed(op)}
-
-
-def post_split_region(ops: list[IRNode]) -> set[IRNode]:
-    """The split op and everything downstream of it: what runs once per fold and pass."""
-    split = next((op for op in ops if op.is_split_op), None)
-    post_split = set()
-    stack = [split] if split is not None else []
-    while stack:
-        op = stack.pop()
-        if op not in post_split:
-            post_split.add(op)
-            stack.extend(op.outputs)
-    return post_split
+    return {op for op in ops if op not in post_split and op.pass_mode is None}
 
 
 def apply_reuse_cache(root: IRNode, cache: "ReuseCache", policy: AdmissionPolicy) -> None:

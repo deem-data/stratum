@@ -163,7 +163,7 @@ def test_transformer_binds_default_selector():
         with csv_file(make_orders()) as path, st.config(
                 implementation_selector="default", rust_backend=rust):
             ops = _optimize(build_pipeline(path))
-        transformers = [o for o in ops if isinstance(o, TransformerOp)]
+        transformers = [o for o in ops if isinstance(o, TransformerOp) and o.stage == "fit"]
         assert len(transformers) == 1
         return transformers[0].estimator
 
@@ -219,12 +219,12 @@ def test_query_selection_trains_end_to_end():
         env = get_data(preds)
         search = SearchConfig(metric=resolve_scoring(scorer))
         with st.config(rust_backend=False, explain=("logical", "physical_impl")):
-            plan, split_pos, flagged = optimize_(
+            plan, split_pos = optimize_(
                 preds, OptConfig(dataframe_ops=True, pandas_query=True),
                 env=env, search=search)
         # The query fast path is what is scheduled, not just what was planned.
         assert any(type(o).__name__ == "PandasQuerySelectionOp" for o in plan)
-        sched = SequentialScheduler(plan, split_pos, flagged)
+        sched = SequentialScheduler(plan, split_pos)
         sched.grid_search(cv=2)
         assert sched.results_ is not None
         assert len(sched.results_) > 0

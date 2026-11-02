@@ -105,6 +105,8 @@ class ColumnSelectorOp(ProjectionOp):
     """
     fields = ["selector"]
     cacheable = True
+    #: The resolved column list.
+    has_state = True
 
     def __init__(self, selector, inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=f"select[{selector!r}]", inputs=inputs, outputs=outputs)

@@ -5,7 +5,7 @@ from skrub._data_ops._evaluation import find_scoring_node
 
 from stratum import _profiler as profiler
 from stratum._config import FLAGS
-from stratum.optimizer._optimize import SearchConfig, optimize
+from stratum.optimizer._optimize import SearchConfig, compile_plan
 from stratum.optimizer.logical._scoring import resolve_declared_scoring, resolve_scoring
 from stratum.runtime._reuse_cache import active_reuse_cache
 from stratum.runtime._scheduler import SequentialScheduler
@@ -81,11 +81,10 @@ def _execute(dag, env, t0, execute, search=None):
             profiler.reuse_cache_attached(cache)
         profiler.optimization_started()
     optimize_start = perf_counter()
-    linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search,
-                                                      reuse_cache=cache)
+    plan = compile_plan(dag, env=env, search=search, reuse_cache=cache)
     optimize_end = perf_counter()
-    sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0,
-                                reuse_cache=cache)
+    sched = SequentialScheduler(plan.linearized_dag, plan.split_pos, FLAGS.stats, t0=t0,
+                                reuse_cache=cache, compile_folds=plan.compile_folds)
     if profiling:
         profiler.execution_started(sched)
     try:

@@ -58,6 +58,10 @@ def install_lowered(old: Op, new: PhysicalOp, root: IRNode) -> IRNode:
     new.outputs = old.outputs
     new.is_X = old.is_X
     new.is_y = old.is_y
+    # What fit/predict unrolling decided, which a rule has no reason to know.
+    new.stage = old.stage
+    new.state_ref = old.state_ref
+    new.pass_mode = old.pass_mode
     if new.output_type is OutputType.UNKNOWN:
         new.output_type = old.output_type
     if new.output_schema is None:
@@ -69,13 +73,14 @@ def install_lowered(old: Op, new: PhysicalOp, root: IRNode) -> IRNode:
     return new if root is old else root
 
 
-def lower_to_physical(root: IRNode, ctx) -> IRNode:
+def lower_to_physical(root: IRNode, ctx, replaced: dict | None = None) -> IRNode:
     """Rewrite the logical DAG into a (partly) physical DAG under ``ctx``.
 
     Ops with a registered rule are replaced by physical nodes; ops without one
     pass through unchanged. A rule may also refine an op's class in place and
     return the same node when its fields and graph identity need no changes.
-    Returns the (possibly new) root.
+    Returns the (possibly new) root. ``replaced``, when given, receives each
+    replaced logical op mapped to the physical node in its place.
     """
     start = start_time()
     import_exec_modules()  # registers the rules
@@ -87,5 +92,7 @@ def lower_to_physical(root: IRNode, ctx) -> IRNode:
         if new_op is None or new_op is op:
             continue
         root = install_lowered(op, new_op, root)
+        if replaced is not None:
+            replaced[op] = new_op
     log_time("lowering took", start)
     return root

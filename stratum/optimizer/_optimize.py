@@ -9,6 +9,7 @@ from typing import Any
 from .logical.rewrites._cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .logical.rewrites._literal_inlining import literal_inlining
+from .logical.rewrites._fit_predict_unrolling import unroll_fit_predict
 from .logical._numeric_ops import extract_numeric_op
 from .logical._candidate_ops import CollectCandidatesOp, DeclaredScoringOp, ScoreCandidatesOp
 from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared, remap_operand_refs
@@ -18,7 +19,7 @@ from ._explain import explain_linear_plan
 from .logical.rewrites._algebraic import algebraic_rewrites, AlgebraicRewritesConfig
 from .logical.rewrites._relational import relational_rewrites
 from ._linearization import linearize_dag
-from ._fit_pass_planning import mark_fit_dead_ops
+from ._fold_compilation import FoldPlan, FoldTemplate
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
 from ._reuse_planning import AdmissionPolicy, apply_reuse_cache, make_admission_policy
 from .physical._plan_context import PlanContext
@@ -151,10 +152,53 @@ def _debug_validate_dag(root: Op):
     if FLAGS.validate_dag:
         validate_dag(root)
 
+class CompiledPlan:
+    """A compiled plan: ``linearized_dag`` and the position of its split op,
+    ``split_pos`` (None without one), and how to compile the plan after the split
+    again once the ops before it have run (see :mod:`._fold_compilation`).
+    """
+
+    def __init__(self, linearized_dag: list, split_pos: int | None,
+                 template: FoldTemplate | None, ctx: PlanContext,
+                 selector: ImplementationSelector):
+        self.linearized_dag = linearized_dag
+        self.split_pos = split_pos
+        self.template = template
+        self.ctx = ctx
+        self.selector = selector
+
+    def compile_folds(self) -> FoldPlan:
+        """The plan of a fold, compiled at the split: from the retained template if
+        there is one, else the initial plan's ops from the split on."""
+        if self.template is None:
+            return FoldPlan(self.linearized_dag[self.split_pos:])
+        before = self.linearized_dag[:self.split_pos]
+        fold = self.template.compile(self.ctx, self.selector, live=pinned_before_split(before))
+        if diagnostics_enabled():
+            # What runs: node IDs of the run refer to this plan.
+            capture_plan("fold_impl", before + fold.ops, self.split_pos)
+        return fold
+
+
+def pinned_before_split(before: list) -> set:
+    """The ops before the split that removal planning keeps for the folds."""
+    removed = {in_ for op in before for in_ in op.remove_after}
+    return {op for op in before if op not in removed}
+
+
 def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
              search: SearchConfig | None = None, reuse_cache=None):
     """Entry point for the optimizer. Runs the three planning phases and returns
-    the linearized physical plan ``(linearized_dag, split_pos, flagged_ops)``.
+    the linearized physical plan ``(linearized_dag, split_pos)``.
+    See :func:`compile_plan`.
+    """
+    plan = compile_plan(dag_root, config, env, search, reuse_cache)
+    return plan.linearized_dag, plan.split_pos
+
+
+def compile_plan(dag_root: DataOp, config: OptConfig = None, env: dict = None,
+                 search: SearchConfig | None = None, reuse_cache=None) -> CompiledPlan:
+    """Runs the three planning phases and returns the :class:`CompiledPlan`.
 
     The steps are:
 
@@ -179,13 +223,19 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
     # Step 1: Convert the Skrub DataOp DAG to the logical IR and apply rewrites.
     root = logical_optimize(dag_root, config, env, search)
     _debug_explain_dag("logical", root)
+    # Compiled again at the split, so its decisions can follow what the run before
+    # it has measured.
+    template = FoldTemplate.retain(list(topological_iterator(root)), root)
 
     # Steps 2 & 3 read the config that drives operator selection once, here, so
     # execution carries no operator-selection control flow.
     ctx = PlanContext.from_flags(config)
 
     # Step 2: lower logical ops to physical ops.
-    root = lower_to_physical(root, ctx)
+    replaced = {}
+    root = lower_to_physical(root, ctx, replaced)
+    if template is not None:
+        template.bind(replaced)
     _debug_validate_dag(root)  # operand refs after lowering
     _debug_show_graph(root, "lowered")
     _debug_explain_dag("physical", root)
@@ -195,11 +245,14 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
     admission = None
     if reuse_cache is not None:
         admission = config.reuse_admission or make_admission_policy(FLAGS.reuse_cache_admission)
-    result = physical_optimize(root, ctx, selector=config.selector,
-                               reuse_cache=reuse_cache, admission=admission)
+    selector = config.selector
+    if selector is None:
+        selector = get_implementation_selector(ctx.implementation_selector)
+    linearized_dag, split_pos = physical_optimize(
+        root, ctx, selector=selector, reuse_cache=reuse_cache, admission=admission)
 
     log_time("Optimization took in total", start)
-    return result
+    return CompiledPlan(linearized_dag, split_pos, template, ctx, selector)
 
 
 def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
@@ -255,6 +308,12 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
     if config.unroll_choices:
         root = install_candidate_set(root, search)
 
+    # After the candidate set, whose scorer decides the response the test rows
+    # answer with, and after choice unrolling, so each candidate is unrolled on its
+    # own. Before lowering, so the stages get their implementations like any op.
+    root = unroll_fit_predict(root)
+    _debug_show_graph(root, "fit_predict_unrolled")
+
     # Once more over the final shape, for the ops created since that do not keep
     # their own schema (the candidate set). Under validate_dag it also checks that
     # the relational rewrites left every schema they had current.
@@ -290,15 +349,14 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
     # similarly we can do the things like parallelization planning here
 
     # Linearize and mark last used intermediates for removal
-    linearized_dag, split_pos, flagged_ops = linearize_dag(root)
-    pinned_ops = compute_pinned_ops(linearized_dag, split_pos, flagged_ops)
+    linearized_dag, split_pos = linearize_dag(root)
+    pinned_ops = compute_pinned_ops(linearized_dag, split_pos)
     plan_input_removals(linearized_dag, pinned_ops)
-    mark_fit_dead_ops(linearized_dag, split_pos, flagged_ops)
 
     if diagnostics_enabled():
-        capture_plan("physical_impl", linearized_dag, split_pos, flagged_ops)
+        capture_plan("physical_impl", linearized_dag, split_pos)
     _debug_explain_linear_plan("physical_impl", linearized_dag, split_pos)
-    return linearized_dag, split_pos, flagged_ops
+    return linearized_dag, split_pos
 
 
 def run_op_cse_pass(root: Op) -> Op:

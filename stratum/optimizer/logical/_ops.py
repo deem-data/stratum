@@ -8,7 +8,7 @@ from joblib import parallel_config
 from sklearn import clone
 from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import BaseChoice, Choice, DiscretizedNumericChoice, Match
-from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, Scoring, SplitX, Var, _wrap_estimator
+from skrub._data_ops._data_ops import DataOp, Apply, Value, CallMethod, Call, GetAttr, GetItem, BinOp as SkrubBinOp, UnaryOp as SkrubUnaryOp, Concat, FreezeAfterFit, Scoring, SplitX, Var, _wrap_estimator
 from skrub._data_ops._utils import NULL
 from skrub._utils import PassThrough
 from pandas import DataFrame, Series
@@ -20,7 +20,8 @@ from stratum.optimizer.logical import _schema
 # Shared IR foundation. Re-exported below so existing ``from ..._ops import X``
 # call sites (OutputType, OperandRef, is_frame_like, config_key, ...) keep working.
 from stratum.optimizer.logical._base import (
-    IRNode, IndexEffect, OutputType, FRAME_TYPES, has_default_labels, is_frame_like, OperandRef,
+    IRNode, IndexEffect, OutputType, FRAME_TYPES, FITTING_MODE, Fitted, has_default_labels,
+    is_frame_like, OperandRef,
     _resolve_operand, _resolve_args, _resolve_kwargs, remap_operand_refs,
     config_key, estimator_key, clone_value, rebuild_dict,
     _ALL_SELECTOR_KEY, _GRAPH_PARAM_KEY,
@@ -208,8 +209,19 @@ class ImplOp(Op):
 
         return SimpleNamespace(**{field: replace_dataop(getattr(self.skrub_impl, field)) for field in self.skrub_impl._fields})
 
+    @property
+    def has_state(self) -> bool:
+        return isinstance(self.skrub_impl, _STATEFUL_IMPLS)
+
     def process(self, mode: str, inputs: list):
-        if hasattr(self.skrub_impl, "eval"):
+        # A "predict" stage runs its "fit" stage's impl, which holds what fitting
+        # stored on it; a "fit" stage hands its own impl on as that state.
+        impl = inputs[self.state_ref.k] if self.stage == "predict" else self.skrub_impl
+        out = self._run(impl, mode, inputs)
+        return Fitted(out, impl) if self.stage == "fit" else out
+
+    def _run(self, impl, mode: str, inputs: list):
+        if hasattr(impl, "eval"):
             # DataOp with eval method have a fused implementation of the generator and the compute method
             # we need to iterate over the generator and replace the requested fields with correct inputs.
             # Indices are assigned in yield order (de-duplicating repeated DataOps), matching the
@@ -218,7 +230,7 @@ class ImplOp(Op):
             last_yield = None
             # Variables are resolved to constants at compile time, so the skrub
             # impl needs no environment -- its inputs arrive via the generator.
-            gen = self.skrub_impl.eval(mode=mode, environment={})
+            gen = impl.eval(mode=mode, environment={})
             while True:
                 try:
                     last_yield = gen.send(last_yield)
@@ -229,7 +241,12 @@ class ImplOp(Op):
                     last_yield = inputs[k]
         else:
             ns = self.replace_fields_with_values(inputs)
-            return self.skrub_impl.compute(ns, mode, {})
+            return impl.compute(ns, mode, {})
+
+
+#: skrub impls that store what fitting learns on themselves and read it back when
+#: not fitting: they need a "fit" and a "predict" stage once unrolled.
+_STATEFUL_IMPLS = (Apply, Concat, FreezeAfterFit)
 
 
 class SplitXOp(Op):
@@ -275,10 +292,9 @@ class VariableOp(Op):
             f"VariableOp({self.name!r}) reached the runtime; variables must be "
             f"resolved to constants at compile time by passing `env` to optimize().")
 
-# A plan execution's ``mode`` is the estimator method it calls, as it is in skrub.
-# ``fit_transform`` fits; the rest are response methods, and which one a pass uses is
-# the scorer's to decide (see ``ScoreCandidatesOp``).
-FITTING_MODE = "fit_transform"
+# An op's ``mode`` is the estimator method it calls, as it is in skrub.
+# ``fit_transform`` (FITTING_MODE) fits; the rest are response methods, and which one
+# the test fold gets is the scorer's to decide (see ``ScoreCandidatesOp``).
 RESPONSE_MODES = frozenset({"predict", "predict_proba", "predict_log_proba",
                             "decision_function"})
 
@@ -296,6 +312,10 @@ class BaseEstimatorOp(Op):
     response_modes: frozenset = frozenset()
     #: What it does instead in a response pass it cannot serve.
     fallback_mode: str = "transform"
+    #: What its ``"fit"`` stage calls: only ``fit`` for a predictor, whose
+    #: predictions on the training fold are a separate op; ``fit_transform`` for a
+    #: transformer, whose output on the training fold comes with the fit.
+    fit_stage_mode: str = FITTING_MODE
     # Row-preserving, and positional on both backends.
     index_effect = IndexEffect.KEEP
     aligns_by_label = False
@@ -346,6 +366,8 @@ class BaseEstimatorOp(Op):
     #: Keyed when the estimator is one stratum knows, and seeded where it needs to
     #: be (see :mod:`stratum.optimizer._estimator_lineage`).
     cacheable = True
+    #: The fitted estimator.
+    has_state = True
 
     def lineage_config(self):
         """The op's fields, with the estimator named by its class and parameters.
@@ -411,15 +433,21 @@ class BaseEstimatorOp(Op):
 
         Returns a tuple of picklable data that can be sent to worker processes.
         """
-        mode = self.effective_mode(mode)
-        fitting = mode == FITTING_MODE
+        mode = self.fit_stage_mode if self.stage == "fit" else self.effective_mode(mode)
+        fitting = mode in (FITTING_MODE, "fit")
         x = inputs[0]
         assert x is not None, f"X is None for {self}"
         y = (inputs[self.y.k] if isinstance(self.y, OperandRef) else self.y) if fitting else None
         # Every fit starts from an unfitted clone, as in skrub. Fitting the prototype
         # itself would leave it fitted for the next fold, and CatBoost refuses the
-        # `set_params` below on a fitted model.
-        estm = clone(self.original_estimator) if fitting else self.estimator
+        # `set_params` below on a fitted model. A "predict" stage applies the
+        # estimator its "fit" stage fitted.
+        if fitting:
+            estm = clone(self.original_estimator)
+        elif self.stage == "predict":
+            estm = inputs[self.state_ref.k]
+        else:
+            estm = self.estimator
         place_holders = {name: inputs[ref.k] for name, ref in self.param_refs.items()}
         # Graph-fed hyperparameters configure the estimator before fitting. In a
         # response pass ``estm`` is already fitted, and CatBoost rejects any
@@ -429,11 +457,9 @@ class BaseEstimatorOp(Op):
         cols = _resolve_operand(self.cols, inputs)
         exclude_cols = _resolve_operand(self.exclude_cols, inputs)
         no_wrap = _resolve_operand(self.no_wrap, inputs)
-        # A response pass never fits, so (like skrub) the fit group is left unevaluated.
-        # Note the difference from skrub: skrub also never *computes* what that group
-        # references, while our plan is eager, so a sub-DAG feeding only fit kwargs
-        # still runs in predict mode and has to tolerate it (a transformer carving an
-        # eval set out of the training fold must return placeholders in predict mode).
+        # Only a fit evaluates the fit group, as in skrub. Unrolled, a predict stage
+        # does not even hold it, so, as in skrub, what only that group references is
+        # not computed on the test rows (see fit/predict unrolling).
         fit_kwargs = self.method_kwargs(self.fit_kwargs_key, inputs) if fitting else {}
         # The call group belongs to the method about to run, so a `predict_proba` pass
         # gets the `predict_proba` group. The fitting pass makes this kind's own call.
@@ -456,8 +482,18 @@ class BaseEstimatorOp(Op):
         # we use a separate function to process the estimator to allow reuse for multiprocessing
         task_data = self.extract_args_from_inputs(mode, inputs)
         process_task = self.get_process_task()
-        result, self.estimator = process_task(task_data)
-        return result
+        return self.staged_result(*process_task(task_data))
+
+    def staged_result(self, result, estimator):
+        """What ``process`` returns for a task that produced ``result`` with
+        ``estimator``: a "fit" stage hands the fitted estimator on as its state.
+
+        The op keeps the estimator it last fitted, for inspection; a "predict" stage
+        only borrows its fit stage's.
+        """
+        if self.stage != "predict":
+            self.estimator = estimator
+        return Fitted(result, estimator) if self.stage == "fit" else result
 
     def get_process_task(self):
         raise NotImplementedError(f"get_process_task must be implemented in {self.__class__.__name__}")
@@ -469,6 +505,7 @@ class PredictorOp(BaseEstimatorOp):
     call_kwargs_key = "predict"
     response_modes = RESPONSE_MODES
     fallback_mode = "predict"
+    fit_stage_mode = "fit"
 
     def get_process_task(self):
         return process_estimator_task
@@ -537,7 +574,7 @@ def check_estm_inputs(estimator, mode, x, y):
         logger.debug(f"Predictor {estimator.__class__.__name__} does not support Polars DataFrame. Converting to Pandas DataFrame.")
         from stratum.optimizer.physical._conversion import to_pandas
         x = to_pandas(x)
-        if y is not None and mode == "fit_transform":
+        if y is not None and mode in (FITTING_MODE, "fit"):
             # y may already be pandas: the plan converts edges explicitly now.
             y = to_pandas(y)
     return converted, x, y
@@ -555,6 +592,14 @@ def process_estimator_task(task_data):
         result = estimator.predict(x, **call_kwargs)
         # Return both result and fitted estimator (in case of multi-processing)
         return result, estimator
+    elif mode == "fit":
+        # A "fit" stage: the predictions on the training fold, if anything reads
+        # them, are a "predict" stage of their own.
+        estimator = _wrap_estimator(estimator, cols, exclude_cols=exclude_cols, no_wrap=no_wrap,
+                                    allow_reject=allow_reject, X=x)
+        y_arg = () if unsupervised else (y,)
+        estimator.fit(x, *y_arg, **fit_kwargs)
+        return None, estimator
     elif mode in RESPONSE_MODES:
         # `mode` is already this op's effective mode, so the method is one it serves.
         result = getattr(estimator, mode)(x, **call_kwargs)

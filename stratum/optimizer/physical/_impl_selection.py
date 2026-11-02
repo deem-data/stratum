@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from stratum.optimizer.logical._base import FRAME_TYPES, IRNode
+from stratum.optimizer.logical._split_ops import BoundaryOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._predictor_execs import RandomForestOp
@@ -355,7 +356,8 @@ def _plan_selection(ops, ctx, registry, selector,
             plan.new_pandas_required.add(id(op))
         in_libs = []
         for k, producer in enumerate(op.inputs):
-            lib = plan.libs.get(id(producer))
+            # A fitted state is no frame, whatever the op fitting it outputs.
+            lib = None if op.reads_state(k) else plan.libs.get(id(producer))
             if lib is not None and not accepts_input(bound_cls, op, k, lib):
                 lib = lib.other
                 _enforce_input_lib(plan, producer, op, k, lib, pandas_required, index_memo)
@@ -377,7 +379,8 @@ def _requires_label_alignment(op: IRNode, index_memo: dict) -> bool:
     """Whether polars' positional pairing differs from pandas' label alignment."""
     if op.aligns_by_label is not None:
         return op.aligns_by_label
-    frames = [i for i in op.inputs if i.output_type in FRAME_TYPES]
+    frames = [i for k, i in enumerate(op.inputs)
+              if i.output_type in FRAME_TYPES and not op.reads_state(k)]
     return len({index_origin(i, index_memo) for i in frames}) > 1
 
 
@@ -387,7 +390,8 @@ def _enforce_input_lib(plan: _SelectionPlan, producer: IRNode, consumer: IRNode,
     """Enforce ``target`` on edge ``producer -> consumer[k]``: convert, or require
     the producer to run on pandas."""
     if target is FrameLib.PANDAS and not has_default_index(producer, index_memo):
-        if id(producer) in pandas_required:
+        if id(producer) in pandas_required or isinstance(producer, BoundaryOp):
+            # A BoundaryOp's producer has run already, on the library it has.
             plan.conflicts.append(f"{consumer} reads input {k} ({producer}) as pandas")
         plan.new_pandas_required.add(id(producer))
         return

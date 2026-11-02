@@ -1,9 +1,11 @@
 from __future__ import annotations
 from time import perf_counter
+from typing import Any
 from sklearn.model_selection import train_test_split, check_cv
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._dataframe_ops import SplitOp
-from stratum.optimizer.logical._ops import FITTING_MODE, Op
+from stratum.optimizer._fold_compilation import FoldPlan
+from stratum.optimizer.logical._ops import Op
 from stratum.runtime._buffer_pool import BufferPool
 from stratum.runtime._object_serialization import delete_object, deserialize_object
 import numpy as np
@@ -18,15 +20,20 @@ class Scheduler:
     """Scheduler for executing pre-planned Op DAGs in linearized order."""
 
     def __init__(self, print_heavy_hitters=False, t0=None, reuse_cache=None):
-        self.mode = "fit_transform"
         self.linearized_dag = None
-        self.recompute_ops: list[Op] = []
         self.pos_split_op: int | None = None
+        #: The plan each fold runs a copy of, compiled once the split is reached.
+        self.fold_plan: FoldPlan | None = None
+        #: The copy the last fold ran, for inspection.
+        self.fold_ops: list[Op] | None = None
         self.timings = [] if print_heavy_hitters else None
         self.observer = None  # Inspection-only hooks, see stratum._profiler.
         self.results_ = None
         self.cv_id = -1
         self.pool = BufferPool()
+        #: "fit"-stage op -> the state it fitted, until its last "predict" stage
+        #: has applied it. Never spilled or evicted: a fold cannot finish without it.
+        self.state_store: dict[Op, Any] = {}
         self.t0 = t0 if t0 is not None else perf_counter()
         self._pinned_ops: set[Op] = set()
         self.buffer_pool_overhead = 0
@@ -54,24 +61,6 @@ class Scheduler:
         logger.debug(f"Scheduler finished: {self.pool.total_removed} buffers removed total")
 
 
-    def evaluate(self, seed: int = 42, test_size=0.2):
-        """Evaluate the pipeline with a train/test split and return predictions."""
-        try:
-            split_op = self.compute_xy()
-        except RuntimeError as e:
-            if "X and y nodes not found in the DAG" in str(e):
-                return self._result_without_split()
-            else:
-                raise e
-
-        x_data = self.pool.pin(split_op.inputs[0])
-        train_index, test_index = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
-        split_op.indices = train_index
-        self.compute(self.pos_split_op)
-        split_op.indices = test_index
-        rows = self.compute(self.pos_split_op, mode="predict")
-        return self._format_predict_result(rows)["vals"][0]
-
     def grid_search(self, cv=None):
         """Perform grid search with cross-validation on the plan.
 
@@ -98,7 +87,7 @@ class Scheduler:
 
         logger.debug("\n" + "="*100 + "\n" + "XY computed" + "\n" + "="*100 + "\n")
         results = self.cross_validate(split_op, cv, predictions, results,
-                                      sink.emit_predictions, sink.response_mode)
+                                      sink.emit_predictions)
         self.results_ = results
         self._finish()
         return predictions if sink.emit_predictions else None
@@ -116,11 +105,11 @@ class Scheduler:
         return splitter
 
     def cross_validate(self, split_op, cv, predictions: list, results: list,
-                       return_predictions: bool, response_mode: str = "predict"):
+                       return_predictions: bool):
         """Perform cross-validation on the plan, one scored row per candidate per fold.
 
-        ``response_mode`` is the estimator method the test-fold pass calls, which the
-        scorer chose at plan time (see `ScoreCandidatesOp`).
+        One run of the plan after the split is one fold: it fits on the fold's
+        training rows and answers on its test rows (see fit/predict unrolling).
         """
         # The split op's inputs are [X, y] (see add_splitting_op). Both are still
         # in the pool after compute_xy and are pinned by removal planning, so the
@@ -143,17 +132,11 @@ class Scheduler:
             self.cv_id = i
             logger.debug(f"CV Fold Nr. {i + 1}")
 
-            split_op.indices = self.pool.pin(train_ids_handle)
-            self.compute(self.pos_split_op)
-            self.pool.unpin(train_ids_handle)
-            self.pool.remove(train_ids_handle)
-            logger.debug("\n" + "="*100 + "\n" + "Training done for fold " + str(i+1) + "\n" + "="*100 + "\n")
-
-            split_op.indices = self.pool.pin(test_ids_handle)
-            fold = self.compute(self.pos_split_op, mode=response_mode)
-            self.pool.unpin(test_ids_handle)
-            self.pool.remove(test_ids_handle)
-            logger.debug("\n" + "="*100 + "\n" + "Predicting done for fold " + str(i+1) + "\n" + "="*100 + "\n")
+            fold = self.run_fold((self.pool.pin(train_ids_handle), self.pool.pin(test_ids_handle)))
+            for handle in (train_ids_handle, test_ids_handle):
+                self.pool.unpin(handle)
+                self.pool.remove(handle)
+            logger.debug("\n" + "="*100 + "\n" + "Fold " + str(i+1) + " done" + "\n" + "="*100 + "\n")
             if return_predictions:
                 predictions.append(fold.select("id", "vals"))
             results.append(fold.select("id", "scores"))
@@ -184,40 +167,44 @@ class Scheduler:
             # Its value is in the pool since the scheduler started, and it has no
             # inputs to release.
             return op
-        if self.mode == FITTING_MODE and op.dead_in_fit:
-            # Nothing this pass runs reads its output, so it is not pinned, run or
-            # stored. Its removals still happen: it is the last consumer of those
-            # buffers, and skipping it is the only reason no one else drops them.
-            for in_op in op.remove_after:
-                self._release(in_op)
-            return op
         logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
+        mode = op.mode
 
         obs = self.observer
+        # A fold's copy of an op is profiled as the op of the plan it copies.
+        node = op.instance_of or op
         token = t1 = t2 = None
         try:
             t0 = perf_counter()
 
-            # 1. pin all inputs
-            inputs = [self.pool.pin(in_op) for in_op in op.inputs]
+            # 1. pin all inputs; a fitted state is read from the state store
+            inputs = [self.state_store[in_op] if op.reads_state(k) else self.pool.pin(in_op)
+                      for k, in_op in enumerate(op.inputs)]
 
             # 2. process operator
             if obs is not None:
-                token = obs.before(op)
+                token = obs.before(node)
             t1 = perf_counter()
-            result = op.process(mode=self.mode, inputs=inputs)
+            result = op.process(mode=mode, inputs=inputs)
             t2 = perf_counter()
 
             # 3. unpin inputs
-            for in_op in op.inputs:
-                self.pool.unpin(in_op)
+            for k, in_op in enumerate(op.inputs):
+                if not op.reads_state(k):
+                    self.pool.unpin(in_op)
 
-            # 4. remove unnecessary intermediates from buffer pool
+            # 4. remove unnecessary intermediates from buffer pool and state store
             for in_op in op.remove_after:
                 self._release(in_op)
+            for in_op in op.release_state_after:
+                del self.state_store[in_op]
 
-            # 5. add output to the buffer pool
-            self.pool.put(op, result)
+            # 5. add output to the buffer pool, and a fitted state to the store
+            if op.stage == "fit":
+                self.state_store[op] = result.state
+                result = result.output
+            if op.stage != "fit" or _has_data_consumer(op):
+                self.pool.put(op, result)
             self.log_memory_usage()
 
             if self.reuse_cache is not None:
@@ -235,12 +222,12 @@ class Scheduler:
                 duration = t2 - t1
                 self.timings.append((str(op), process_duration))
             if obs is not None:
-                obs.after(op, self.mode, self.cv_id, token, t1, t2, buffer_overhead)
+                obs.after(node, mode, self.cv_id, token, t1, t2, buffer_overhead)
 
         except Exception as e:
             if obs is not None:
-                obs.failed(op, self.mode, self.cv_id, token, t0, t1, t2)
-            raise RuntimeError(f"[{self.mode}] Error processing '{op}': {e}")
+                obs.failed(node, mode, self.cv_id, token, t0, t1, t2)
+            raise RuntimeError(f"[{mode}] Error processing '{op}': {e}")
 
         return op
 
@@ -272,6 +259,12 @@ class Scheduler:
         return True
 
 
+def _has_data_consumer(op: Op) -> bool:
+    """Whether an op reads ``op``'s output, not only the state it fitted."""
+    return any(in_op is op and not out.reads_state(k)
+               for out in op.outputs for k, in_op in enumerate(out.inputs))
+
+
 def _shielded(value):
     """A copy of ``value`` its holder can mutate without touching the original.
 
@@ -288,12 +281,15 @@ def _shielded(value):
 
 
 class SequentialScheduler(Scheduler):
-    def __init__(self, linearized_dag, split_pos, recompute_ops,
-                 print_heavy_hitters=False, t0=None, reuse_cache=None):
+    def __init__(self, linearized_dag, split_pos,
+                 print_heavy_hitters=False, t0=None, reuse_cache=None, compile_folds=None):
+        """``compile_folds``, when given, compiles the plan of a fold once the ops
+        before the split have run (see ``CompiledPlan.compile_folds``). Without it,
+        each fold runs a copy of ``linearized_dag`` from ``split_pos`` on."""
         super().__init__(print_heavy_hitters, t0=t0, reuse_cache=reuse_cache)
         self.linearized_dag = linearized_dag
         self.pos_split_op = split_pos
-        self.recompute_ops = recompute_ops
+        self._compile_folds = compile_folds
         self._pool_cache_hits()
 
     def evaluate(self, seed: int = 42, test_size=0.2):
@@ -308,34 +304,51 @@ class SequentialScheduler(Scheduler):
                 raise e
 
         x_data = self.pool.pin(split_op.inputs[0])
-        train_index, test_index = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
-        split_op.indices = train_index
-        self.compute(self.pos_split_op)
-        split_op.indices = test_index
-        rows = self.compute(self.pos_split_op, mode="predict")
+        indices = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
+        self.pool.unpin(split_op.inputs[0])
+        rows = self.run_fold(tuple(indices))
         self._finish()
         return self._format_predict_result(rows)["vals"][0]
 
-    def compute(self, start_pos: int, mode="fit_transform"):
-        """Compute the plan from start_pos onwards; outside the fitting pass, return its sink."""
-        ops_to_compute = self.linearized_dag[start_pos:]
-        if len(self.recompute_ops) != 0:
-            ops_to_compute = self.recompute_ops + ops_to_compute
-        self.mode = mode
+    def run_fold(self, indices):
+        """Run a copy of the fold plan on the fold whose ``(train, test)`` row
+        positions are ``indices``, and return its sink's value."""
+        self.fold_ops = self.fold_plan.instantiate(indices)
+        try:
+            return self.compute(self.fold_ops)
+        finally:
+            for op in self.fold_ops:
+                if op.is_split_op:
+                    op.indices = None
 
-        for node in ops_to_compute:
+    def compute(self, ops: list[Op]):
+        """Run ``ops`` in order and return the value of the last, their sink."""
+        for node in ops:
             self.process_op(node)
 
-        sink = self.linearized_dag[-1]
-        out = self.pool.pin(sink) if mode != "fit_transform" else None
+        sink = ops[-1]
+        out = self.pool.pin(sink)
+        self.pool.unpin(sink)
         self._release(sink)
         self.log_memory_usage()
         return out
 
     def compute_xy(self) -> SplitOp:
-        """Compute nodes until the split op is reached."""
+        """Compute nodes until the split op is reached, then compile the plan of a
+        fold. Returns the split op of the plan as compiled up front."""
         for i, op in enumerate(self.linearized_dag):
             if op.is_split_op:
+                self._enter_folds()
                 return op
             self.process_op(op)
         raise RuntimeError("X and y nodes not found in the DAG")
+
+    def _enter_folds(self) -> None:
+        """Compile the fold plan; the plan the scheduler reports is the ops it ran
+        before the split followed by it."""
+        before = self.linearized_dag[:self.pos_split_op]
+        if self._compile_folds is not None:
+            self.fold_plan = self._compile_folds()
+        else:
+            self.fold_plan = FoldPlan(self.linearized_dag[self.pos_split_op:])
+        self.linearized_dag = before + self.fold_plan.ops

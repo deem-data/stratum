@@ -32,7 +32,7 @@ def digest(value) -> str:
 
 def plan_keys(dag, reasons=None) -> list[tuple[str, str | None]]:
     """``(op, key)`` for each op of the optimized plan, in plan order."""
-    plan, _, _ = optimize(dag, env=get_data(dag))
+    plan, _ = optimize(dag, env=get_data(dag))
     keys = compute_lineage_keys(plan, reasons=reasons)
     return [(str(op), keys[op]) for op in plan]
 
@@ -194,7 +194,7 @@ def test_touching_the_source_rekeys_everything(csv_path):
 def test_in_memory_inputs_are_uncacheable():
     data = st.as_data_op(pd.DataFrame({"x": [1, 2]}))
     dag = data.assign(z=data["x"] + 1)
-    plan, _, _ = optimize(dag, env=get_data(dag))
+    plan, _ = optimize(dag, env=get_data(dag))
     reasons = {}
     keys = compute_lineage_keys(plan, reasons=reasons)
     assert all(k is None for k in keys.values())
@@ -224,7 +224,7 @@ def test_sample_needs_a_seed(csv_path):
 
 def test_region_limits_keys(csv_path):
     dag = csv_pipeline(csv_path)
-    plan, _, _ = optimize(dag, env=get_data(dag))
+    plan, _ = optimize(dag, env=get_data(dag))
     source = next(op for op in plan if isinstance(op, FileReadOp))
     keys = compute_lineage_keys(plan, region={source})
     assert keys[source] is not None

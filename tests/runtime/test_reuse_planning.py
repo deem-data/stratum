@@ -57,8 +57,7 @@ def model(csv_path, alpha=1.0):
 
 
 def plan_for(dag, cache, conf=None):
-    plan, split_pos, flagged = optimize(dag, conf, env=get_data(dag), reuse_cache=cache)
-    return plan, split_pos, flagged
+    return optimize(dag, conf, env=get_data(dag), reuse_cache=cache)
 
 
 def hits(plan):
@@ -69,12 +68,12 @@ def hits(plan):
 
 def test_region_is_what_runs_once(csv_path):
     dag = model(csv_path)
-    plan, split_pos, _ = optimize(dag, env=get_data(dag))
+    plan, split_pos = optimize(dag, env=get_data(dag))
     region = cacheable_region(plan)
     assert region == set(plan[:split_pos])
 
     dag = features(csv_path)
-    plan, split_pos, _ = optimize(dag, env=get_data(dag))
+    plan, split_pos = optimize(dag, env=get_data(dag))
     assert split_pos is None
     assert cacheable_region(plan) == set(plan)
 
@@ -83,7 +82,7 @@ def test_region_is_what_runs_once(csv_path):
 
 def test_cold_cache_flags_the_region_and_takes_nothing(csv_path, tmp_path):
     cache = ReuseCache(tmp_path / "c")
-    plan, split_pos, _ = plan_for(model(csv_path), cache)
+    plan, split_pos = plan_for(model(csv_path), cache)
     assert not hits(plan)
     flagged = {op for op in plan if op.cache_key is not None}
     assert flagged and flagged <= set(plan[:split_pos])
@@ -97,10 +96,10 @@ def test_cold_cache_flags_the_region_and_takes_nothing(csv_path, tmp_path):
 
 def test_a_hit_keeps_its_place_and_loses_its_inputs(csv_path, tmp_path):
     cache = ReuseCache(tmp_path / "c")
-    plan, split_pos, _ = plan_for(model(csv_path), cache)
+    plan, split_pos = plan_for(model(csv_path), cache)
     x_op, y_op = plan[split_pos].inputs[:2]  # the split's inputs are X and y
     cache.put(x_op.cache_key, pd.DataFrame({"a": [1.0]}))
-    plan, split_pos, _ = plan_for(model(csv_path), cache)
+    plan, split_pos = plan_for(model(csv_path), cache)
     [hit] = hits(plan)
     assert plan[split_pos].inputs[0] is hit, "the split still reads X from it"
     assert type(hit) is type(x_op) and str(hit) == str(x_op), "the op itself"
@@ -113,23 +112,23 @@ def test_a_hit_keeps_its_place_and_loses_its_inputs(csv_path, tmp_path):
 
 def test_the_whole_result_can_be_a_single_hit(csv_path, tmp_path):
     cache = ReuseCache(tmp_path / "c")
-    plan, _, _ = plan_for(features(csv_path), cache)
+    plan, _ = plan_for(features(csv_path), cache)
     sink = plan[-1]
     cache.put(sink.cache_key, pd.DataFrame({"x": [1]}))
-    plan, split_pos, flagged = plan_for(features(csv_path), cache)
+    plan, split_pos = plan_for(features(csv_path), cache)
     assert len(plan) == 1 and type(plan[0]) is type(sink)
     assert plan[0].cache_hit is not None
-    assert split_pos is None and flagged == []
+    assert split_pos is None
 
 
 def test_a_hit_is_handed_to_one_scheduler(csv_path, tmp_path):
     cache = ReuseCache(tmp_path / "c")
-    plan, _, _ = plan_for(features(csv_path), cache)
+    plan, _ = plan_for(features(csv_path), cache)
     cache.put(plan[-1].cache_key, pd.DataFrame({"x": [1]}))
-    plan, split_pos, flagged = plan_for(features(csv_path), cache)
-    SequentialScheduler(plan, split_pos, flagged, reuse_cache=cache)
+    plan, split_pos = plan_for(features(csv_path), cache)
+    SequentialScheduler(plan, split_pos, reuse_cache=cache)
     with pytest.raises(RuntimeError, match="optimize the plan again"):
-        SequentialScheduler(plan, split_pos, flagged, reuse_cache=cache)
+        SequentialScheduler(plan, split_pos, reuse_cache=cache)
 
 
 def test_admission_policy_is_pluggable(csv_path, tmp_path):
@@ -141,11 +140,11 @@ def test_admission_policy_is_pluggable(csv_path, tmp_path):
             return set(candidates[:1])
 
     cache = ReuseCache(tmp_path / "c")
-    plan, _, _ = plan_for(model(csv_path), cache, OptConfig(reuse_admission=FirstOnly()))
+    plan, _ = plan_for(model(csv_path), cache, OptConfig(reuse_admission=FirstOnly()))
     assert len(seen["candidates"]) > 1
     assert [op for op in plan if op.cache_key is not None] == seen["candidates"][:1]
 
-    plan, _, _ = plan_for(model(csv_path), cache, OptConfig(reuse_admission=CacheNothing()))
+    plan, _ = plan_for(model(csv_path), cache, OptConfig(reuse_admission=CacheNothing()))
     assert all(op.cache_key is None for op in plan)
     with pytest.raises(ValueError, match="valid policies"):
         make_admission_policy("most")
@@ -177,12 +176,12 @@ def test_a_plan_without_split_is_cached_whole(csv_path, cache_dir):
 def test_the_cache_may_evict_a_hit_before_the_plan_runs(csv_path, tmp_path):
     cache = ReuseCache(tmp_path / "c")
     dag = model(csv_path)
-    plan, split_pos, flagged = plan_for(dag, cache)
-    expected = SequentialScheduler(plan, split_pos, flagged, reuse_cache=cache).evaluate()
-    plan, split_pos, flagged = plan_for(dag, cache)
+    plan, split_pos = plan_for(dag, cache)
+    expected = SequentialScheduler(plan, split_pos, reuse_cache=cache).evaluate()
+    plan, split_pos = plan_for(dag, cache)
     assert hits(plan)
     cache.clear()  # nothing is pinned or leased: every entry may go
-    result = SequentialScheduler(plan, split_pos, flagged, reuse_cache=cache).evaluate()
+    result = SequentialScheduler(plan, split_pos, reuse_cache=cache).evaluate()
     np.testing.assert_array_equal(result, expected)
 
 

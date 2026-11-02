@@ -40,8 +40,7 @@ class _TransformerExecution:
     """Shared physical execution for Skrub-compatible transformer estimators."""
     def process(self, mode: str, inputs: list):
         task_data = self.extract_args_from_inputs(mode, inputs)
-        result, self.estimator = self.get_process_task()(task_data)
-        return result
+        return self.staged_result(*self.get_process_task()(task_data))
 
 
 class PassthroughTransformer(_TransformerExecution, TransformerOp, PhysicalOp):

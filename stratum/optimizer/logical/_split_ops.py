@@ -9,6 +9,13 @@ import numpy as np
 
 
 class SplitOp(Op):
+    """Cut ``X`` and ``y`` into a fold's training and test rows.
+
+    ``indices`` is the fold's ``(train, test)`` row positions, set by the scheduler
+    before each run of the plan after the split. The output is the tuple
+    ``(X_train, y_train, X_test, y_test)``, which the :class:`SplitOutput` ops pick
+    from.
+    """
     logical_family = "Split"
 
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
@@ -26,25 +33,37 @@ class SplitOp(Op):
         return self.inputs[2] if len(self.inputs) > 2 else None
 
     def process(self, mode: str, inputs: list):
-        # we need to handle both pandas and polars dfs
-        x = inputs[0]
-        y = inputs[1]
-        if isinstance(x, pd.DataFrame):
-            return (x.iloc[self.indices], y.iloc[self.indices])
-        elif isinstance(x, pl.DataFrame):
-            return (x[self.indices], y[self.indices])
-        elif isinstance(x, np.ndarray):
-            return (x[self.indices], y[self.indices])
-        else:
-            raise ValueError(f"Unsupported dataframe type: {type(x)}")
+        x, y = inputs[0], inputs[1]
+        train, test = self.indices
+        return (*_take(x, y, train), *_take(x, y, test))
+
+
+def _take(x, y, rows) -> tuple:
+    # we need to handle both pandas and polars dfs
+    if isinstance(x, pd.DataFrame):
+        return x.iloc[rows], y.iloc[rows]
+    elif isinstance(x, (pl.DataFrame, np.ndarray)):
+        return x[rows], y[rows]
+    else:
+        raise ValueError(f"Unsupported dataframe type: {type(x)}")
 
 
 class SplitOutput(Op):
-    def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, ):
-        name = "X" if is_x else "y"
+    """``X`` or ``y`` of the training or the test rows of a fold."""
+
+    def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, train=False):
+        name = ("X" if is_x else "y") + ("_train" if train else "_test")
         super().__init__(name=name, is_X=False, is_y=False, inputs=inputs, outputs=outputs)
         self.is_x = is_x
+        self.train = train
         self.output_type = OutputType.FRAME
+
+    def clone(self):
+        """The same side of the split. Fit/predict unrolling makes the train copy's
+        a train side."""
+        new_op = SplitOutput(is_x=self.is_x, train=self.train)
+        new_op.was_cloned = True
+        return new_op
 
     def propagate_output_schema(self):
         # Subsetting rows keeps the columns. The SplitOp itself is an (X, y)
@@ -55,10 +74,34 @@ class SplitOutput(Op):
         self.output_schema = src.output_schema
 
     def process(self, mode: str, inputs: list):
-        if self.is_x:
-            return inputs[0][0]
-        else:
-            return inputs[0][1]
+        return inputs[0][(0 if self.train else 2) + (0 if self.is_x else 1)]
+
+
+class BoundaryOp(Op):
+    """An op before the split, as the retained plan after the split reads it.
+
+    The plan after the split is compiled again once the ops before it have run
+    (see :mod:`stratum.optimizer._fold_compilation`). Those ops are fixed by then,
+    their values in the pool, so the retained plan does not hold them: it reads
+    each through a BoundaryOp, which stands for it while the plan is compiled. Its
+    output has the frame library that op's has, and its index the same origin.
+    """
+    logical_family = "Boundary"
+
+    def __init__(self, stands_for: Op):
+        super().__init__(name=str(stands_for), is_X=stands_for.is_X, is_y=stands_for.is_y)
+        #: The op it stands for: logical when the template is retained, its
+        #: physical counterpart once the plan before the split is compiled.
+        self.stands_for = stands_for
+        self.output_type = stands_for.output_type
+        self.output_schema = stands_for.output_schema
+
+    @classmethod
+    def output_frame_lib(cls, op, libs):
+        return getattr(op.stands_for, "_frame_lib", None)
+
+    def process(self, mode: str, inputs: list):
+        raise RuntimeError(f"{self} stands for an op before the split and never runs")
 
 
 class BuildSplitterOp(Op):

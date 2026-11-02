@@ -163,8 +163,10 @@ class TestEvalSetPipeline(ApplyKwargsRuntimeTest):
         # If the eval set never arrived, LightGBM would run all 200 rounds.
         pipeline = self._pipeline()
         sched = grid_search(pipeline, cv=2, scoring=self.SCORING)
-        estimators = [op.estimator for op in sched.linearized_dag
-                      if isinstance(getattr(op, "estimator", None), LGBMRegressor)]
+        # The last fold's copy of the plan holds what it fitted.
+        estimators = [op.estimator for op in sched.fold_ops
+                      if isinstance(getattr(op, "estimator", None), LGBMRegressor)
+                      and op.stage == "fit"]
         self.assertTrue(estimators)
         for est in estimators:
             self.assertLess(est.best_iteration_, 200)

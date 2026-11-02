@@ -185,6 +185,10 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     lib = getattr(op, "_frame_lib", None)
     enc.encode(None if lib is None else str(lib))
     enc.encode(op.lineage_config())
+    if op.stage is not None or op.pass_mode is not None:
+        # Fixed by fit/predict unrolling, not configuration: which call a stage
+        # makes, and in which mode.
+        enc.raw(b"stage", f"{op.stage}:{op.mode}".encode())
     enc._str(str(len(input_keys)))
     for key in input_keys:
         enc.raw(b"in", key.encode())

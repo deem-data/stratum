@@ -85,6 +85,10 @@ def index_origin(op: IRNode, memo: dict | None = None):
 
 def _index_origin(op: IRNode, memo: dict):
     """Follow ``op``'s declared :class:`IndexEffect`."""
+    stands_for = getattr(op, "stands_for", None)
+    if stands_for is not None:
+        # A BoundaryOp: the index is that of the op before the split it reads.
+        return index_origin(stands_for, memo)
     effect = op.index_effect
     if effect is IndexEffect.DEFAULT:
         return DEFAULT
@@ -100,6 +104,7 @@ def _index_origin(op: IRNode, memo: dict):
 
 def _common_origin(op: IRNode, memo: dict):
     """Elementwise op: differing origins align on a label union (new origin)."""
-    origins = {index_origin(i, memo) for i in op.inputs
-               if i.output_type in FRAME_TYPES or i.output_type.name == "UNKNOWN"}
+    origins = {index_origin(i, memo) for k, i in enumerate(op.inputs)
+               if (i.output_type in FRAME_TYPES or i.output_type.name == "UNKNOWN")
+               and not op.reads_state(k)}
     return origins.pop() if len(origins) == 1 else id(op)

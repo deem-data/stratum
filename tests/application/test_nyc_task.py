@@ -104,7 +104,8 @@ def test_nyc_plan_folds_assigns(tmp_path):
     pipeline = build_pipeline(make_nyc_lake(tmp_path / "lake"))
     root = logical_optimize(pipeline, OptConfig(), None)
     ops = list(topological_iterator(root))
-    maps = [op for op in ops if isinstance(op, AssignMapOp)]
+    # The train copy's clones aside (see fit/predict unrolling).
+    maps = [op for op in ops if isinstance(op, AssignMapOp) and not op.was_cloned]
     generic_assigns = [op for op in ops if isinstance(op, MethodCallOp)
                        and op.method_name == "assign"]
 

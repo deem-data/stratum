@@ -192,9 +192,9 @@ _SELECTORS = {
 
 
 def _evaluate(dag, source, selector):
-    plan, split, flagged = optimize_plan(dag, OptConfig(selector=_SELECTORS[selector]()),
+    plan, split = optimize_plan(dag, OptConfig(selector=_SELECTORS[selector]()),
                                          env={"x": source})
-    return plan, SequentialScheduler(plan, split, flagged).evaluate()
+    return plan, SequentialScheduler(plan, split).evaluate()
 
 
 @pytest.mark.parametrize("selector", _SELECTORS)

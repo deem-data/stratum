@@ -436,9 +436,11 @@ def test_plan_predicts_like_skrub(task, module, name, params, impl):
 
     ops, *_ = optimize(pred)
     predictors = [op for op in ops if isinstance(op, PredictorOp)]
-    assert len(predictors) == 1
-    assert type(predictors[0]) is impl
-    assert isinstance(predictors[0], PhysicalOp)
+    # Fitted on the training rows, applied to the test rows: one stage each.
+    assert sorted(op.stage for op in predictors) == ["fit", "predict"]
+    for op in predictors:
+        assert type(op) is impl
+        assert isinstance(op, PhysicalOp)
 
     seed, test_size = 42, 0.2
     preds = evaluate(pred, seed=seed, test_size=test_size)

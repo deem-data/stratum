@@ -64,7 +64,8 @@ def _pandas_only_operand(op: IRNode) -> bool:
 
 def accepts_input(impl_class, op: IRNode, index: int, lib: FrameLib | None) -> bool:
     """Whether ``op`` run by ``impl_class`` reads input ``index`` as ``lib``."""
-    if lib is None:
+    if lib is None or op.reads_state(index):
+        # A fitted state is read as the object it is.
         return True
     if impl_class is not None and hasattr(impl_class, "accepts_input_lib"):
         return impl_class.accepts_input_lib(op, index, lib)

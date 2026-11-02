@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from skrub.selectors._base import make_selector
 
-from stratum.optimizer.logical._base import _resolve_kwargs, _resolve_operand
+from stratum.optimizer.logical._base import FITTING_MODE, Fitted, _resolve_kwargs, _resolve_operand
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, DropOp)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
@@ -60,36 +60,47 @@ def resolve_selector_columns(frame, selector) -> list[str]:
 
 
 class ColumnSelectorExec(ColumnSelectorOp, PhysicalOp):
-    """Physical base: resolve the (deferred) selector at fit time and reuse the
-    stored column list at predict time -- backend-agnostic; only the final
-    indexing differs per backend."""
+    """Physical base: resolve the (deferred) selector when fitting and reuse the
+    resolved column list when predicting -- backend-agnostic; only the final
+    indexing differs per backend.
+
+    The column list is the op's state. Unrolled, the ``"fit"`` stage resolves it on
+    the training fold and hands it on, and the ``"predict"`` stage reads it from
+    there. Without stages (no fold, so nothing to predict on), the op resolves it
+    each time it runs.
+    """
 
     def on_impl_selected(self, ctx) -> None:
-        # Resolved by the fitting pass; nothing is known at plan time.
+        # Resolved by the fitting run; nothing is known at plan time.
         self.selected_columns = None
 
-    def _resolved_columns(self, frame, mode: str):
-        if mode == "fit_transform":
+    def process(self, mode: str, inputs: list):
+        frame = inputs[0]
+        if self.stage == "predict":
+            return self._select(frame, inputs[self.state_ref.k])
+        if mode == FITTING_MODE:
             self.selected_columns = resolve_selector_columns(frame, self.selector)
         elif self.selected_columns is None:
             raise RuntimeError(
                 f"{self} was asked to transform before the selector was resolved; "
                 f"run fit_transform first.")
-        return self.selected_columns
+        out = self._select(frame, self.selected_columns)
+        return Fitted(out, self.selected_columns) if self.stage == "fit" else out
+
+    def _select(self, frame, columns: list):
+        raise NotImplementedError
 
 
 @physical_impl(of=ColumnSelectorOp, backend="pandas")
 class PandasColumnSelectorOp(ColumnSelectorExec):
-    def process(self, mode: str, inputs: list):
-        frame = inputs[0]
-        return frame[self._resolved_columns(frame, mode)]
+    def _select(self, frame, columns: list):
+        return frame[columns]
 
 
 @physical_impl(of=ColumnSelectorOp, backend="polars")
 class PolarsColumnSelectorOp(ColumnSelectorExec):
-    def process(self, mode: str, inputs: list):
-        frame = inputs[0]
-        return frame.select(self._resolved_columns(frame, mode))
+    def _select(self, frame, columns: list):
+        return frame.select(columns)
 
 
 # --- ColumnProjectionOp (df["a"] / df[["a", "b"]]) ----------------------------

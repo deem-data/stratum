@@ -125,8 +125,10 @@ class SearchTest(RuntimeTest):
         data = st.as_data_op(self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
-        y = y.skb.apply_func(lambda a, m: (a, print(m))[0] if m != 'predict' else int("grr"), st.eval_mode())
-        pred = X.skb.apply(DummyRegressor(), y=y)
+        # On the prediction path: what only feeds the fit (the y of a model) is not
+        # computed on the test rows.
+        pred = X.skb.apply(DummyRegressor(), y=y).skb.apply_func(
+            lambda a, m: a if m != 'predict' else int("grr"), st.eval_mode())
         try:
             st._api.grid_search(pred, scoring="neg_mean_squared_error")
             self.fail("Expected RunTimeError")
