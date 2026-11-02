@@ -31,7 +31,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from stratum.optimizer.logical._base import IRNode
+from stratum.optimizer.logical._base import IndexEffect, IRNode
+from stratum.runtime._frames import polars_index_of, unwrap
 
 
 class PhysicalOp(IRNode):
@@ -99,6 +100,54 @@ class PhysicalOp(IRNode):
         if cls.frame_lib is not None:
             return cls.frame_lib
         return next((lib for lib in input_libs if lib is not None), None)
+
+    # --- The pandas index of a polars output -----------------------------------
+    #
+    # A polars value holds the pandas index beside it (``runtime._frames``), where
+    # implementation selection tracks it: where an op uses it, and it is not
+    # ``0..n-1``. A tracked op runs :meth:`process_indexed`, as does an impl that
+    # reads its inputs' (:meth:`reads_polars_index`).
+
+    @classmethod
+    def carries_index(cls, op: IRNode) -> bool:
+        """Whether this impl gives its polars output its pandas index.
+
+        By default an output keeps its input's, where ``index_effect`` says it
+        does; an impl that moves rows or makes an index of its own overrides
+        this and :meth:`process_indexed`. Selection runs ``op`` on pandas where
+        its index is tracked and this impl does not carry it.
+        """
+        return op.index_effect in (IndexEffect.KEEP, IndexEffect.COMMON)
+
+    @classmethod
+    def index_names(cls, op: IRNode, inputs: list) -> tuple[str, ...] | None:
+        """The names of the polars columns this impl's output index is held in,
+        given its inputs' (``None`` where it is not held so, or not known)."""
+        return inputs[0] if inputs and cls.carries_index(op) else None
+
+    @staticmethod
+    def input_index_names(op: IRNode, k: int) -> tuple[str, ...] | None:
+        """:meth:`index_names` of ``op``'s input ``k``, as selection found them."""
+        names = getattr(op, "_input_index_names", None)
+        return names[k] if names is not None and k < len(names) else None
+
+    @classmethod
+    def reads_polars_index(cls, op: IRNode) -> bool:
+        """Whether :meth:`process_indexed` reads an input's index."""
+        return False
+
+    def process_indexed(self, mode: str, inputs: list):
+        """``process`` on wrapped inputs: the output and its polars index.
+
+        The default passes on the index of the input ``index_effect`` names.
+        """
+        result = self.process(mode, [unwrap(value) for value in inputs])
+        if not self._tracks_index:
+            return result, None
+        if self.index_effect is IndexEffect.KEEP:
+            return result, polars_index_of(inputs[0])
+        return result, next((index for index in map(polars_index_of, inputs)
+                             if index is not None), None)
 
     # --- Plan-time binding ----------------------------------------------------
 

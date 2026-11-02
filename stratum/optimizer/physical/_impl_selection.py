@@ -307,12 +307,13 @@ def select_implementations(root: IRNode, ctx: PlanContext,
     as-is; they keep executing via their own ``process``. Returns ``root``
     (selection binds in place, so the root object is unchanged).
 
-    Library mismatches get a ``ConversionOp`` (#227). Where polars -> pandas
-    would lose an index that is used (see ``_index_use``), the producer is
-    required to run on pandas. Where an op fitted on one library would be applied
-    to data in the other, its stages read pandas. A frame that may hold two
-    columns of one name is read on pandas. Selection iterates to a fixpoint over
-    both sets.
+    Library mismatches get a ``ConversionOp`` (#227). A polars op holds its
+    output's pandas index beside it (``runtime._frames``) where the index is used
+    (see ``_index_use``) and is not ``0..n-1``; an impl that cannot give it
+    (``PhysicalOp.carries_index``), or read an input's it uses, runs on pandas
+    instead. Where an op fitted on one library would be applied to data in the
+    other, its stages read pandas. A frame that may hold two columns of one name
+    is read on pandas. Selection iterates to a fixpoint over both sets.
     """
     start = start_time()
     if registry is None:
@@ -321,18 +322,25 @@ def select_implementations(root: IRNode, ctx: PlanContext,
         selector = get_implementation_selector(ctx.implementation_selector)
 
     ops = list(topological_iterator(root))
-    index_use = IndexUse(ops)
+    # A polars result is returned without its index (see `_track_index`), so the
+    # result's index is used once a pass finds it on pandas.
+    result_use = IndexUse(ops)
+    index_use = IndexUse(ops, result_used=False)
     repeated_names = _may_repeat_names(ops)
     pandas_required: set[int] = set()
     pandas_readers: set[int] = set()
     while True:
         plan = _plan_selection(ops, ctx, registry, selector, pandas_required,
-                               pandas_readers, index_use, repeated_names)
+                               pandas_readers, index_use, result_use, repeated_names)
+        pandas_result = (index_use is not result_use
+                         and plan.libs.get(id(root)) is not FrameLib.POLARS)
         if (plan.new_pandas_required <= pandas_required
-                and plan.new_pandas_readers <= pandas_readers):
+                and plan.new_pandas_readers <= pandas_readers and not pandas_result):
             break
         pandas_required |= plan.new_pandas_required
         pandas_readers |= plan.new_pandas_readers
+        if pandas_result:
+            index_use = result_use
     if plan.conflicts:
         raise RepresentationError(
             "The plan needs pandas index labels that a polars producer cannot "
@@ -340,7 +348,11 @@ def select_implementations(root: IRNode, ctx: PlanContext,
             + "\n  ".join(plan.conflicts))
     for op in ops:
         _bind(op, plan.impls[id(op)], ctx, plan.libs[id(op)])
-    _insert_conversions(plan.conversions)
+        op._tracks_index = plan.tracks[id(op)]
+        op._index_names = plan.index_names[id(op)]
+        op._indexed = isinstance(op, PhysicalOp) and (
+            op._tracks_index or type(op).reads_polars_index(op))
+    _insert_conversions(plan.conversions, plan.tracks, index_use)
     log_time("implementation selection took", start)
     _assert_no_abstract_ops(root, selector)
     check_frame_representations(list(topological_iterator(root)))
@@ -355,15 +367,19 @@ class _SelectionPlan:
     new_pandas_required: set = field(default_factory=set)  # ids that must run on pandas
     new_pandas_readers: set = field(default_factory=set)   # ids that must read pandas
     read_libs: dict = field(default_factory=dict)  # id(op) -> FrameLib of its input 0
+    tracks: dict = field(default_factory=dict)  # id(op) -> its polars output holds its index
+    index_names: dict = field(default_factory=dict)  # id(op) -> the columns that index is in
     conflicts: list = field(default_factory=list)          # unsatisfiable edges
 
 
 def _plan_selection(ops, ctx, registry, selector, pandas_required: set[int],
-                    pandas_readers: set[int], index_use: IndexUse,
+                    pandas_readers: set[int], index_use: IndexUse, result_use: IndexUse,
                     repeated_names: frozenset[int] = frozenset()) -> _SelectionPlan:
     """One selection pass: impls, edge libraries, conversions, pandas requirements.
 
     ``pandas_readers``: ops that read their data as pandas, whatever they accept.
+    ``index_use``: what uses an index, the result's only if it is on pandas;
+    ``result_use`` counts the result's too.
     ``repeated_names``: ops whose output may hold two columns of one name.
     """
     plan = _SelectionPlan()
@@ -374,11 +390,16 @@ def _plan_selection(ops, ctx, registry, selector, pandas_required: set[int],
                            index_use)
 
     for op in ops:
+        # Impls may support an op given the polars columns its inputs' index is in.
+        op._input_index_names = [
+            None if op.reads_state(k) or plan.libs.get(id(producer)) is not FrameLib.POLARS
+            else plan.index_names.get(id(producer)) for k, producer in enumerate(op.inputs)]
         impl = _choose_impl(op, ctx, registry, selector,
                             pandas_required=id(op) in pandas_required)
         bound_cls = _bound_class(op, impl)
         if (impl is not None and _impl_frame_lib(impl) is FrameLib.POLARS
-                and _requires_label_alignment(op, index_memo)):
+                and _requires_label_alignment(op, index_memo)
+                and not _keys_in_held_index(op)):
             # Positional pairing would differ from label alignment: use pandas.
             plan.new_pandas_required.add(id(op))
         if (impl is not None and _impl_frame_lib(impl) is FrameLib.POLARS
@@ -404,6 +425,7 @@ def _plan_selection(ops, ctx, registry, selector, pandas_required: set[int],
                     in_libs[k] = FrameLib.PANDAS
             lib = FrameLib.PANDAS
         plan.read_libs[id(op)] = in_libs[0] if in_libs else None
+        _track_index(plan, bound_cls, op, lib, in_libs, index_use, result_use, index_memo)
         if op.state_ref is not None:
             # An op fitted on one library is not applied to the other (skrub's
             # wrappers refuse it): both stages read pandas.
@@ -413,6 +435,52 @@ def _plan_selection(ops, ctx, registry, selector, pandas_required: set[int],
         plan.impls[id(op)] = impl
         plan.libs[id(op)] = lib
     return plan
+
+
+def _track_index(plan: _SelectionPlan, bound_cls, op: IRNode, lib, in_libs,
+                 index_use: IndexUse, result_use: IndexUse, index_memo: dict) -> None:
+    """Whether ``op``'s polars output holds its pandas index (``plan.tracks``),
+    and in which columns (``plan.index_names``).
+
+    It does where the index is used and not ``0..n-1``; ``op`` runs on pandas
+    where its impl does not give it, or does not read an input's index it uses.
+    An index that reaches only a polars result is held where it is in polars
+    columns, which the result shows as its leading columns
+    (``runtime._frames.as_result``), and dropped otherwise.
+    """
+    plan.tracks[id(op)], plan.index_names[id(op)] = False, None
+    if lib is not FrameLib.POLARS:
+        return
+    for k, producer in enumerate(op.inputs):
+        if (in_libs[k] is FrameLib.POLARS and _reads_index_of(op, k)
+                and not has_default_index(producer, index_memo)
+                and not (hasattr(bound_cls, "reads_polars_index")
+                         and bound_cls.reads_polars_index(op))):
+            plan.new_pandas_required.add(id(op))
+    if (op.output_type not in FRAME_TYPES or not result_use.output_used(op)
+            or has_default_index(op, index_memo)):
+        # A value of a kind not known at plan time is checked where it converts
+        # to pandas (`_enforce_input_lib`).
+        return
+    carries = hasattr(bound_cls, "carries_index") and bound_cls.carries_index(op)
+    names = bound_cls.index_names(op, op._input_index_names) if carries else None
+    if not index_use.output_used(op):
+        plan.tracks[id(op)], plan.index_names[id(op)] = names is not None, names
+        return
+    if not carries:
+        if isinstance(op, BoundaryOp):
+            # Its op has run already, without holding the index.
+            plan.conflicts.append(f"{op} holds no index, which the plan after the split uses")
+        plan.new_pandas_required.add(id(op))
+        return
+    plan.tracks[id(op)], plan.index_names[id(op)] = True, names
+
+
+def _reads_index_of(op: IRNode, k: int) -> bool:
+    """Whether ``op`` reads its input ``k``'s index, other than to pass it on."""
+    if op.reads_state(k):
+        return False
+    return op.reads_index or (op.keyed_inputs is not None and k in op.keyed_inputs)
 
 
 def _may_repeat_names(ops) -> frozenset[int]:
@@ -444,6 +512,13 @@ def _requires_label_alignment(op: IRNode, index_memo: dict) -> bool:
     return len({index_origin(i, index_memo) for i in frames}) > 1
 
 
+def _keys_in_held_index(op: IRNode) -> bool:
+    """Whether every input ``op`` keys on by index holds it in polars columns,
+    which its polars impl matches (see ``PhysicalOp.index_names``)."""
+    keyed = op.keyed_inputs
+    return bool(keyed) and all(op._input_index_names[k] for k in keyed)
+
+
 def _enforce_input_lib(plan: _SelectionPlan, producer: IRNode, consumer: IRNode,
                        k: int, target: FrameLib, pandas_required: set[int],
                        index_memo: dict, index_use: IndexUse) -> None:
@@ -451,9 +526,11 @@ def _enforce_input_lib(plan: _SelectionPlan, producer: IRNode, consumer: IRNode,
     the producer to run on pandas.
 
     Converting to pandas numbers the rows ``0..n-1``: exact where the pandas plan
-    does too, or where the consumer does not use the index."""
+    does too, or where the consumer does not use the index. An index the polars
+    value holds converts to the index itself."""
     if (target is FrameLib.PANDAS and not has_default_index(producer, index_memo)
-            and index_use.uses_input(consumer, k)):
+            and index_use.uses_input(consumer, k)
+            and not plan.tracks.get(id(producer))):
         if id(producer) in pandas_required or isinstance(producer, BoundaryOp):
             # A BoundaryOp's producer has run already, on the library it has.
             plan.conflicts.append(f"{consumer} reads input {k} ({producer}) as pandas")
@@ -462,17 +539,31 @@ def _enforce_input_lib(plan: _SelectionPlan, producer: IRNode, consumer: IRNode,
     plan.conversions.setdefault((producer, target), []).append((consumer, k))
 
 
-def _insert_conversions(conversions: dict) -> None:
-    """Insert one ConversionOp per (producer, target), shared by its consumers."""
+def _insert_conversions(conversions: dict, tracks: dict, index_use: IndexUse) -> None:
+    """Insert one ConversionOp per (producer, target), shared by its consumers.
+
+    To polars it holds the index where a consumer uses it, and it is not
+    ``0..n-1``; to pandas it gives back the index the producer holds."""
+    index_memo: dict = {}
     for (producer, target), uses in conversions.items():
         conversion = ConversionOp(target.other, target, inputs=[producer])
-        conversion.output_type = producer.output_type
-        conversion._frame_lib = target
-        for consumer, k in uses:
-            consumer.inputs[k] = conversion
-            conversion.add_output(consumer)
-            producer.outputs = [o for o in producer.outputs if o is not consumer]
-        producer.add_output(conversion)
+        if target is FrameLib.POLARS:
+            conversion._tracks_index = (not has_default_index(producer, index_memo) and any(
+                index_use.uses_input(consumer, k) for consumer, k in uses))
+            conversion._indexed = conversion._tracks_index
+        else:
+            conversion._indexed = bool(tracks.get(id(producer)))
+        _insert_between(producer, conversion, uses, target)
+
+
+def _insert_between(producer: IRNode, op: IRNode, uses, lib: FrameLib) -> None:
+    op.output_type = producer.output_type
+    op._frame_lib = lib
+    for consumer, k in uses:
+        consumer.inputs[k] = op
+        op.add_output(consumer)
+        producer.outputs = [o for o in producer.outputs if o is not consumer]
+    producer.add_output(op)
 
 
 def _assert_no_abstract_ops(root: IRNode,

@@ -12,6 +12,8 @@ from numpy import ndarray, load as np_load, save as np_save
 from pandas import DataFrame, Series, read_parquet
 from polars import DataFrame as PolarsDataFrame, Series as PolarsSeries, read_parquet as pl_read_parquet
 
+from stratum.runtime._frames import PolarsIndex, StratumValue
+
 logger = getLogger(__name__)
 
 _FORMAT_EXT = {
@@ -74,6 +76,16 @@ class _LeafRef:
 
 
 @dataclass(frozen=True)
+class _WrappedNode:
+    """A :class:`StratumValue` in a skeleton: its data and index columns as
+    nodes, a pandas index pickled as it is (it pickles exactly)."""
+    kind: type
+    data: Any
+    pandas_index: Any
+    index_columns: Any
+
+
+@dataclass(frozen=True)
 class SpilledObject:
     """Reference to a single spilled object (the handle the buffer pool holds).
 
@@ -118,6 +130,11 @@ def serialize_object(obj: Any, stem: Path) -> SpilledObject:
             ref = _LeafRef(path=str(leaf_path), format=leaf_fmt)
             leaves.append(ref)
             return ref
+        if isinstance(node, StratumValue):
+            index = node.polars_index
+            return _WrappedNode(type(node), build(node.data),
+                                None if index is None else index.pandas,
+                                None if index is None else build(index.columns))
         if isinstance(node, list):
             return [build(x) for x in node]
         if isinstance(node, tuple):
@@ -166,6 +183,11 @@ def delete_object(spilled: SpilledObject) -> None:
 def _rehydrate(node: Any) -> Any:
     if isinstance(node, _LeafRef):
         return _read_native(Path(node.path), node.format)
+    if isinstance(node, _WrappedNode):
+        columns = None if node.index_columns is None else _rehydrate(node.index_columns)
+        index = (None if node.pandas_index is None and columns is None
+                 else PolarsIndex(node.pandas_index, columns))
+        return node.kind(_rehydrate(node.data), index)
     if isinstance(node, list):
         return [_rehydrate(x) for x in node]
     if isinstance(node, tuple):

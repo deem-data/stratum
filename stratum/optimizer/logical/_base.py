@@ -313,6 +313,12 @@ class IRNode:
     #: say which; ``None`` defers to it.
     index_passed_from: tuple[int, ...] | None = None
 
+    #: Set by implementation selection: whether the op's polars output holds its
+    #: pandas index beside it, and whether the scheduler runs the op's
+    #: ``process_indexed`` (see ``physical/_physical_ops.py``).
+    _tracks_index = False
+    _indexed = False
+
     #: Whether the result depends on its inputs' index other than by passing it
     #: to the output (``index_effect``) or pairing rows by it (``aligns_by_label``):
     #: a read of ``.index``, a label lookup, or recorded code stratum cannot see

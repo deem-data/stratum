@@ -23,6 +23,7 @@ from stratum.optimizer.logical._ops import BinOp, CallOp, GetItemOp, MethodCallO
 from stratum.optimizer.physical._impl_selection import bind_op, DefaultImplementationSelector
 from stratum.optimizer.physical._lowering import lower_to_physical
 from stratum.optimizer.physical._plan_context import PlanContext
+from stratum.runtime._frames import as_result, execute as execute_op, wrap
 
 R0, R1, R2 = OperandRef(0), OperandRef(1), OperandRef(2)
 
@@ -196,8 +197,8 @@ def test_optconfig_disables_literal_inlining():
 def run_plan(ops):
     pool = BufferPool()
     for op in ops:
-        pool.put(op, op.process("fit_transform", [pool.pin(key) for key in op.inputs]))
-    return pool.pin(ops[-1])
+        pool.put(op, wrap(*execute_op(op, "fit_transform", [pool.pin(key) for key in op.inputs])))
+    return as_result(pool.pin(ops[-1]))
 
 
 def test_inlining_enables_aggregation_fusion():

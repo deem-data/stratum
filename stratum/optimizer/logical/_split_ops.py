@@ -141,6 +141,15 @@ class BoundaryOp(Op):
     def output_frame_lib(cls, op, libs):
         return getattr(op.stands_for, "_frame_lib", None)
 
+    @classmethod
+    def carries_index(cls, op) -> bool:
+        # The value in the pool holds the index where that op tracked it.
+        return op.stands_for._tracks_index
+
+    @classmethod
+    def index_names(cls, op, inputs):
+        return getattr(op.stands_for, "_index_names", None)
+
     def process(self, mode: str, inputs: list):
         raise RuntimeError(f"{self} stands for an op before the split and never runs")
 

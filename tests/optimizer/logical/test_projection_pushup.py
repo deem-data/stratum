@@ -14,6 +14,7 @@ from stratum.optimizer.logical._column_expr import BinOpExpr, Col, Const
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, DropOp
 from stratum.optimizer.logical._source_ops import InMemoryFrameOp
+from stratum.runtime._frames import as_result, execute, wrap
 from .test_dataframe_ops import force_polars, optimize
 
 
@@ -30,8 +31,8 @@ def polars(request):
 def _run(ops):
     pool = {}
     for op in ops:
-        pool[id(op)] = op.process("fit_transform", [pool[id(i)] for i in op.inputs])
-    result = pool[id(ops[-1])]
+        pool[id(op)] = wrap(*execute(op, "fit_transform", [pool[id(i)] for i in op.inputs]))
+    result = as_result(pool[id(ops[-1])])
     return result.to_pandas() if isinstance(result, pl.DataFrame) else result
 
 

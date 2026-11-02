@@ -3,6 +3,7 @@ from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.logical._ops import ValueOp, VariableOp
 from stratum.runtime._buffer_pool import BufferPool
 import stratum as st
+from stratum.runtime._frames import as_result, execute, wrap
 import pandas as pd
 import unittest
 
@@ -104,8 +105,8 @@ class TestResolveConstants(unittest.TestCase):
         pool = BufferPool()
         for op in out:
             inputs = [pool.pin(k) for k in op.inputs]
-            pool.put(op, op.process("fit_transform", inputs))
-        result = pool.pin(out[-1])
+            pool.put(op, wrap(*execute(op, "fit_transform", inputs)))
+        result = as_result(pool.pin(out[-1]))
         pd.testing.assert_frame_equal(
             result.reset_index(drop=True), self.df[["x"]])
 

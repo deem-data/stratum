@@ -13,6 +13,7 @@ import polars as pl
 from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
+from stratum.runtime._frames import polars_index_of, take_index, unused_name, unwrap
 
 @physical_impl(of=JoinOp, backend="pandas")
 class PandasJoinOp(JoinOp, PhysicalOp):
@@ -38,6 +39,8 @@ class PolarsJoinOp(JoinOp, PhysicalOp):
 
     @classmethod
     def supports(cls, op: JoinOp, ctx) -> bool:
+        if op.right_index and not op.left_index:
+            return cls._supports_index_join(op)
         if op.left_index or op.right_index:
             op._unsupported_reason = "joins on index labels"
         elif op.how not in cls._HOW:
@@ -49,9 +52,37 @@ class PolarsJoinOp(JoinOp, PhysicalOp):
             return True
         return False
 
+    @classmethod
+    def _supports_index_join(cls, op: JoinOp) -> bool:
+        """``left.join(right, on=keys)``: the right side's index, held as polars
+        columns (see ``runtime._frames``), matched against the left's key columns."""
+        keys = [op.left_on] if isinstance(op.left_on, str) else op.left_on
+        index = cls.input_index_names(op, 1) or ()
+        if op.how not in ("left", "inner"):
+            op._unsupported_reason = f"index join with how={op.how!r}"
+        elif tuple(op.suffixes) != ("", ""):
+            # The suffixed overlaps of a merge on one side's index are not modelled.
+            op._unsupported_reason = "index join with suffixes"
+        elif not isinstance(keys, (list, tuple)) or len(keys) != len(index) or not index:
+            op._unsupported_reason = "the right side's index is not held in polars columns"
+        else:
+            return True
+        return False
+
+    @classmethod
+    def carries_index(cls, op: JoinOp) -> bool:
+        # An index join keeps the left rows' index; a key join numbers them 0..n-1.
+        return op.right_index
+
+    @classmethod
+    def reads_polars_index(cls, op: JoinOp) -> bool:
+        return op.right_index
+
     def process(self, mode: str, inputs: list):
         if len(inputs) != 2:
             raise ValueError(f"JoinOp expects exactly 2 inputs (left and right dataframes), got {len(inputs)}.")
+        if self.right_index:
+            raise RuntimeError(f"{self} reads its right input's index: it runs process_indexed")
         left_df, right_df = inputs
         no_defined_join_columns = self.left_on is None and self.right_on is None
 
@@ -81,6 +112,37 @@ class PolarsJoinOp(JoinOp, PhysicalOp):
             if col not in key_cols
         }
         return result.rename(mapping=mapping)
+
+    def process_indexed(self, mode: str, inputs: list):
+        left_df, right_df = (unwrap(value) for value in inputs)
+        if not self.right_index:
+            return self.process(mode, [left_df, right_df]), None
+        levels = polars_index_of(inputs[1]).columns
+        return self._index_join(left_df, right_df, levels, polars_index_of(inputs[0]))
+
+    def _index_join(self, left_df, right_df, levels, left_index):
+        """pandas keeps the left rows in order, with their index, and matches
+        missing keys."""
+        keys = [self.left_on] if isinstance(self.left_on, str) else list(self.left_on)
+        index = list(levels.columns)
+        overlap = pd.Index(left_df.columns).intersection(right_df.columns)
+        if len(overlap):
+            raise ValueError(f"columns overlap but no suffix specified: {overlap}")
+        for key, level in zip(keys, index):
+            if left_df.schema[key] != levels.schema[level]:
+                # pandas compares across dtypes; a polars join requires one.
+                raise NotImplementedError(
+                    f"index join of {key!r} ({left_df.schema[key]}) against index "
+                    f"level {level!r} ({levels.schema[level]}) on polars")
+        rows = unused_name([*left_df.columns, *index, *right_df.columns])
+        if self._tracks_index:
+            left_df = left_df.with_row_index(rows)
+        result = left_df.join(pl.concat([levels, right_df], how="horizontal"),
+                              left_on=keys, right_on=index, how=self.how,
+                              nulls_equal=True, maintain_order="left", coalesce=True)
+        if not self._tracks_index:
+            return result, None
+        return result.drop(rows), take_index(left_index, result.get_column(rows))
 
 
 # --- FilteringJoinOp (semi / anti) --------------------------------------------

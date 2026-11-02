@@ -9,6 +9,7 @@ from stratum.optimizer._fold_compilation import (FoldPlan, FoldProfile, KNOWN_VA
 from stratum.optimizer._lineage import state_key
 from stratum.optimizer.logical._ops import Op
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._frames import as_result, execute, unwrap, wrap
 from stratum.runtime._object_size import get_size
 from stratum.runtime._object_serialization import delete_object, deserialize_object
 import numpy as np
@@ -62,7 +63,7 @@ class Scheduler:
             if hit is None:
                 continue
             if hit.has_output:
-                self.pool.put(op, hit.take())
+                self.pool.put(op, wrap(hit.take()))
             if hit.has_state:
                 self.state_store[op] = hit.take_state()
             self._lineage_cost[op] = hit.cost
@@ -119,7 +120,7 @@ class Scheduler:
         """
         if split_op.splitter is None:
             return check_cv(None)
-        splitter = self.pool.pin(split_op.splitter)
+        splitter = unwrap(self.pool.pin(split_op.splitter))
         self.pool.unpin(split_op.splitter)
         return splitter
 
@@ -134,8 +135,8 @@ class Scheduler:
         # in the pool after compute_xy and are pinned by removal planning, so the
         # labels can be handed to the splitter: stratified splitters need them,
         # and every sklearn splitter accepts split(X, y=None, groups=None).
-        x_data = self.pool.pin(split_op.inputs[0])
-        y_data = self.pool.pin(split_op.inputs[1])
+        x_data = unwrap(self.pool.pin(split_op.inputs[0]))
+        y_data = unwrap(self.pool.pin(split_op.inputs[1]))
         splits = []
         for i, (train_index, test_index) in enumerate(cv.split(x_data, y_data)):
             train_key = ("__cv_split", "train", i)
@@ -180,7 +181,7 @@ class Scheduler:
         """The sink's value, for a plan without X/y: ``compute_xy`` ran all of it."""
         logger.warning("X and y nodes not found in the DAG, returning the last node")
         sink = self.linearized_dag[-1]
-        out = self.pool.pin(sink)
+        out = as_result(self.pool.pin(sink))
         shared = self.reuse_cache is not None and (
             sink.cache_key is not None or sink.cache_hit is not None)
         self._finish()
@@ -207,11 +208,12 @@ class Scheduler:
             inputs = [self.state_store[in_op] if op.reads_state(k) else self.pool.pin(in_op)
                       for k, in_op in enumerate(op.inputs)]
 
-            # 2. process operator
+            # 2. process operator: on plain values, unless it handles a polars
+            # value's index (see `runtime._frames`)
             if obs is not None:
                 token = obs.before(node)
             t1 = perf_counter()
-            result = op.process(mode=mode, inputs=inputs)
+            result, index = execute(op, mode, inputs)
             t2 = perf_counter()
 
             # 3. unpin inputs
@@ -244,7 +246,7 @@ class Scheduler:
                     self._release_state(op, state)
                 result = result.output
             if op.stage != "fit" or op.has_data_reader():
-                self.pool.put(op, result)
+                self.pool.put(op, wrap(result, index))
             if self._profile is not None:
                 self._measure(op, t2 - t1, state, held)
             self.log_memory_usage()
@@ -363,7 +365,7 @@ class SequentialScheduler(Scheduler):
             else:
                 raise e
 
-        x_data = self.pool.pin(split_op.inputs[0])
+        x_data = unwrap(self.pool.pin(split_op.inputs[0]))
         indices = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
         self.pool.unpin(split_op.inputs[0])
         rows = self.run_fold(tuple(indices))
@@ -395,7 +397,7 @@ class SequentialScheduler(Scheduler):
             self.process_op(node)
 
         sink = ops[-1]
-        out = self.pool.pin(sink)
+        out = unwrap(self.pool.pin(sink))
         self.pool.unpin(sink)
         self._release(sink)
         self.log_memory_usage()

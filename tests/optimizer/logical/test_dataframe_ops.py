@@ -23,7 +23,9 @@ from stratum.optimizer.logical._ops import OperandRef, OutputType, Op, ValueOp
 from stratum.optimizer.physical._concat_execs import PolarsConcatOp
 from stratum.optimizer.physical import FlagBasedSelector
 from stratum.optimizer.physical._impl_selection import bind_op
+from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._plan_context import PlanContext
+from stratum.runtime._frames import as_result, execute, wrap
 
 
 #: Backend the helpers below plan against. Test-suite state, deliberately not a
@@ -92,7 +94,13 @@ def run_op(op, *values, mode="fit_transform"):
     """
     op.inputs = [_inp(v) for v in values]
     bind_op(op, plan_context(), selector=selector())
-    return op.process(mode, _inputs_for(op))
+    if isinstance(op, PhysicalOp):
+        # The op is the plan's result: it holds an index it would hold in
+        # polars columns, returned as its leading columns.
+        op._tracks_index = (op.carries_index(op)
+                            and op.index_names(op, [None] * len(op.inputs)) is not None)
+        op._indexed = op._tracks_index or op.reads_polars_index(op)
+    return as_result(wrap(*execute(op, mode, _inputs_for(op))))
 
 
 @contextmanager

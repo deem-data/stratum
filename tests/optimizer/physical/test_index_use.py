@@ -153,11 +153,11 @@ def test_a_filter_whose_index_is_not_used_runs_on_polars(data):
         result.sort_values("a", ignore_index=True), expected.reset_index(), check_dtype=False)
 
 
-def test_a_filter_whose_index_reaches_the_result_runs_on_pandas(data):
+def test_a_filter_whose_index_reaches_the_result_holds_it(data):
     plan = _filter_then_transform(data)
     ops = _plan_ops(plan, "greedy")
     kept = next(op for op in ops if isinstance(op, SelectionOp))
-    assert frame_lib(kept) is FrameLib.PANDAS
+    assert frame_lib(kept) is FrameLib.POLARS and kept._tracks_index
     with st.config(scheduler=True, implementation_selector="greedy"):
         result = evaluate(plan)
     pd.testing.assert_frame_equal(result, _pandas_result(plan))

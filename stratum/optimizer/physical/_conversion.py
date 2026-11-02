@@ -1,19 +1,21 @@
 """Explicit frame-library conversions on plan edges (#227).
 
-pandas -> polars is always admitted (polars has no index). polars -> pandas
-yields a RangeIndex, so it is admitted only where the pandas plan also has a
-default index (:func:`has_default_index`) or where the index is not used (see
-``_index_use``); otherwise the producer runs on pandas. Strings convert to
-pandas' ``str`` dtype.
+pandas -> polars is always admitted: where the index is tracked (see
+``PhysicalOp.carries_index``) the polars value holds it beside it. polars ->
+pandas gives that index back, or a RangeIndex where none is held, so it is
+admitted where the pandas plan also has a default index
+(:func:`has_default_index`), where the index is not used (see ``_index_use``),
+or where the polars producer carries it; otherwise the producer runs on pandas.
+Strings convert to pandas' ``str`` dtype.
 """
 from __future__ import annotations
 
 import pandas as pd
-import polars as pl
 
 from stratum.optimizer.logical._base import FRAME_TYPES, IRNode, IndexEffect
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._representation import FrameLib
+from stratum.runtime._frames import PolarsIndex, polars_index_of, to_pandas, to_polars, unwrap
 
 
 class ConversionOp(PhysicalOp):
@@ -38,27 +40,18 @@ class ConversionOp(PhysicalOp):
         return lib == op.source
 
     def process(self, mode: str, inputs: list):
-        value = inputs[0]
+        return to_polars(inputs[0]) if self.target is FrameLib.POLARS else to_pandas(inputs[0])
+
+    def process_indexed(self, mode: str, inputs: list):
+        value = unwrap(inputs[0])
         if self.target is FrameLib.POLARS:
-            return to_polars(value)
-        return to_pandas(value)
-
-
-def to_polars(value):
-    if isinstance(value, (pd.DataFrame, pd.Series)):
-        return pl.from_pandas(value)
-    return value
-
-
-def to_pandas(value):
-    """polars -> pandas via Arrow defaults: dates as ``datetime.date``, strings as ``str``."""
-    if isinstance(value, pl.Series):
-        return to_pandas(value.to_frame()).iloc[:, 0]
-    if isinstance(value, pl.DataFrame):
-        frame = value.to_arrow().to_pandas()
-        strings = [name for name, dtype in value.schema.items() if dtype == pl.String]
-        return frame.astype({name: "str" for name in strings}) if strings else frame
-    return value
+            held = self._tracks_index and isinstance(value, (pd.DataFrame, pd.Series))
+            return to_polars(value), PolarsIndex.of(value.index) if held else None
+        result = to_pandas(value)
+        index = polars_index_of(inputs[0])
+        if index is not None:
+            result.index = index.to_pandas()
+        return result, None
 
 
 # --- index lineage ------------------------------------------------------------

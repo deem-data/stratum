@@ -10,6 +10,7 @@ from stratum.optimizer.logical._ops import MethodCallOp, OperandRef
 from stratum.optimizer.physical._impl_selection import get_implementation_selector
 from stratum.optimizer.physical._join_execs import PandasJoinOp, PolarsJoinOp
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._frames import as_result, execute, wrap
 from .test_dataframe_ops import (
     _inp, force_polars, optimize, plan_context, run_op)
 
@@ -19,8 +20,8 @@ def _evaluate(ops):
     pool = BufferPool()
     for op in ops:
         inputs = [pool.pin(key) for key in op.inputs]
-        pool.put(op, op.process("fit_transform", inputs))
-    return pool.pin(ops[-1])
+        pool.put(op, wrap(*execute(op, "fit_transform", inputs)))
+    return as_result(pool.pin(ops[-1]))
 
 
 def to_list(obj):

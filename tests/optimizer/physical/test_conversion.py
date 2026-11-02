@@ -107,15 +107,14 @@ def test_the_default_selector_inserts_no_conversion(source):
 
 # --- correctness-first fallback -------------------------------------------------
 
-def test_index_labels_a_pandas_consumer_needs_keep_the_filter_on_pandas(source):
-    # `.index` of a filtered frame: a conversion from polars would renumber the
-    # rows, so the filter itself has to run on pandas.
+def test_index_labels_a_pandas_consumer_needs_are_held_by_the_polars_filter(source):
+    # `.index` of a filtered frame: the polars filter holds the index beside the
+    # frame, and the conversion gives it back rather than renumbering the rows.
     filtered = source[source["x"] > 0]
     plan = filtered.assign(pos=filtered.index)
     ops, result = _greedy(plan)
     selection = next(op for op in ops if type(op).__name__.endswith("SelectionOp"))
-    assert frame_lib(selection) is FrameLib.PANDAS
-    assert "index labels" in dict(selection._refusals)["polars"]
+    assert frame_lib(selection) is FrameLib.POLARS and selection._tracks_index
     pd.testing.assert_frame_equal(_as_pandas(result), _pandas(plan), check_dtype=False)
     assert _as_pandas(result)["pos"].tolist() == [0, 3]
 

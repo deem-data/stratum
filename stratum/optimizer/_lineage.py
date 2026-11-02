@@ -218,6 +218,9 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     lib = getattr(op, "_frame_lib", None)
     enc.encode(None if lib is None else str(lib))
     enc.encode(op.lineage_config())
+    if op._tracks_index:
+        # Its polars value holds the pandas index too.
+        enc.raw(b"index", b"held")
     if op.stage is not None:
         # Fixed by fit/predict unrolling, not configuration: which call a stage
         # makes, and in which mode. Of the ops that can be keyed, only a stage

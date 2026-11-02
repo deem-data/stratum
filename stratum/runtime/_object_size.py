@@ -10,10 +10,14 @@ import numpy as np
 from numpy import ndarray
 from sklearn.base import BaseEstimator
 from logging import getLogger
+from stratum.runtime._frames import PolarsIndex, StratumValue
 logger = getLogger(__name__)
 size_cache = {}
 
 def get_size(obj):
+    if isinstance(obj, StratumValue):
+        index = obj.polars_index
+        return get_size(obj.data) + (0 if index is None else get_size_index(index))
     if isinstance(obj, tuple) or isinstance(obj, list):
         return sum(get_size(item) for item in obj)
     elif isinstance(obj, dict):
@@ -128,6 +132,14 @@ def get_size_pandas(obj):
         return get_size(obj.obj)
     else:
         return _unknown_size(obj, "pandas type")
+
+def get_size_index(index: PolarsIndex) -> int:
+    """The bytes of the index a polars value holds, in the forms it holds."""
+    size = 0 if index.columns is None else get_size_polars(index.columns)
+    if index.pandas is not None:
+        size += int(index.pandas.memory_usage(deep=True))
+    return size
+
 
 def get_size_polars(obj):
     if isinstance(obj, PolarsDataFrame):

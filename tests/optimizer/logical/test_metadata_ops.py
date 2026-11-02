@@ -248,9 +248,10 @@ class TestSetIndex(unittest.TestCase):
         keys = {lineage_key(op, ["in"]) for op in forms}
         self.assertEqual(len(forms), len(keys))
 
-    def test_polars_refuses_new_labels(self):
+    def test_polars_refuses_labels_of_another_value(self):
+        # Key columns become an index held beside the frame (see runtime._frames).
         from stratum.optimizer.physical._metadata_execs import PolarsRowLabelsOp
-        self.assertFalse(PolarsRowLabelsOp.supports(RowLabelsOp(keys=("k",)), None))
+        self.assertTrue(PolarsRowLabelsOp.supports(RowLabelsOp(keys=("k",)), None))
         self.assertFalse(PolarsRowLabelsOp.supports(RowLabelsOp(labels=OperandRef(1)), None))
         self.assertTrue(PolarsRowLabelsOp.supports(RowLabelsOp(), None))
 
@@ -403,8 +404,10 @@ def test_relabelling_matches_pandas(name, selector):
     plan, result = _evaluate(dag, _FRAME, selector)
     assert any(isinstance(op, (RowLabelsOp, RenameOp)) for op in plan)
     if isinstance(result, (pl.DataFrame, pl.Series)):
-        # A polars result carries no labels (yet): its values and order must match.
-        result, expected = result.to_pandas(), expected.reset_index(drop=True)
+        # A polars result returns an index held in polars columns as its leading
+        # columns, and no other: its values and order must match.
+        held = isinstance(result, pl.DataFrame) and result.width > expected.shape[1]
+        result, expected = result.to_pandas(), expected.reset_index(drop=not held)
     if isinstance(expected, pd.Series):
         pd.testing.assert_series_equal(expected, result, check_dtype=False)
     else:

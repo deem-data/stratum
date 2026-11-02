@@ -31,6 +31,7 @@ from stratum.optimizer.physical._source_execs import (
     _POLARS_CSV_TRANSLATORS, _POLARS_PARQUET_TRANSLATORS, _polars_cloud_path,
     _translate_storage_options)
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._frames import as_result, execute, wrap
 from tests._helpers import csv_file, npy_file, parquet_file
 
 
@@ -44,8 +45,8 @@ def run_plan(ops, mode="fit_transform"):
     pool = BufferPool()
     for op in ops:
         inputs = [pool.pin(key) for key in op.inputs]
-        pool.put(op, op.process(mode, inputs))
-    return pool.pin(ops[-1])
+        pool.put(op, wrap(*execute(op, mode, inputs)))
+    return as_result(pool.pin(ops[-1]))
 
 
 class TestSourceImplSelection(unittest.TestCase):

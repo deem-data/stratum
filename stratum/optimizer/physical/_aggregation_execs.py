@@ -22,6 +22,7 @@ from stratum.optimizer.physical._expressions import (
     EvalContext, refuse_unsupported_exprs, to_pandas, to_polars)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
+from stratum.runtime._frames import PolarsIndex, unwrap
 
 
 @physical_impl(of=AggregateOp, backend="pandas")
@@ -114,10 +115,41 @@ class PolarsAggregateOp(AggregateOp, PhysicalOp):
         # Polars has no pandas index labels or unobserved categorical groups.
         if op.observed is False or op.level is not None:
             return False
+        if op.grouped and not op.keys_as_columns and _key_names(op) is None:
+            # The keys are the pandas index, held as polars columns of their names.
+            op._unsupported_reason = "groups by a key that is not a column of its own name"
+            return False
         return refuse_unsupported_exprs(
             op, [*(agg for _, agg in op.aggregations), *op.grouping])
 
+    @classmethod
+    def carries_index(cls, op: AggregateOp) -> bool:
+        # The group keys are pandas' index; a bare reduction's is not modelled.
+        return op.grouped
+
+    @classmethod
+    def index_names(cls, op: AggregateOp, inputs):
+        return _key_names(op) if op.grouped and not op.keys_as_columns else None
+
     def process(self, mode: str, inputs: list):
+        result = self._aggregate(mode, inputs)
+        if self._keys_index():
+            # pandas holds the keys in the index, not among the columns.
+            return result.drop(list(_key_names(self)))
+        return result
+
+    def process_indexed(self, mode: str, inputs: list):
+        result = self._aggregate(mode, [unwrap(value) for value in inputs])
+        if not self._keys_index():
+            return result, None
+        keys = list(_key_names(self))
+        index = PolarsIndex(columns=result.select(keys)) if self._tracks_index else None
+        return result.drop(keys), index
+
+    def _keys_index(self) -> bool:
+        return self.grouped and not self.keys_as_columns
+
+    def _aggregate(self, mode: str, inputs: list):
         # pandas treats floating NaN as missing for grouping and reductions.
         frame = inputs[0].with_columns(pl.col(pl.Float32, pl.Float64).fill_nan(None))
         ctx = EvalContext.of([frame, *inputs[1:]], mode)
@@ -148,3 +180,16 @@ class PolarsAggregateOp(AggregateOp, PhysicalOp):
         if not isinstance(agg.child, AllCols):
             expr = expr.alias(self.entry_name(index))
         return expr
+
+
+def _key_names(op: AggregateOp) -> tuple[str, ...] | None:
+    """The group keys' column names, where each key is a column no entry renames
+    to, so that the output holds it under the name of its pandas index level."""
+    if not all(isinstance(key, Col) and isinstance(key.name, str) for key in op.grouping):
+        return None
+    names = tuple(key.name for key in op.grouping)
+    entries = (set() if any(isinstance(agg.child, AllCols) for _, agg in op.aggregations)
+               else {op.entry_name(i) for i in range(len(op.aggregations))})
+    if len(set(names)) < len(names) or entries & set(names):
+        return None
+    return names

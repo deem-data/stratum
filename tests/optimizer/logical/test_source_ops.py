@@ -8,6 +8,7 @@ from stratum.optimizer.logical._source_ops import (
     InMemoryFrameOp, LoadNumpyOp, ReadCSVOp, ReadParquetOp, make_read_op)
 from stratum.optimizer.logical._ops import CallOp, OperandRef, ValueOp, VariableOp
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._frames import as_result, execute, wrap
 from tests._helpers import csv_file, npy_file, parquet_file
 from .test_dataframe_ops import optimize
 
@@ -63,8 +64,8 @@ class TestMakeReadOp(unittest.TestCase):
             pool = BufferPool()
             for op in ops:
                 inputs = [pool.pin(key) for key in op.inputs]
-                pool.put(op, op.process("fit_transform", inputs))
-            self.assertIsInstance(pool.pin(ops[-1]), pd.DataFrame)
+                pool.put(op, wrap(*execute(op, "fit_transform", inputs)))
+            self.assertIsInstance(as_result(pool.pin(ops[-1])), pd.DataFrame)
 
     def test_with_variable_kwarg(self):
         with csv_file(pd.DataFrame({"col": [1, 2]})) as path:
@@ -136,9 +137,9 @@ class TestDeferredReadRewrites(unittest.TestCase):
         for op in ops:
             inputs = [pool.pin(key) for key in op.inputs]
             value = (env[op.name] if isinstance(op, VariableOp)
-                     else op.process("fit_transform", inputs))
+                     else wrap(*execute(op, "fit_transform", inputs)))
             pool.put(op, value)
-        return pool.pin(ops[-1])
+        return as_result(pool.pin(ops[-1]))
 
     def test_deferred_read_csv_with_literal_path(self):
         with csv_file(self.df) as path:

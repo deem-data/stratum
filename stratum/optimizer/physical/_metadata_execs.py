@@ -1,8 +1,9 @@
 """Physical implementations of the metadata operators.
 
 Each impl translates the op's backend-neutral fields into its library's call.
-polars rows carry no index labels, so the polars impls refuse an index rename
-and new labels, and treat dropping the index as a no-op. The structure reads
+A polars value holds its pandas index beside it, where selection tracks it (see
+``runtime._frames``): the polars impls refuse an index rename and labels taken
+from another value, and treat dropping the index as a no-op. The structure reads
 (``ShapeOp``, ``ColumnNamesOp``) return the same value on both backends and carry
 no frame library, so they put no library constraint on the frame they read.
 """
@@ -17,6 +18,7 @@ from stratum.optimizer.logical._metadata_ops import (
 from stratum.optimizer.logical._split_ops import NOT_KNOWN, known_operand
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
+from stratum.runtime._frames import PolarsIndex, unwrap
 
 
 # --- RenameOp -------------------------------------------------------------------
@@ -103,14 +105,32 @@ class PandasRowLabelsOp(RowLabelsOp, PhysicalOp):
 class PolarsRowLabelsOp(RowLabelsOp, PhysicalOp):
     @classmethod
     def supports(cls, op: RowLabelsOp, ctx) -> bool:
-        if op.keys is not None or op.labels is not None:
+        if op.labels is not None:
             op._unsupported_reason = "polars rows carry no labels to set"
             return False
         return True
 
+    @classmethod
+    def carries_index(cls, op: RowLabelsOp) -> bool:
+        # The key columns are the index, held beside the frame.
+        return True
+
+    @classmethod
+    def index_names(cls, op: RowLabelsOp, inputs):
+        return op.keys
+
     def process(self, mode: str, inputs: list):
-        # polars rows carry no labels to drop, so there is nothing to do.
+        if self.keys is not None:
+            # The keys leave the frame for the index.
+            return inputs[0].drop(list(self.keys))
+        # A polars value with no index held beside it is numbered 0..n-1.
         return inputs[0]
+
+    def process_indexed(self, mode: str, inputs: list):
+        frame = unwrap(inputs[0])
+        if self.keys is None or not self._tracks_index:
+            return self.process(mode, [frame]), None
+        return self.process(mode, [frame]), PolarsIndex(columns=frame.select(list(self.keys)))
 
 
 # --- ShapeOp --------------------------------------------------------------------

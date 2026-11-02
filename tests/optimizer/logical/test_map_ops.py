@@ -26,6 +26,7 @@ from stratum.optimizer.logical._selection_ops import SelectionOp
 from stratum.optimizer.logical._ops import (
     BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType,
     UnaryOp)
+from stratum.runtime._frames import as_result, execute, wrap
 from .test_dataframe_ops import (
     _inp, optimize, run_op, force_polars, make_map_op)
 
@@ -1091,8 +1092,8 @@ class TestIndexAttribute(unittest.TestCase):
         from stratum.runtime._buffer_pool import BufferPool
         pool = BufferPool()
         for op in ops:
-            pool.put(op, op.process("fit_transform", [pool.pin(inp) for inp in op.inputs]))
-        pd.testing.assert_index_equal(pool.pin(ops[-1]), frame.index)
+            pool.put(op, wrap(*execute(op, "fit_transform", [pool.pin(inp) for inp in op.inputs])))
+        pd.testing.assert_index_equal(as_result(pool.pin(ops[-1])), frame.index)
 
 
 class TestCallMapOp(unittest.TestCase):
@@ -1246,8 +1247,8 @@ def _run_plan(dag, env, polars):
         ops = optimize(dag, env=env)
     pool = BufferPool()
     for op in ops:
-        pool.put(op, op.process("fit_transform", [pool.pin(inp) for inp in op.inputs]))
-    result = pool.pin(ops[-1])
+        pool.put(op, wrap(*execute(op, "fit_transform", [pool.pin(inp) for inp in op.inputs])))
+    result = as_result(pool.pin(ops[-1]))
     # Every op here has a native polars impl, so a pandas result would mean a
     # fallback hid the polars kernel.
     assert isinstance(result, (pl.Series, pl.DataFrame)) == polars

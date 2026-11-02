@@ -24,8 +24,8 @@ from stratum.optimizer.logical._map_ops import (
     DatetimeFieldOp, SeriesMapOp, StringMethodOp)
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.physical._expressions import (
-    EvalContext, pandas_column_method, pandas_to_datetime, refuse_unsupported_exprs,
-    to_pandas, to_polars)
+    EvalContext, pandas_column_method, pandas_to_datetime,
+    refuse_unsupported_exprs, to_pandas, to_polars)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._polars_translate import (
     polars_column_method, polars_dt_attribute, polars_dt_attribute_unsupported,

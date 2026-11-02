@@ -183,6 +183,7 @@ def _done_conversion(conversion: ConversionOp, source: IRNode,
     kept it for the folds."""
     return next((out for out in source.outputs
                  if isinstance(out, ConversionOp) and out.target is conversion.target
+                 and (out._tracks_index or not conversion._tracks_index)
                  and out in live), None)
 
 
@@ -230,7 +231,8 @@ class FoldPlan:
 
 def _decisions(ops: list[IRNode]) -> list[tuple]:
     at = {op: i for i, op in enumerate(ops)}
-    return [(type(op), getattr(op, "_frame_lib", None), op.origin, op.stage, op.mode,
+    return [(type(op), getattr(op, "_frame_lib", None), op._tracks_index, op.origin,
+             op.stage, op.mode,
              tuple(("fold", at[in_]) if in_ in at else ("before", id(in_))
                    for in_ in op.inputs))
             for op in ops]

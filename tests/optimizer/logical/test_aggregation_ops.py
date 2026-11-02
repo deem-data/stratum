@@ -20,6 +20,7 @@ from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._source_ops import InMemoryFrameOp
 from stratum.optimizer.logical._ops import MethodCallOp, Op, OperandRef, OutputType
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._frames import as_result, execute, wrap
 from .test_dataframe_ops import (
     force_polars, optimize, run_op)
 
@@ -408,8 +409,8 @@ def _run_plan(ops):
     pool = BufferPool()
     for op in ops:
         inputs = [pool.pin(key) for key in op.inputs]
-        pool.put(op, op.process("fit_transform", inputs))
-    return pool.pin(ops[-1])
+        pool.put(op, wrap(*execute(op, "fit_transform", inputs)))
+    return as_result(pool.pin(ops[-1]))
 
 
 class TestAggregateRewrites(unittest.TestCase):

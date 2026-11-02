@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from numbers import Integral
 
+import polars as pl
+
 from stratum.optimizer.logical._base import OutputType, _resolve_kwargs, _resolve_operand
 from stratum.optimizer.logical._selection_ops import (
     DropDuplicatesSelectionOp,
@@ -25,9 +27,12 @@ from stratum.optimizer.logical._selection_ops import (
     SliceSelectionOp,
 )
 from stratum.optimizer.physical._expressions import (
-    EvalContext, refuse_unsupported_exprs, to_pandas, to_pandas_query, to_polars)
+    EvalContext, refuse_unsupported_exprs, to_pandas, to_pandas_query,
+    to_polars)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
+from stratum.runtime._frames import (polars_index_of, row_numbers, take_index, unused_name,
+                                     unwrap, with_row_positions)
 
 
 # --- MaskSelectionOp ------------------------------------------------------------
@@ -90,8 +95,41 @@ class PolarsMaskSelectionOp(MaskSelectionOp, PhysicalOp):
         # pandas, which this impl does not accept (#226).
         return op.predicate is None or refuse_unsupported_exprs(op, [op.predicate])
 
+    @classmethod
+    def carries_index(cls, op: MaskSelectionOp) -> bool:
+        return True
+
     def process(self, mode: str, inputs: list):
-        return inputs[0].filter(to_polars(self.predicate, EvalContext.of(inputs, mode)))
+        predicate = to_polars(self.predicate, EvalContext.of(inputs, mode))
+        if isinstance(inputs[0], pl.DataFrame):
+            return inputs[0].filter(predicate)
+        return inputs[0].filter(_mask(inputs[0], predicate))
+
+    def process_indexed(self, mode: str, inputs: list):
+        plain = [unwrap(value) for value in inputs]
+        if not self._tracks_index:
+            return self.process(mode, plain), None
+        mask = _mask(plain[0], to_polars(self.predicate, EvalContext.of(plain, mode)))
+        return _filter_indexed(self, inputs, mask)
+
+
+def _filter_indexed(op, inputs: list, mask: pl.Series):
+    """``process_indexed`` of a selection that keeps the rows ``mask`` holds."""
+    data = unwrap(inputs[0])
+    if not op._tracks_index:
+        return data.filter(mask), None
+    rows = row_numbers(len(data)).filter(mask)
+    return data.filter(mask), take_index(polars_index_of(inputs[0]), rows)
+
+
+def _mask(frame, predicate) -> pl.Series:
+    """``predicate`` over ``frame``'s rows, as ``filter`` reads it: a missing
+    value keeps no row. A series' expression reads it as a one-column frame."""
+    if not isinstance(predicate, pl.Series):
+        table = frame.to_frame() if isinstance(frame, pl.Series) else frame
+        name = unused_name(table.columns)
+        predicate = table.with_columns(predicate.alias(name)).get_column(name)
+    return predicate.fill_null(False)
 
 
 # --- SliceSelectionOp -----------------------------------------------------------
@@ -110,8 +148,19 @@ class PandasSliceSelectionOp(SliceSelectionOp, PhysicalOp):
 
 @physical_impl(of=SliceSelectionOp, backend="polars")
 class PolarsSliceSelectionOp(SliceSelectionOp, PhysicalOp):
+    @classmethod
+    def carries_index(cls, op: SliceSelectionOp) -> bool:
+        return True
+
     def process(self, mode: str, inputs: list):
         return _slice(self, inputs)
+
+    def process_indexed(self, mode: str, inputs: list):
+        plain = [unwrap(value) for value in inputs]
+        if not self._tracks_index:
+            return _slice(self, plain), None
+        rows = _slice(self, [row_numbers(len(plain[0])), *plain[1:]])
+        return _slice(self, plain), take_index(polars_index_of(inputs[0]), rows)
 
 
 # --- SampleSelectionOp ----------------------------------------------------------
@@ -178,9 +227,25 @@ class PolarsDropDuplicatesSelectionOp(DropDuplicatesSelectionOp, PhysicalOp):
     def supports(cls, op: DropDuplicatesSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.FRAME
 
+    @classmethod
+    def carries_index(cls, op: DropDuplicatesSelectionOp) -> bool:
+        return True
+
     def process(self, mode: str, inputs: list):
         subset = _resolve_operand(self.subset, inputs)
         return inputs[0].unique(subset=subset, keep=self.keep, maintain_order=True)
+
+    def process_indexed(self, mode: str, inputs: list):
+        plain = [unwrap(value) for value in inputs]
+        if not self._tracks_index:
+            return self.process(mode, plain), None
+        frame = plain[0]
+        # The rows compare on the frame's own columns, not their positions.
+        subset = _resolve_operand(self.subset, plain)
+        subset = frame.columns if subset is None else subset
+        result, rows = with_row_positions(frame, lambda numbered, _: numbered.unique(
+            subset=subset, keep=self.keep, maintain_order=True))
+        return result, take_index(polars_index_of(inputs[0]), rows)
 
 
 @physical_impl(of=DropDuplicatesSelectionOp, backend="polars")
@@ -191,9 +256,18 @@ class PolarsSeriesDropDuplicatesSelectionOp(DropDuplicatesSelectionOp, PhysicalO
     def supports(cls, op: DropDuplicatesSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.SERIES
 
+    @classmethod
+    def carries_index(cls, op: DropDuplicatesSelectionOp) -> bool:
+        return True
+
     def process(self, mode: str, inputs: list):
-        series = inputs[0]
-        return series.filter(getattr(series, self._KEEP_MASK[self.keep])())
+        return inputs[0].filter(self._mask(inputs[0]))
+
+    def process_indexed(self, mode: str, inputs: list):
+        return _filter_indexed(self, inputs, self._mask(unwrap(inputs[0])))
+
+    def _mask(self, series):
+        return getattr(series, self._KEEP_MASK[self.keep])()
 
 
 # --- DropMissingSelectionOp -----------------------------------------------------
@@ -214,7 +288,6 @@ def _present_count_predicate(subset, min_present):
 
     NaN counts as missing in float columns, as it does in pandas.
     """
-    import polars as pl
     from polars import selectors as cs
 
     selected = cs.all() if subset is None else cs.by_name(subset)
@@ -231,10 +304,21 @@ class PolarsDropMissingSelectionOp(DropMissingSelectionOp, PhysicalOp):
     def supports(cls, op: DropMissingSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.FRAME
 
+    @classmethod
+    def carries_index(cls, op: DropMissingSelectionOp) -> bool:
+        return True
+
     def process(self, mode: str, inputs: list):
+        return inputs[0].filter(self._predicate(inputs))
+
+    def process_indexed(self, mode: str, inputs: list):
+        plain = [unwrap(value) for value in inputs]
+        return _filter_indexed(self, inputs, _mask(plain[0], self._predicate(plain)))
+
+    def _predicate(self, inputs):
         subset, min_present = (_resolve_operand(v, inputs)
                                for v in (self.subset, self.min_present))
-        return inputs[0].filter(_present_count_predicate(subset, min_present))
+        return _present_count_predicate(subset, min_present)
 
 
 @physical_impl(of=DropMissingSelectionOp, backend="polars")
@@ -243,8 +327,19 @@ class PolarsSeriesDropMissingSelectionOp(DropMissingSelectionOp, PhysicalOp):
     def supports(cls, op: DropMissingSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.SERIES
 
+    @classmethod
+    def carries_index(cls, op: DropMissingSelectionOp) -> bool:
+        return True
+
     def process(self, mode: str, inputs: list):
         return inputs[0].drop_nulls().drop_nans()
+
+    def process_indexed(self, mode: str, inputs: list):
+        series = unwrap(inputs[0])
+        missing = series.is_null()
+        if series.dtype.is_float():
+            missing = missing | series.is_nan()
+        return _filter_indexed(self, inputs, ~missing.fill_null(True))
 
 
 # --- DropLabelsSelectionOp ------------------------------------------------------

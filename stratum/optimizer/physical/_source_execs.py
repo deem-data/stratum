@@ -22,6 +22,7 @@ from stratum.optimizer._op_utils import _iter_operand_refs
 from stratum.optimizer.physical._conversion import to_pandas
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
+from stratum.runtime._frames import PolarsIndex
 
 
 def rechunk_pl_frame(df, rows_per_chunk=128_000):
@@ -496,6 +497,16 @@ class PolarsInMemoryFrame(InMemoryFrameOp, PhysicalOp):
         # Fold the rechunk decision into instance state at plan time.
         self.rechunk = ctx.rechunk
 
+    @classmethod
+    def carries_index(cls, op: InMemoryFrameOp) -> bool:
+        # A pandas frame's index, held beside its polars copy.
+        return True
+
     def process(self, mode: str, inputs: list):
         out = pl.DataFrame(self.data)
         return rechunk_pl_frame(out) if getattr(self, "rechunk", True) else out
+
+    def process_indexed(self, mode: str, inputs: list):
+        index = getattr(self.data, "index", None)
+        held = PolarsIndex.of(index) if self._tracks_index and index is not None else None
+        return self.process(mode, inputs), held

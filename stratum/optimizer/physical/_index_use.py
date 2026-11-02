@@ -1,11 +1,12 @@
 """Index use: whether the pandas index on a plan edge matters to the result.
 
-A polars frame has no index, so converting one to pandas numbers its rows
-``0..n-1``. That is exact where the pandas plan numbers them so too
-(:func:`~stratum.optimizer.physical._conversion.has_default_index`), and also
-where nothing downstream uses the index: no op reads it or pairs rows by it, and
-it does not reach the plan's result. Implementation selection converts on such
-an edge instead of running its producer on pandas.
+A polars value holds the pandas index beside it only where implementation
+selection tracks it (see ``runtime._frames``); without one, converting it to
+pandas numbers its rows ``0..n-1``. That is exact where the pandas plan numbers
+them so too (:func:`~stratum.optimizer.physical._conversion.has_default_index`),
+and also where nothing downstream uses the index: no op reads it or pairs rows by
+it, and it does not reach the plan's result. Selection tracks the index where it
+is used, and runs an op on pandas where its polars impl cannot give it.
 
 An op uses the index of its input ``k`` when it
 
@@ -45,15 +46,16 @@ def carries_index(op: IRNode) -> bool:
 class IndexUse:
     """Index use over a plan's ops, given in topological order.
 
-    The plan's result is shown to the user, so its index is used. An op outside
-    the plan counts as using every index it is given.
+    The plan's result is shown to the user, so its index is used, unless
+    ``result_used`` is False: a polars result is returned without one. An op
+    outside the plan counts as using every index it is given.
     """
 
-    def __init__(self, ops: list[IRNode]):
+    def __init__(self, ops: list[IRNode], result_used: bool = True):
         self._output_used: dict[int, bool] = {}
         for op in reversed(ops):
             self._output_used[id(op)] = carries_index(op) and (
-                not op.outputs or any(
+                result_used if not op.outputs else any(
                     self.uses_input(consumer, k) for consumer in op.outputs
                     for k, input_ in enumerate(consumer.inputs) if input_ is op))
 
