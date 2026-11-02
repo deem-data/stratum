@@ -42,6 +42,9 @@ __all__ = [
 
 # Delegate everything else to real skrub lazily
 def __getattr__(name: str) -> Any:
+    if name == "StratumClient":  # imported on use: it needs the `server` extra
+        from ._client import StratumClient
+        return StratumClient
     return getattr(_skrub, name)
 
 def __dir__() -> List[str]:

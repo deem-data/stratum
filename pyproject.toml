@@ -46,6 +46,7 @@ test = [
     "xgboost>=3.1.1",
     "catboost>=1.2.10",
     "pytest-xdist>=3.8.0",
+    "stratum-ai[server]",
 ]
 # torch is only needed by tests/application/test_ttt_task.py, and which build of
 # it you want depends on the machine, so it rides in its own extra rather than
@@ -66,6 +67,12 @@ hardware = [
 ]
 dev = [
     "ipykernel>=7.3.0",
+]
+# `python -m stratum serve` and the client (`stratum.StratumClient`).
+server = [
+    "fastapi>=0.162.0",
+    "httpx>=0.28.1",
+    "uvicorn>=0.54.0",
 ]
 
 [project.urls]
