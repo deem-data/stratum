@@ -107,6 +107,7 @@ jobs:
         env:
           TEST_SUITE: ${{ matrix.suite }}
           TEST_PATH: ${{ matrix.path }}
+          TRAJECTORY_SELECTOR: ${{ matrix.selector }}
           COLLECT_COVERAGE: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' }}
           COVERAGE_FILE: .coverage.${{ matrix.suite }}
         run: |
@@ -118,6 +119,8 @@ jobs:
           args=(-v "$TEST_PATH")
           if [ "$TEST_SUITE" == "regular" ]; then
             args+=(--ignore=tests/application/trajectories)
+          else
+            args+=(--trajectory-selector="$TRAJECTORY_SELECTOR")
           fi
           if [ "$COLLECT_COVERAGE" == "true" ]; then
             args+=(--cov --cov-config=pyproject.toml --cov-branch --cov-report=term-missing)

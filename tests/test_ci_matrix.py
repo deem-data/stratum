@@ -11,7 +11,7 @@ CI = runpy.run_path(str(ROOT / ".github/scripts/python_test_matrix.py"))
 TRAJECTORIES = CI["TRAJECTORIES"]
 
 
-def test_new_trajectory_gets_one_job_and_a_coverage_input(tmp_path):
+def test_new_trajectory_gets_a_job_and_coverage_input_per_selector(tmp_path):
     (tmp_path / TRAJECTORIES).mkdir(parents=True)
     before = CI["build_matrix"](tmp_path)
     suite = tmp_path / TRAJECTORIES / "new-task"
@@ -21,14 +21,18 @@ def test_new_trajectory_gets_one_job_and_a_coverage_input(tmp_path):
     (tmp_path / TRAJECTORIES / "__pycache__").mkdir()
 
     after = CI["build_matrix"](tmp_path)
-    assert after["include"][:-1] == before["include"]
-    assert after["include"][-1] == {
-        "suite": "trajectory-new-task",
+    assert after["include"][:-2] == before["include"]
+    assert after["include"][-2:] == [{
+        "suite": f"trajectory-new-task-{selector}",
         "os": "ubuntu-latest",
         "python-version": "3.12",
         "path": (TRAJECTORIES / "new-task").as_posix(),
-    }
-    assert CI["coverage_files"](after) == [".coverage.regular", ".coverage.trajectory-new-task"]
+        "selector": selector,
+    } for selector in ("default", "greedy")]
+    assert CI["coverage_files"](after) == [
+        ".coverage.regular", ".coverage.trajectory-new-task-default",
+        ".coverage.trajectory-new-task-greedy",
+    ]
     assert len(before["include"]) == 6
 
 
@@ -46,7 +50,8 @@ def test_empty_trajectory_fails_discovery(tmp_path):
         CI["build_matrix"](tmp_path)
 
 
-def test_repository_test_files_belong_to_exactly_one_suite():
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+def test_repository_test_files_belong_to_exactly_one_suite_per_selector(selector):
     def test_files(path):
         return set(path.rglob("test_*.py")) | set(path.rglob("*_test.py"))
 
@@ -54,6 +59,8 @@ def test_repository_test_files_belong_to_exactly_one_suite():
     covered = all_tests - test_files(ROOT / TRAJECTORIES)
     for entry in CI["build_matrix"](ROOT)["include"]:
         if entry["suite"] == "regular":
+            continue
+        if entry["selector"] != selector:
             continue
         suite_tests = test_files(ROOT / entry["path"])
         assert suite_tests

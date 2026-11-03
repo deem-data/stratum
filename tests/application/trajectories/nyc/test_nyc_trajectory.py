@@ -9,13 +9,18 @@ scores it: a grid search on stratum's scheduler with the task's scorer.
 A pipeline mostly reuses an earlier one's features and model and changes one thing,
 so on a shared cache it should read only what no earlier pipeline read with the
 same columns and window, and refit only what its change touches.
+
+Both implementation selectors replay with independent caches. Use
+``--trajectory-selector=default`` or ``--trajectory-selector=greedy`` to run one.
 """
+from functools import wraps
 import importlib.util
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pyarrow.parquet
 import pytest
 import skrub
@@ -197,11 +202,13 @@ class Replay:
     def __init__(self, lake: Path, monkeypatch):
         self.reads: list[str] = []
         self.taken: list[list[str]] = []
-        read_table = pyarrow.parquet.read_table
 
-        def reading(source, *args, **kwargs):
-            self.reads.append(Path(source).relative_to(lake).parts[0])
-            return read_table(source, *args, **kwargs)
+        def track_reads(reader):
+            @wraps(reader)
+            def reading(source, *args, **kwargs):
+                self.reads.append(Path(source).relative_to(lake).parts[0])
+                return reader(source, *args, **kwargs)
+            return reading
 
         run_fold = SequentialScheduler.run_fold
 
@@ -211,7 +218,9 @@ class Replay:
                                      if op.cache_hit is not None))
             return out
 
-        monkeypatch.setattr(pyarrow.parquet, "read_table", reading)
+        monkeypatch.setattr(pyarrow.parquet, "read_table", track_reads(pyarrow.parquet.read_table))
+        monkeypatch.setattr(pl, "read_parquet", track_reads(pl.read_parquet))
+        monkeypatch.setattr(pl, "scan_parquet", track_reads(pl.scan_parquet))
         monkeypatch.setattr(SequentialScheduler, "run_fold", recording)
         monkeypatch.syspath_prepend(str(TRAJECTORY))
         monkeypatch.delitem(sys.modules, "common", raising=False)
@@ -234,7 +243,7 @@ def lake(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def trajectory(lake, tmp_path_factory):
+def trajectory(lake, tmp_path_factory, trajectory_selector):
     """The trajectory replayed in order on one reuse cache: per pipeline, its
     results, the tables it read and what its folds took from the cache, or the
     reason it could not run here."""

@@ -33,12 +33,14 @@ def build_matrix(root: Path) -> dict:
             raise ValueError(f"Invalid trajectory name: {path.name}")
         if not any(path.rglob("test_*.py")) and not any(path.rglob("*_test.py")):
             raise ValueError(f"Trajectory has no test modules: {path}")
-        entries.append({
-            "os": "ubuntu-latest",
-            "python-version": "3.12",
-            "suite": f"trajectory-{path.name}",
-            "path": path.relative_to(root).as_posix(),
-        })
+        for selector in ("default", "greedy"):
+            entries.append({
+                "os": "ubuntu-latest",
+                "python-version": "3.12",
+                "suite": f"trajectory-{path.name}-{selector}",
+                "path": path.relative_to(root).as_posix(),
+                "selector": selector,
+            })
     return {"include": entries}
 
 
