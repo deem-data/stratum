@@ -678,6 +678,46 @@ def test_mask_pipeline_evaluates(df, polars):
         result = st._api.evaluate(pred)
         assert all(result["x"] > 2)
 
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+@pytest.mark.parametrize("grouping", ["selected_series", "series", "frame", "selected_frame"])
+def test_group_sizes_filter_rows(selector, grouping):
+    # The rare-class filter used by the forest-cover trajectory. A GroupBy
+    # transform remains a pandas call even when the surrounding plan is polars.
+    frame = pd.DataFrame({"label": [1, 2, 1, 3, 1, 2], "value": range(6)},
+                         index=[8, 2, 7, 4, 9, 1])
+
+    def filtered(data):
+        if grouping == "series":
+            grouped = data["label"].groupby(data["label"])
+        else:
+            grouped = data.groupby("label")
+            if grouping == "selected_series":
+                grouped = grouped["value"]
+            elif grouping == "selected_frame":
+                grouped = grouped[["value"]]
+        return data[grouped.transform(func="size") >= 3]
+
+    with st.config(implementation_selector=selector, reuse_cache=False):
+        result = st._api.evaluate(filtered(st.as_data_op(frame)))
+    if isinstance(result, pl.DataFrame):
+        result = result.to_pandas()
+    pd.testing.assert_frame_equal(result.reset_index(drop=True),
+                                  filtered(frame).reset_index(drop=True))
+
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+def test_grouped_frame_transform_keeps_columns(selector):
+    # Unlike size, sum returns one transformed column per selected column.
+    frame = pd.DataFrame({"label": [1, 2, 1], "a": [2, 4, 8], "b": [3, 5, 7]})
+    data = st.as_data_op(frame)
+    transformed = data.groupby("label")[["a", "b"]].transform("sum")
+    with st.config(implementation_selector=selector, reuse_cache=False):
+        result = st._api.evaluate(transformed[transformed["a"] >= 10])
+    if isinstance(result, pl.DataFrame):
+        result = result.to_pandas()
+    expected = frame.groupby("label")[["a", "b"]].transform("sum")
+    pd.testing.assert_frame_equal(result.reset_index(drop=True),
+                                  expected[expected["a"] >= 10].reset_index(drop=True))
+
 def test_string_filter_pipeline_evaluates(df, polars):
     data = st.as_data_op(df)
     data = data.assign(s=["a1", "bb", "c2", "", "d1"])

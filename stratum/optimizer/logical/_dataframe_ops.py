@@ -22,7 +22,7 @@ from stratum.optimizer.logical._selection_ops import (
     make_selection_op, is_mask_selection, make_mask_selection_op)
 from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
-    _is_aggregation, _is_value_counts, _extract_grouping, _extract_aggregations,
+    _is_aggregation, _is_value_counts, _reads_a_groupby, _extract_grouping, _extract_aggregations,
     make_aggregate_op, make_value_counts_ops)
 from stratum.optimizer.logical._sort_ops import SortOp, make_sort_op
 from stratum.optimizer.logical._projection_ops import (
@@ -174,6 +174,16 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
     Each listed method has a stable return kind for both Series and DataFrame.
     """
     source = op.inputs[0].output_type
+    if op.method_name == "transform" and _reads_a_groupby(op):
+        # GroupBy.transform broadcasts back to the original rows. Keep the
+        # call opaque, but expose its container kind so a comparison can feed
+        # a row filter (not polars' boolean column selection).
+        receiver = op.inputs[0]
+        if _is_groupby_op(receiver):
+            source = receiver.inputs[0].output_type
+        func = op.args[0] if op.args else (op.kwargs or {}).get("func")
+        # size produces one count per row even for a DataFrameGroupBy.
+        return OutputType.SERIES if isinstance(func, str) and func == "size" else source
     keeps_kind, _ = MethodCallOp.OPAQUE_METHODS.get(op.method_name, (False, False))
     if keeps_kind:
         return source
