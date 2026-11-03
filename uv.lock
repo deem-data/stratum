@@ -14,26 +14,26 @@ resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'linux' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'linux' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'linux' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'linux' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'linux' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'linux' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-stratum-ai-cpu' and extra != 'extra-10-stratum-ai-cu126'",
 ]
 conflicts = [[
@@ -2422,9 +2422,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-benchmark = [
-    { name = "psutil" },
-]
 cpu = [
     { name = "torch", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'linux' and extra == 'extra-10-stratum-ai-cpu') or (extra == 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126')" },
     { name = "torch", version = "2.14.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-10-stratum-ai-cpu') or (extra == 'extra-10-stratum-ai-cpu' and extra == 'extra-10-stratum-ai-cu126')" },
@@ -2479,7 +2476,6 @@ requires-dist = [
     { name = "pandas", specifier = "==3.0.2" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "polars" },
-    { name = "psutil", marker = "extra == 'benchmark'", specifier = ">=7.2" },
     { name = "psutil", marker = "extra == 'hardware'", specifier = ">=7.2" },
     { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pygments", specifier = ">=2.20.0" },
@@ -2499,7 +2495,7 @@ requires-dist = [
     { name = "xgboost", marker = "python_full_version >= '3.12' and extra == 'test'", specifier = ">=3.4.1" },
     { name = "xgboost", marker = "python_full_version < '3.12' and extra == 'test'", specifier = ">=3.1.1" },
 ]
-provides-extras = ["test", "cpu", "cu126", "benchmark", "hardware", "dev", "server"]
+provides-extras = ["test", "cpu", "cu126", "hardware", "dev", "server"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "maturin", specifier = ">=1.10.1" }]
@@ -2592,10 +2588,10 @@ resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32'",
 ]
 dependencies = [

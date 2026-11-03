@@ -97,6 +97,8 @@ benchmarks-staging
 *.csv
 *.pdf
 *.ipynb
+!examples/**/*.ipynb
+examples/server/nyc_lake_*/
 *.npy
 *.png
 *.svg

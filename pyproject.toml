@@ -62,9 +62,8 @@ cpu = [
 cu126 = [
     "torch>=2.13.0",
 ]
-benchmark = [
-    "psutil>=7.2"
-]
+# The hardware profiler's sampler (DEV_FLAGS.hardware_utilization), which the
+# benchmarks use too.
 hardware = [
     "psutil>=7.2"
 ]
