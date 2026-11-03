@@ -44,7 +44,8 @@ def main(argv=None) -> int:
     serve.add_argument("--admission", choices=REUSE_CACHE_ADMISSION_POLICIES)
     serve.add_argument("--diagnostics-dir",
                        help="record the session (jobs, cache entries and size over time, "
-                            "logs) under DIR/server/ for the inspector")
+                            "logs) under DIR/server/ and the jobs' runs under DIR, "
+                            "for the inspector")
     serve.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"],
                        help="level of the session log (default: %(default)s)")
 

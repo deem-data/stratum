@@ -231,7 +231,8 @@ class StratumClient:
         predictions too.
 
         ``config`` holds stratum settings for the call (as for ``set_config``); the
-        server's own apply otherwise, never this process's. Relative paths in the DAG
+        server's own apply otherwise, never this process's. The server's reuse cache
+        is its own, but ``{"reuse_cache": False}`` runs the call without it. Relative paths in the DAG
         are read from ``cwd``, by default this process's working directory. Its output
         is written to ``stdout`` / ``stderr`` as it arrives.
         """

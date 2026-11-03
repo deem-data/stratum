@@ -289,16 +289,14 @@ def test_a_relative_cache_directory_is_the_servers(tmp_path, job_dir):
     assert not (job_dir / "cache").exists()
 
 
-def test_a_server_records_its_session(tmp_path, job_dir):
+def test_a_server_records_its_session(tmp_path, job_dir, sales_csv, pricing):
     server_dir, cache_dir, runs = tmp_path / "server", tmp_path / "cache", tmp_path / "runs"
-    # The job profiles itself, as a benchmark script would.
-    write(job_dir / "job.py", "import stratum as st\n"
-          f"with st.dev_config(diagnostics_dir={str(runs)!r}):\n"
-          + textwrap.indent(JOB, "    "))
     proc = start_server(server_dir, cache_dir, "--diagnostics-dir", str(runs))
     try:
         run(server_dir, "1.0")
         run(server_dir, "1.0")
+        with StratumClient(server_dir=server_dir) as client:
+            client.evaluate(sales_dag(sales_csv, pricing.net))
     finally:
         out = stop_server(server_dir, proc)
     [path] = (runs / "server").glob("*.json")
@@ -306,14 +304,16 @@ def test_a_server_records_its_session(tmp_path, job_dir):
     assert f"recording session {path}" in out
     assert session["status"] == "stopped" and session["schema_version"] == 1
 
-    first, second = session["jobs"]
-    assert first["exit_code"] == second["exit_code"] == 0
+    first, second, call = session["jobs"]
+    assert first["exit_code"] == second["exit_code"] == call["exit_code"] == 0
+    assert call["script"] == "<evaluate>"
     assert first["stats"]["puts"] > 0 and first["stats"]["planned_hits"] == 0
     assert second["stats"]["planned_hits"] > 0 and second["stats"]["puts"] == 0
-    assert first["added_entries"] == len(session["entries"]) > 0
-    assert {e["job_id"] for e in session["entries"]} == {first["job_id"]}
+    assert first["added_entries"] > 0 and second["added_entries"] == 0
+    assert sum(job["added_entries"] for job in session["jobs"]) == len(session["entries"])
+    assert {e["job_id"] for e in session["entries"]} == {first["job_id"], call["job_id"]}
     assert all(e["label"] for e in session["entries"])
-    for job in (first, second):
+    for job in (first, second, call):  # the server exports every job's runs
         [run_id] = job["run_ids"]
         artifact = json.loads((runs / f"{run_id}.json").read_text())
         assert artifact["job_id"] == job["job_id"]
@@ -322,7 +322,7 @@ def test_a_server_records_its_session(tmp_path, job_dir):
                 (runs / "server" / session["timeline"]).read_text().splitlines()]
     events = [sample["event"] for sample in timeline]
     assert events[0] == "start" and events[-1] == "stop"
-    assert events.count("job_start") == events.count("job_end") == 2
+    assert events.count("job_start") == events.count("job_end") == 3
     assert max(sample["memory_usage"] for sample in timeline) > 0
 
     log = (runs / "server" / session["log"]).read_text()
@@ -410,6 +410,13 @@ def test_calls_run_dags_built_by_the_client(tmp_path, job_dir, sales_csv, pricin
             assert len(predictions) > 0
             assert client.stats()["stats"]["planned_hits"] > 0, "the second call reads the first's work"
 
+            # Without the cache: nothing read, nothing added.
+            before = client.stats()
+            uncached = client.grid_search(dag, cv=3, scoring="r2", config={"reuse_cache": False})
+            polars.testing.assert_frame_equal(uncached.sort("id"), local)
+            after = client.stats()
+            assert after.pop("jobs") == before.pop("jobs") + 1 and after == before
+
             # A query: no X and y, so evaluate returns its table.
             pd.testing.assert_frame_equal(client.evaluate(q1), evaluate(q1))
 
@@ -418,8 +425,8 @@ def test_calls_run_dags_built_by_the_client(tmp_path, job_dir, sales_csv, pricin
                        "runtime": {"python": "2.7"}}
             with pytest.raises(ServerError, match="409.*python 2.7"):
                 client._request("POST", "/v1/calls", json=payload)
-            with pytest.raises(ServerError, match="400.*reuse_cache"):
-                client.evaluate(q1, config={"reuse_cache": False})
+            with pytest.raises(ServerError, match="400.*reuse_cache_dir"):
+                client.evaluate(q1, config={"reuse_cache_dir": str(tmp_path)})
             with skrub.config_context(eager_data_ops=False):
                 failing = st.var("t", pd.DataFrame({"v": [1]})).skb.apply_func(
                     lambda df: df["missing"])

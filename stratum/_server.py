@@ -46,8 +46,8 @@ random one. The server writes its URL and token under ``server_dir``, readable o
 by its user, which is how a local client finds it.
 
 With a ``diagnostics_dir``, the server also records its session (jobs, the cache's
-entries and size over time, logs and job output) for the inspector; see
-:mod:`stratum._server_session`.
+entries and size over time, logs and job output) for the inspector, and exports the
+runs of every job there; see :mod:`stratum._server_session`.
 """
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ import stratum
 from stratum._api import evaluate, grid_search
 from stratum._client import (DEFAULT_SERVER_DIR, SERVER_INFO, StratumClient, is_library_module,
                              read_server_info, runtime)
-from stratum._config import DEV_FLAGS, FLAGS, set_config
+from stratum._config import DEV_FLAGS, FLAGS, dev_config, set_config
 from stratum._profiler._diagnostics import job_context
 from stratum._server_session import SessionRecorder
 from stratum.runtime._reuse_cache import active_reuse_cache
@@ -195,9 +195,11 @@ def _grid_search(dag, return_predictions=False, **kwargs):
 #: What a call may run, by the name the client gives.
 CALLS = {"grid_search": _grid_search, "evaluate": evaluate}
 
-#: The settings a call may change for itself: the server owns its reuse cache.
+#: The settings a call may change for itself. The server owns its reuse cache (its
+#: directory, budgets and policies); a call may only run without it, with
+#: ``reuse_cache=False``: it then reads nothing from the cache and adds nothing.
 CALL_SETTINGS = frozenset(name for name in inspect.signature(set_config).parameters
-                          if not name.startswith("reuse_cache"))
+                          if not name.startswith("reuse_cache_"))
 
 
 def run_call(function: str, payload: bytes, config: dict | None = None,
@@ -548,7 +550,10 @@ class StratumServer:
                     code = self._execute(job, script, cwd, out, err)
                 else:
                     job_id = recorder.job_started(job.number, request.label, request.argv, cwd)
-                    with job_context(job_id) as context:
+                    # Its runs are exported beside the session (a script may still
+                    # choose another directory).
+                    with job_context(job_id) as context, \
+                            dev_config(diagnostics_dir=str(recorder.directory.parent)):
                         code = self._execute(job, script, cwd, out, err)
         except Exception:  # noqa: BLE001 -- the server outlives a job it could not start
             traceback.print_exc(file=err)
