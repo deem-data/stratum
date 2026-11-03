@@ -30,7 +30,8 @@ jobs:
     name: Discover Python test suites
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
+      linux-matrix: ${{ steps.matrix.outputs.linux-matrix }}
+      platform-matrix: ${{ steps.matrix.outputs.platform-matrix }}
       coverage-files: ${{ steps.matrix.outputs.coverage-files }}
     steps:
       - name: Checkout repository
@@ -40,108 +41,106 @@ jobs:
         id: matrix
         run: python3 .github/scripts/python_test_matrix.py
 
-  python-test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}${{ matrix.suite != 'regular' && format(' / {0}', matrix.suite) || '' }}
-    needs: discover-tests
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.discover-tests.outputs.matrix) }}
-
+  build-python-extension-linux:
+    name: Build shared Linux Python extension
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install OS specific dependencies
-        if: matrix.os == 'macos-26'
-        # Skip `brew update` and dependent upgrades: they pull formula versions
-        # newer than the runner image ships, which then build from source.
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: 1
-          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
-        run: brew install libomp
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
 
-      - name: Cache Cargo build
-        uses: actions/cache@v4
+      - name: Install locked build tools only
+        run: uv sync --locked --only-group dev
+
+      - name: Compute native build cache key
+        id: native-key
+        run: echo "key=$(uv run --no-sync python .github/scripts/python_native_cache.py key)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore compiled native extension
+        id: native-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            _rust/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('_rust/Cargo.lock') }}
+          path: .cache/python-native
+          # No fallback keys: only identical native build inputs may skip compilation.
+          key: ${{ steps.native-key.outputs.key }}
 
-      - name: Create virtual environment with uv
-        run: uv venv
+      - name: Cache Cargo dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: _rust -> target
+          key: python-extension-release
 
-      - name: Install maturin
-        run: uv pip install maturin
+      - name: Build native extension and editable metadata
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: uv run --no-sync python .github/scripts/python_native_cache.py build
 
-      - name: Build Rust extension
-        shell: bash
-        working-directory: _rust
-        run: |
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            source ../.venv/Scripts/activate
-          else
-            source ../.venv/bin/activate
-          fi
-          maturin develop --release
+      - name: Save compiled native extension
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/python-native
+          key: ${{ steps.native-key.outputs.key }}
 
-      - name: Install project with test dependencies
-        # `cpu` pins the CPU torch build: the runners have no GPU, and the
-        # cu126 build would pull ~2.8 GB of nvidia wheels on every Linux job.
-        run: uv sync --extra test --extra cpu --extra hardware
-
-      - name: Run Python tests
-        shell: bash
-        env:
-          TEST_SUITE: ${{ matrix.suite }}
-          TEST_PATH: ${{ matrix.path }}
-          TRAJECTORY_SELECTOR: ${{ matrix.selector }}
-          COLLECT_COVERAGE: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' }}
-          COVERAGE_FILE: .coverage.${{ matrix.suite }}
-        run: |
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            source .venv/Scripts/activate
-          else
-            source .venv/bin/activate
-          fi
-          args=(-v "$TEST_PATH")
-          if [ "$TEST_SUITE" == "regular" ]; then
-            args+=(--ignore=tests/application/trajectories)
-          else
-            args+=(--trajectory-selector="$TRAJECTORY_SELECTOR")
-          fi
-          if [ "$COLLECT_COVERAGE" == "true" ]; then
-            args+=(--cov --cov-config=pyproject.toml --cov-branch --cov-report=term-missing)
-          fi
-          # A trajectory replays sequentially on one module-scoped reuse cache.
-          python -m pytest "${args[@]}"
-
-      - name: Upload coverage artifact
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      - name: Share native extension with Linux tests
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-data-${{ matrix.suite }}
-          path: .coverage.${{ matrix.suite }}
+          name: python-native-linux
+          path: .cache/python-native
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
+  python-test-linux:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}${{ matrix.suite != 'regular' && format(' / {0}', matrix.suite) || '' }}
+    needs: [discover-tests, build-python-extension-linux]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover-tests.outputs.linux-matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run Python test suite
+        uses: ./.github/actions/python-test
+        with:
+          python-version: ${{ matrix.python-version }}
+          suite: ${{ matrix.suite }}
+          path: ${{ matrix.path }}
+          selector: ${{ matrix.selector || '' }}
+          native-artifact: python-native-linux
+
+  python-test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    # macOS and Windows each have one suite and do not wait for the Linux build.
+    needs: discover-tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover-tests.outputs.platform-matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run Python test suite
+        uses: ./.github/actions/python-test
+        with:
+          python-version: ${{ matrix.python-version }}
+          suite: ${{ matrix.suite }}
+          path: ${{ matrix.path }}
+
   coverage-check:
     name: Coverage Threshold Check
     runs-on: ubuntu-latest
-    needs: [discover-tests, python-test]
+    needs: [discover-tests, python-test-linux, python-test]
 
     steps:
       - name: Checkout repository
@@ -253,7 +252,7 @@ jobs:
   python-tests-complete:
     name: Python Tests Complete
     runs-on: ubuntu-latest
-    needs: [discover-tests, python-test, coverage-check]
+    needs: [discover-tests, build-python-extension-linux, python-test-linux, python-test, coverage-check]
     if: always()
     steps:
       - name: Require all Python checks to succeed

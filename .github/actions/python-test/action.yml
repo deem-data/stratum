@@ -1,0 +1,112 @@
+name: Run Python test suite
+description: Install dependencies, prepare the native extension, and run one test suite.
+inputs:
+  python-version:
+    description: Python version to test
+    required: true
+  suite:
+    description: Test suite name
+    required: true
+  path:
+    description: Test suite path
+    required: true
+  selector:
+    description: Trajectory selector
+    default: ''
+  native-artifact:
+    description: Shared Linux extension artifact; empty builds locally
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install OS specific dependencies
+      if: runner.os == 'macOS'
+      # Avoid brew updates that trigger unrelated builds from source.
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: 1
+        HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+      shell: bash
+      run: brew install libomp
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+
+    - name: Install test dependencies without building the project
+      # `cpu` avoids downloading CUDA wheels on runners without a GPU.
+      shell: bash
+      run: uv sync --locked --no-install-project --extra test --extra cpu --extra hardware
+
+    - name: Download shared Rust extension
+      if: inputs.native-artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.native-artifact }}
+        path: .cache/python-native
+
+    - name: Install shared Rust extension
+      if: inputs.native-artifact != ''
+      shell: bash
+      run: uv run --no-sync python .github/scripts/python_native_cache.py install
+
+    - name: Cache Cargo build
+      if: inputs.native-artifact == ''
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: _rust -> target
+        key: python-extension-release
+
+    - name: Build Rust extension
+      if: inputs.native-artifact == ''
+      shell: bash
+      run: uv run --no-sync maturin develop --release --locked --uv
+
+    - name: Require native extension from this checkout
+      shell: bash
+      run: |
+        uv run --no-sync python - <<'PY'
+        from pathlib import Path
+        import stratum._rust_backend_native as native
+
+        path = Path(native.__file__).resolve()
+        assert path.parent == (Path.cwd() / 'stratum').resolve(), path
+        print(f'Loaded native extension: {path}')
+        PY
+
+    - name: Run Python tests
+      shell: bash
+      env:
+        TEST_SUITE: ${{ inputs.suite }}
+        TEST_PATH: ${{ inputs.path }}
+        TRAJECTORY_SELECTOR: ${{ inputs.selector }}
+        COLLECT_COVERAGE: ${{ runner.os == 'Linux' && inputs.python-version == '3.12' }}
+        COVERAGE_FILE: .coverage.${{ inputs.suite }}
+      run: |
+        args=(-v "$TEST_PATH")
+        if [ "$TEST_SUITE" == "regular" ]; then
+          args+=(--ignore=tests/application/trajectories)
+        else
+          args+=(--trajectory-selector="$TRAJECTORY_SELECTOR")
+        fi
+        if [ "$COLLECT_COVERAGE" == "true" ]; then
+          args+=(--cov --cov-config=pyproject.toml --cov-branch --cov-report=term-missing)
+        fi
+        # A trajectory replays sequentially on one module-scoped reuse cache.
+        uv run --no-sync python -m pytest "${args[@]}"
+
+    - name: Upload coverage artifact
+      if: runner.os == 'Linux' && inputs.python-version == '3.12'
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-data-${{ inputs.suite }}
+        path: .coverage.${{ inputs.suite }}
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 1
