@@ -295,7 +295,7 @@ def test_each_pipeline_reads_only_what_no_earlier_one_read(trajectory):
     assert reads == {name: READS.get(name, set()) for name in reads}
 
 
-def test_each_pipeline_takes_in_every_fold_what_it_shares(trajectory):
+def test_each_pipeline_takes_in_every_fold_what_it_shares(trajectory, trajectory_selector):
     # Every pipeline extends pipeline_01's features (the base block at least), on the
     # same folds. Blocks with data-derived categories (table_block's top-k, through a
     # user function) are rightly not keyed, and neither is anything fitted on them,
@@ -303,6 +303,12 @@ def test_each_pipeline_takes_in_every_fold_what_it_shares(trajectory):
     # task's BBL rule (where, string concatenation, to_frame), its label window
     # (DateOffset, set_axis); each of these once kept every fold from a hit.
     taken = {name: run[2] for name, run in ran(trajectory).items() if name != "pipeline_01"}
+    if trajectory_selector == "greedy":
+        # The first neighborhood UDF uses pandas row labels. Its split reads
+        # pandas and its conversions back to polars retain the index, unlike
+        # the earlier pipelines' polars splits. Those are different physical
+        # lineages, so only the work before the split can be reused here.
+        assert not any(taken.pop("pipeline_12"))
     assert {name: all(folds) for name, folds in taken.items()} == dict.fromkeys(taken, True)
 
 

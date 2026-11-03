@@ -9,8 +9,14 @@ from sklearn.preprocessing import StandardScaler
 import stratum as st
 from stratum._api import grid_search
 from stratum.frontend._skrub_graph import get_data
+from stratum.optimizer import _fold_compilation
+from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer._optimize import SearchConfig, compile_plan
+from stratum.optimizer.logical._base import FRAME_TYPES
 from stratum.optimizer.logical._scoring import resolve_scoring
+from stratum.optimizer.logical._split_ops import BoundaryOp
+from stratum.optimizer.physical._conversion import ConversionOp, has_default_index
+from stratum.optimizer.physical._generic_execs import CallExec
 from stratum.runtime._reuse_cache import active_reuse_cache
 from stratum.runtime._scheduler import SequentialScheduler
 from tests.runtime.test_reuse_planning import cache_dir, csv_path  # noqa: F401 (fixtures)
@@ -53,6 +59,44 @@ def test_a_repeated_search_takes_each_folds_predictions(csv_path, cache_dir, run
     assert not second.state_store and second.pool.active_count == 0
 
 
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+@pytest.mark.parametrize("also_reads_polars", [False, True])
+def test_cached_conversions_keep_fold_inputs_bound(csv_path, cache_dir, selector,
+                                                  also_reads_polars):
+    # An opaque call needs pandas, including an extra frame computed before CV.
+    # Greedy produces that frame in polars and inserts a conversion. A warm
+    # cache can supply the conversion and prune its original producer entirely.
+    def add_feature(x, extra):
+        return x.assign(c=len(extra))
+
+    def pipeline(alpha):
+        data = st.as_data_op(str(csv_path)).skb.apply_func(pd.read_csv)
+        X, y = data[["a", "b"]].skb.mark_as_X(), data["y"].skb.mark_as_y()
+        extra = data[["b"]].reset_index(drop=True)
+        if also_reads_polars:
+            # Keep both representations: the greedy join reads polars while the
+            # opaque call reads pandas. The latter must reuse the cached
+            # conversion rather than repeat it in each fold.
+            X = X.merge(extra, on="b", how="left")
+        return X.skb.apply_func(add_feature, extra).skb.apply(Ridge(alpha=alpha), y=y)
+
+    with st.config(implementation_selector=selector):
+        for i, alpha in enumerate((0.1, 0.1, 10.0)):
+            cached = grid_search(pipeline(alpha), cv=KFold(3), scoring="r2")
+            if i and selector == "greedy":
+                hits = [op for op in cached.linearized_dag[:cached.pos_split_op]
+                        if isinstance(op, ConversionOp) and op.cache_hit is not None]
+                assert hits
+                assert all(not op.inputs for op in hits)
+                calls = [op for op in cached.fold_plan.ops if isinstance(op, CallExec)]
+                assert len(calls) == 2  # training and validation
+                assert all(op.inputs[1] in hits for op in calls)
+            with st.config(reuse_cache=False):
+                fresh = grid_search(pipeline(alpha), cv=KFold(3), scoring="r2")
+            np.testing.assert_allclose(cached.results_["scores"], fresh.results_["scores"])
+            assert cached.pool.active_count == 0 and not cached.state_store
+
+
 def test_a_changed_grid_reuses_what_the_candidates_share(csv_path, cache_dir, run):
     run(search(csv_path, alphas=(0.1, 1.0)))
     sched, taken = run(search(csv_path, alphas=(0.1, 10.0)))
@@ -64,6 +108,27 @@ def test_a_changed_grid_reuses_what_the_candidates_share(csv_path, cache_dir, ru
         fitted=True, cv=KFold(3), scoring="r2").results_
     np.testing.assert_allclose(sorted(sched.results_["scores"]),
                                sorted(theirs["mean_test_score"]))
+
+
+def test_cached_fold_inputs_keep_their_default_row_labels(csv_path, cache_dir, monkeypatch):
+    # Both CSV column projections have the file's default RangeIndex. Cache
+    # pruning removes their inputs, but must not turn that into an unknown index
+    # when the folds choose implementations and conversions again.
+    defaults = []
+    lower = _fold_compilation.lower_to_physical
+
+    def record_boundaries(root, *args, **kwargs):
+        defaults.extend(has_default_index(op) for op in topological_iterator(root)
+                        if isinstance(op, BoundaryOp) and op.output_type in FRAME_TYPES)
+        return lower(root, *args, **kwargs)
+
+    with st.config(implementation_selector="greedy"):
+        grid_search(search(csv_path), cv=KFold(3), scoring="r2")
+        monkeypatch.setattr(_fold_compilation, "lower_to_physical", record_boundaries)
+        cached = grid_search(search(csv_path), cv=KFold(3), scoring="r2")
+    assert any(op.cache_hit is not None
+               for op in cached.linearized_dag[:cached.pos_split_op])
+    assert defaults and all(defaults)
 
 
 def test_a_fold_only_takes_its_own_entries(csv_path, cache_dir, run):

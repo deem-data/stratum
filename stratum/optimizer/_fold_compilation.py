@@ -31,7 +31,7 @@ from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer._reuse_planning import plan_fold_reuse, post_split_region
 from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.logical._split_ops import BoundaryOp
-from stratum.optimizer.physical._conversion import ConversionOp
+from stratum.optimizer.physical._conversion import ConversionOp, index_origin
 from stratum.optimizer.physical._impl_selection import select_implementations
 from stratum.optimizer.physical._lowering import lower_to_physical
 from stratum.utils._utils import start_time, log_time
@@ -78,6 +78,8 @@ class FoldTemplate:
     def __init__(self, root: IRNode, boundaries: list[BoundaryOp]):
         self.root = root
         self.boundaries = boundaries
+        self._conversions: dict[IRNode, tuple[ConversionOp, ...]] = {}
+        self._index_origins: dict[IRNode, str | int] = {}
 
     @classmethod
     def retain(cls, ops: list[IRNode], root: IRNode) -> FoldTemplate | None:
@@ -109,6 +111,26 @@ class FoldTemplate:
         """The ops before the split the plan after it reads."""
         return {b.stands_for for b in self.boundaries}
 
+    def retain_boundary_metadata(self) -> None:
+        """Remember boundary representations before cache pruning cuts edges.
+
+        A cached conversion loses its input edge and can prune its producer.
+        Keep the relationship apart from the executable edges so compiling a
+        fold can still bind to that conversion if it survives before the split.
+        Index origins also follow input edges: a hit must retain the same row
+        label properties as the computation it replaces.
+        """
+        self._conversions = {
+            source: tuple(out for out in source.outputs if isinstance(out, ConversionOp))
+            for source in self.sources()
+        }
+        memo = {}
+        self._index_origins = {
+            op: index_origin(op, memo)
+            for source, conversions in self._conversions.items()
+            for op in (source, *conversions)
+        }
+
     def compile(self, ctx, selector, live: set[IRNode], registry=None,
                 known: dict | None = None) -> FoldPlan:
         """Lower a copy of the template and select its implementations.
@@ -125,7 +147,9 @@ class FoldTemplate:
         copies = _copy_region(list(topological_iterator(self.root)))
         for op, new in copies.items():
             if isinstance(new, BoundaryOp):
-                new.stands_for = _kept(op.stands_for, live)
+                new.stands_for = _kept(op.stands_for, live,
+                                      self._conversions.get(op.stands_for, ()))
+                new.known_index_origin = self._index_origins[new.stands_for]
                 if known and new.stands_for in known:
                     new.known_value = known[new.stands_for]
         replaced = {}
@@ -143,7 +167,8 @@ class FoldTemplate:
             if isinstance(op, BoundaryOp):
                 continue
             if isinstance(op, ConversionOp) and isinstance(op.inputs[0], BoundaryOp):
-                done = _done_conversion(op, op.inputs[0].stands_for, live)
+                done = _done_conversion(
+                    op, self._conversions.get(op.inputs[0].stands_for, ()), live)
                 if done is not None:
                     before[op] = done
                     continue
@@ -161,7 +186,7 @@ class FoldTemplate:
 KNOWN_VALUE_TYPES = (str, int, float, bool)
 
 
-def _kept(op: IRNode, live: set[IRNode]) -> IRNode:
+def _kept(op: IRNode, live: set[IRNode], conversions: tuple[ConversionOp, ...]) -> IRNode:
     """``op``, or a conversion of it, whichever the pool keeps for the folds.
 
     The plan before the split frees an op read only through a conversion of it,
@@ -169,20 +194,20 @@ def _kept(op: IRNode, live: set[IRNode]) -> IRNode:
     """
     if op in live:
         return op
-    for out in op.outputs:
-        if isinstance(out, ConversionOp) and out in live:
+    for out in conversions:
+        if out in live:
             return out
     raise RuntimeError(
         f"The plan after the split reads {op}, which the plan before it did not"
         " keep for the folds")
 
 
-def _done_conversion(conversion: ConversionOp, source: IRNode,
+def _done_conversion(conversion: ConversionOp, conversions: tuple[ConversionOp, ...],
                      live: set[IRNode]) -> IRNode | None:
-    """The same conversion of ``source``, if the plan before the split made it and
+    """The same conversion, if the plan before the split made it and
     kept it for the folds."""
-    return next((out for out in source.outputs
-                 if isinstance(out, ConversionOp) and out.target is conversion.target
+    return next((out for out in conversions
+                 if out.target is conversion.target
                  and (out._tracks_index or not conversion._tracks_index)
                  and out in live), None)
 

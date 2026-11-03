@@ -264,7 +264,8 @@ def compile_plan(dag_root: DataOp, config: OptConfig = None, env: dict = None,
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
     linearized_dag, split_pos = physical_optimize(
-        root, ctx, selector=selector, reuse_cache=reuse_cache, admission=admission)
+        root, ctx, selector=selector, reuse_cache=reuse_cache, admission=admission,
+        template=template)
 
     log_time("Optimization took in total", start)
     reuse = (reuse_cache, admission) if reuse_cache is not None else None
@@ -347,7 +348,8 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 
 def physical_optimize(root: Op, ctx: PlanContext, registry=None,
                       selector: ImplementationSelector | None = None,
-                      reuse_cache=None, admission: AdmissionPolicy | None = None):
+                      reuse_cache=None, admission: AdmissionPolicy | None = None,
+                      template: FoldTemplate | None = None):
     """Step 3: select concrete implementations, plan reuse, then linearize and
     plan removals.
     Implementation selection resolves each op with registered candidates to a
@@ -361,6 +363,8 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
     root = select_implementations(root, ctx, registry=registry, selector=selector)
+    if template is not None:
+        template.retain_boundary_metadata()
     _debug_validate_dag(root)
     if reuse_cache is not None:
         apply_reuse_cache(root, reuse_cache, admission or make_admission_policy("all"))

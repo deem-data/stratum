@@ -136,6 +136,9 @@ class BoundaryOp(Op):
         #: That op's value, where it is a plain scalar the plan is compiled
         #: knowing (see ``FoldTemplate.compile``); else ``NOT_KNOWN``.
         self.known_value = NOT_KNOWN
+        #: Row-label origin captured before cache pruning can remove the edges
+        #: used to infer it. None until bound to the selected physical plan.
+        self.known_index_origin: str | int | None = None
 
     @classmethod
     def output_frame_lib(cls, op, libs):

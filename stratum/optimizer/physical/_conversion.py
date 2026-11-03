@@ -83,6 +83,8 @@ def _index_origin(op: IRNode, memo: dict):
     stands_for = getattr(op, "stands_for", None)
     if stands_for is not None:
         # A BoundaryOp: the index is that of the op before the split it reads.
+        if op.known_index_origin is not None:
+            return op.known_index_origin
         return index_origin(stands_for, memo)
     labels_source = getattr(op, "labels_source", None)
     if labels_source is not None:
