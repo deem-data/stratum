@@ -43,11 +43,17 @@ def source_digest(root: Path) -> str:
 
 def cache_key(root: Path) -> str:
     # ImageVersion also captures system linker/library updates on hosted runners.
+    # Look up mixed-case names directly: Windows uppercases keys when iterating
+    # os.environ, but its lookups remain case-insensitive.
     environment = {
-        key: value for key, value in os.environ.items()
-        if key in {"ImageOS", "ImageVersion", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS"}
-        or key.startswith(("RUST", "PYO3", "CARGO_BUILD_", "CARGO_PROFILE_", "CARGO_ENCODED_"))
+        key: os.environ[key]
+        for key in ("ImageOS", "ImageVersion", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS")
+        if key in os.environ
     }
+    environment.update({
+        key: value for key, value in os.environ.items()
+        if key.startswith(("RUST", "PYO3", "CARGO_BUILD_", "CARGO_PROFILE_", "CARGO_ENCODED_"))
+    })
     inputs = {
         "source": source_digest(root),
         "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),

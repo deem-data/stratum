@@ -89,11 +89,13 @@ runs:
         COLLECT_COVERAGE: ${{ runner.os == 'Linux' && inputs.python-version == '3.12' }}
         COVERAGE_FILE: .coverage.${{ inputs.suite }}
       run: |
-        args=(-v "$TEST_PATH")
+        # pytest 9's native watchdog also works when an extension holds the
+        # GIL. Dump thread stacks and exit on a stuck test, setup, or teardown.
+        args=(-v "$TEST_PATH" -o faulthandler_exit_on_timeout=true --durations=20)
         if [ "$TEST_SUITE" == "regular" ]; then
-          args+=(--ignore=tests/application/trajectories)
+          args+=(--ignore=tests/application/trajectories -o faulthandler_timeout=300)
         else
-          args+=(--trajectory-selector="$TRAJECTORY_SELECTOR")
+          args+=(--trajectory-selector="$TRAJECTORY_SELECTOR" -o faulthandler_timeout=900)
         fi
         if [ "$COLLECT_COVERAGE" == "true" ]; then
           args+=(--cov --cov-config=pyproject.toml --cov-branch --cov-report=term-missing)

@@ -1,6 +1,7 @@
 """Native cache hits must use current Python sources and valid native inputs."""
 
 import csv
+from collections import UserDict
 import io
 import json
 import os
@@ -66,8 +67,29 @@ def test_native_file_renames_invalidate_cache(repository):
     assert CI["source_digest"](repository) != before
 
 
-@pytest.mark.parametrize("changed_input", ["rustc", "maturin", "ImageVersion", "RUSTFLAGS"])
-def test_toolchain_image_and_flags_invalidate_cache(repository, monkeypatch, changed_input):
+class WindowsEnvironment(UserDict):
+    """Exercise Windows' uppercase iteration and case-insensitive lookups on any OS."""
+
+    def __getitem__(self, key):
+        return super().__getitem__(key.upper())
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key.upper(), value)
+
+    def __delitem__(self, key):
+        super().__delitem__(key.upper())
+
+    def __contains__(self, key):
+        return super().__contains__(key.upper())
+
+
+@pytest.mark.parametrize("windows_environment", [False, True])
+@pytest.mark.parametrize("changed_input", ["rustc", "maturin", "ImageOS", "ImageVersion", "RUSTFLAGS"])
+def test_toolchain_image_and_flags_invalidate_cache(
+    repository, monkeypatch, changed_input, windows_environment,
+):
+    if windows_environment:
+        monkeypatch.setattr(os, "environ", WindowsEnvironment(os.environ))
     check_output = subprocess.check_output
     versions = {"rustc": "rustc version one", "maturin": "maturin version one"}
 

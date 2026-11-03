@@ -375,7 +375,10 @@ def test_the_server_answers_while_a_job_runs(tmp_path, job_dir, capsys):
         with pytest.raises(ServerError, match="404"):
             client.job("nope")
         info = json.loads((server_dir / SERVER_INFO).read_text())
-        assert oct((server_dir / SERVER_INFO).stat().st_mode & 0o777) == "0o600"
+        # Windows stat modes describe the read-only attribute, not POSIX
+        # owner/group/other permissions. Keep the token/auth checks on every OS.
+        if os.name == "posix":
+            assert oct((server_dir / SERVER_INFO).stat().st_mode & 0o777) == "0o600"
         with pytest.raises(ServerError, match="401"):
             StratumClient(info["url"], "wrong").stats()
         assert StratumClient(info["url"], "wrong").health()["ok"], "health needs no token"

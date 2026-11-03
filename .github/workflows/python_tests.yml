@@ -29,6 +29,7 @@ jobs:
   discover-tests:
     name: Discover Python test suites
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       linux-matrix: ${{ steps.matrix.outputs.linux-matrix }}
       platform-matrix: ${{ steps.matrix.outputs.platform-matrix }}
@@ -44,6 +45,7 @@ jobs:
   build-python-extension-linux:
     name: Build shared Linux Python extension
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -104,6 +106,7 @@ jobs:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}${{ matrix.suite != 'regular' && format(' / {0}', matrix.suite) || '' }}
     needs: [discover-tests, build-python-extension-linux]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.discover-tests.outputs.linux-matrix) }}
@@ -124,6 +127,7 @@ jobs:
     # macOS and Windows each have one suite and do not wait for the Linux build.
     needs: discover-tests
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.discover-tests.outputs.platform-matrix) }}
@@ -140,6 +144,7 @@ jobs:
   coverage-check:
     name: Coverage Threshold Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [discover-tests, python-test-linux, python-test]
 
     steps:
@@ -252,6 +257,7 @@ jobs:
   python-tests-complete:
     name: Python Tests Complete
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [discover-tests, build-python-extension-linux, python-test-linux, python-test, coverage-check]
     if: always()
     steps:
