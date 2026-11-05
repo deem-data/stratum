@@ -32,7 +32,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       linux-matrix: ${{ steps.matrix.outputs.linux-matrix }}
-      platform-matrix: ${{ steps.matrix.outputs.platform-matrix }}
+      windows-matrix: ${{ steps.matrix.outputs.windows-matrix }}
+      macos-matrix: ${{ steps.matrix.outputs.macos-matrix }}
       coverage-files: ${{ steps.matrix.outputs.coverage-files }}
     steps:
       - name: Checkout repository
@@ -50,57 +51,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Prepare cached Linux extension
+        uses: ./.github/actions/build-python-extension
         with:
-          python-version: "3.11"
+          artifact-name: python-native-linux
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
+  build-python-extension-windows:
+    name: Build shared Windows Python extension
+    runs-on: windows-latest
+    # Cold Windows builds can take 14 minutes; save caches before tests start.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Prepare cached Windows extension
+        uses: ./.github/actions/build-python-extension
         with:
-          enable-cache: true
-
-      - name: Install locked build tools only
-        run: uv sync --locked --only-group dev
-
-      - name: Compute native build cache key
-        id: native-key
-        run: echo "key=$(uv run --no-sync python .github/scripts/python_native_cache.py key)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore compiled native extension
-        id: native-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .cache/python-native
-          # No fallback keys: only identical native build inputs may skip compilation.
-          key: ${{ steps.native-key.outputs.key }}
-
-      - name: Cache Cargo dependencies
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: _rust -> target
-          key: python-extension-release
-
-      - name: Build native extension and editable metadata
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        run: uv run --no-sync python .github/scripts/python_native_cache.py build
-
-      - name: Save compiled native extension
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .cache/python-native
-          key: ${{ steps.native-key.outputs.key }}
-
-      - name: Share native extension with Linux tests
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-native-linux
-          path: .cache/python-native
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 1
+          artifact-name: python-native-windows
 
   python-test-linux:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}${{ matrix.suite != 'regular' && format(' / {0}', matrix.suite) || '' }}
@@ -122,15 +89,34 @@ jobs:
           selector: ${{ matrix.selector || '' }}
           native-artifact: python-native-linux
 
+  python-test-windows:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    needs: [discover-tests, build-python-extension-windows]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover-tests.outputs.windows-matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run Python test suite
+        uses: ./.github/actions/python-test
+        with:
+          python-version: ${{ matrix.python-version }}
+          suite: ${{ matrix.suite }}
+          path: ${{ matrix.path }}
+          native-artifact: python-native-windows
+
   python-test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    # macOS and Windows each have one suite and do not wait for the Linux build.
+    # macOS builds locally without waiting for either shared build.
     needs: discover-tests
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.discover-tests.outputs.platform-matrix) }}
+      matrix: ${{ fromJSON(needs.discover-tests.outputs.macos-matrix) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -145,7 +131,7 @@ jobs:
     name: Coverage Threshold Check
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [discover-tests, python-test-linux, python-test]
+    needs: [discover-tests, python-test-linux, python-test-windows, python-test]
 
     steps:
       - name: Checkout repository
@@ -258,7 +244,7 @@ jobs:
     name: Python Tests Complete
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [discover-tests, build-python-extension-linux, python-test-linux, python-test, coverage-check]
+    needs: [discover-tests, build-python-extension-linux, build-python-extension-windows, python-test-linux, python-test-windows, python-test, coverage-check]
     if: always()
     steps:
       - name: Require all Python checks to succeed

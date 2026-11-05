@@ -14,7 +14,7 @@ inputs:
     description: Trajectory selector
     default: ''
   native-artifact:
-    description: Shared Linux extension artifact; empty builds locally
+    description: Shared platform-specific extension artifact; empty builds locally
     default: ''
 
 runs:

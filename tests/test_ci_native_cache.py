@@ -6,10 +6,10 @@ import io
 import json
 import os
 from pathlib import Path
-import platform
 import runpy
 import subprocess
 import sys
+import sysconfig
 from zipfile import ZipFile
 
 import pytest
@@ -30,6 +30,7 @@ def repository(tmp_path):
         ".cargo/config.toml": "# compiler configuration\n",
         "pyproject.toml": "[project]\n",
         "README.md": "Package description\n",
+        ".github/actions/build-python-extension/action.yml": "# native build steps\n",
         "stratum/__init__.py": "# Python sources\n",
     }
     for name, content in files.items():
@@ -53,6 +54,7 @@ def test_python_edits_and_build_outputs_do_not_invalidate_native_cache(repositor
 @pytest.mark.parametrize("name", [
     "_rust/src/lib.rs", "_rust/Cargo.toml", "_rust/Cargo.lock", "_rust/build.rs",
     "_rust/kernel.h", ".cargo/config.toml", "pyproject.toml", "README.md",
+    ".github/actions/build-python-extension/action.yml",
 ])
 def test_native_and_metadata_changes_invalidate_cache(repository, name):
     before = CI["source_digest"](repository)
@@ -107,12 +109,14 @@ def test_toolchain_image_and_flags_invalidate_cache(
     assert CI["cache_key"](repository) != before
 
 
-def make_artifact(path, old_checkout):
+def make_artifact(path, old_checkout, platform_tag=None):
     path.mkdir()
-    native = path / CI["NATIVE_MODULE"]
+    native = path / CI["native_module"]()
     native.parent.mkdir()
     native.write_bytes(b"native payload")
-    tag = f"cp311-abi3-linux_{platform.machine()}"
+    if platform_tag is None:
+        platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    tag = f"cp311-abi3-{platform_tag}"
     wheel = path / f"stratum_ai-0.0.0.dev2-{tag}.whl"
     info = "stratum_ai-0.0.0.dev2.dist-info"
     files = {
@@ -141,12 +145,47 @@ def test_regular_wheel_is_rejected_to_avoid_cached_python_sources(tmp_path):
 def test_missing_native_payload_is_rejected(tmp_path):
     artifact = tmp_path / "artifact"
     make_artifact(artifact, tmp_path)
-    (artifact / CI["NATIVE_MODULE"]).unlink()
+    (artifact / CI["native_module"]()).unlink()
     with pytest.raises(ValueError, match="Missing native extension"):
         CI["editable_wheel"](artifact)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Shared native artifact is Linux-only")
+@pytest.mark.parametrize("platform_name, platform_tag, native_name", [
+    ("linux", "linux-x86_64", "_rust_backend_native.abi3.so"),
+    ("win32", "win-amd64", "_rust_backend_native.pyd"),
+])
+def test_platform_artifact_requires_matching_wheel_and_native_payload(
+    tmp_path, monkeypatch, platform_name, platform_tag, native_name,
+):
+    monkeypatch.setattr(sys, "platform", platform_name)
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: platform_tag)
+    artifact = tmp_path / "artifact"
+    wheel = make_artifact(artifact, tmp_path)
+    assert CI["native_module"]() == Path("stratum") / native_name
+    assert CI["editable_wheel"](artifact) == wheel
+
+    (artifact / "stratum" / native_name).unlink()
+    with pytest.raises(ValueError, match="Missing native extension"):
+        CI["editable_wheel"](artifact)
+
+
+@pytest.mark.parametrize("platform_name, platform_tag, wrong_tag", [
+    ("linux", "linux-x86_64", "win_amd64"),
+    ("win32", "win-amd64", "linux_x86_64"),
+    ("win32", "win-amd64", "win_arm64"),
+])
+def test_wheel_from_another_platform_is_rejected(
+    tmp_path, monkeypatch, platform_name, platform_tag, wrong_tag,
+):
+    monkeypatch.setattr(sys, "platform", platform_name)
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: platform_tag)
+    artifact = tmp_path / "artifact"
+    make_artifact(artifact, tmp_path, platform_tag=wrong_tag)
+    with pytest.raises(ValueError, match="Expected one cp311-abi3"):
+        CI["editable_wheel"](artifact)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "win32"), reason="Shared artifacts target Linux and Windows")
 def test_cached_artifact_installs_metadata_and_imports_current_checkout(tmp_path):
     old = tmp_path / "old-checkout"
     root = tmp_path / "current-checkout"
@@ -162,20 +201,21 @@ def test_cached_artifact_installs_metadata_and_imports_current_checkout(tmp_path
     }
     venv = tmp_path / "venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, env=env)
-    python = str(venv / "bin/python")
+    python_path = "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+    python = str(venv / python_path)
     subprocess.run([
         python, "-c",
         "import runpy, sys; from pathlib import Path; "
         "runpy.run_path(sys.argv[1])['install'](Path(sys.argv[2]), Path(sys.argv[3]))",
         str(SCRIPT), str(root), str(artifact),
     ], cwd=tmp_path, check=True, env=env)
-    assert (root / CI["NATIVE_MODULE"]).read_bytes() == b"native payload"
+    assert (root / CI["native_module"]()).read_bytes() == b"native payload"
     # Installing the same cached wheel elsewhere must not rewrite this venv's
     # .pth through uv's shared hardlinks.
     second_venv = tmp_path / "second-venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(second_venv)], check=True, env=env)
     subprocess.run([
-        str(second_venv / "bin/python"), "-c",
+        str(second_venv / python_path), "-c",
         "import runpy, sys; from pathlib import Path; "
         "runpy.run_path(sys.argv[1])['install'](Path(sys.argv[2]), Path(sys.argv[3]))",
         str(SCRIPT), str(old), str(artifact),

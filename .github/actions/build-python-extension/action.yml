@@ -1,0 +1,64 @@
+name: Build cached Python extension
+description: Cache and share the native extension independently of Python tests.
+inputs:
+  artifact-name:
+    description: Name of the platform-specific native extension artifact
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+
+    - name: Install locked build tools only
+      shell: bash
+      run: uv sync --locked --only-group dev
+
+    - name: Compute native build cache key
+      id: native-key
+      shell: bash
+      run: echo "key=$(uv run --no-sync python .github/scripts/python_native_cache.py key)" >> "$GITHUB_OUTPUT"
+
+    - name: Restore compiled native extension
+      id: native-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: .cache/python-native
+        # Only identical native build inputs may skip compilation.
+        key: ${{ steps.native-key.outputs.key }}
+
+    - name: Cache Cargo dependencies
+      if: steps.native-cache.outputs.cache-hit != 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: _rust -> target
+        key: python-extension-release
+
+    - name: Build native extension and editable metadata
+      if: steps.native-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: uv run --no-sync python .github/scripts/python_native_cache.py build
+
+    - name: Save compiled native extension
+      if: steps.native-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .cache/python-native
+        key: ${{ steps.native-key.outputs.key }}
+
+    - name: Share native extension with tests
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: .cache/python-native
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 1

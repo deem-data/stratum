@@ -52,19 +52,21 @@ def coverage_files(matrix: dict) -> list[str]:
     ]
 
 
-def split_matrix(matrix: dict) -> tuple[dict, dict]:
-    """Only Linux jobs wait for the shared Linux extension."""
+def split_matrix(matrix: dict) -> tuple[dict, dict, dict]:
+    """Each platform waits only for its own native build, if shared."""
     linux = [entry for entry in matrix["include"] if entry["os"] == "ubuntu-latest"]
-    platforms = [entry for entry in matrix["include"] if entry["os"] != "ubuntu-latest"]
-    return {"include": linux}, {"include": platforms}
+    windows = [entry for entry in matrix["include"] if entry["os"] == "windows-latest"]
+    macos = [entry for entry in matrix["include"] if entry["os"] == "macos-26"]
+    return {"include": linux}, {"include": windows}, {"include": macos}
 
 
 if __name__ == "__main__":
     matrix = build_matrix(Path(__file__).resolve().parents[2])
-    linux, platforms = split_matrix(matrix)
+    linux, windows, macos = split_matrix(matrix)
     print(json.dumps(matrix, indent=2))
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"linux-matrix={json.dumps(linux)}\n")
-            stream.write(f"platform-matrix={json.dumps(platforms)}\n")
+            stream.write(f"windows-matrix={json.dumps(windows)}\n")
+            stream.write(f"macos-matrix={json.dumps(macos)}\n")
             stream.write(f"coverage-files={json.dumps(coverage_files(matrix))}\n")

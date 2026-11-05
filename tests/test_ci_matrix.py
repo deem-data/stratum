@@ -52,11 +52,12 @@ def test_empty_trajectory_fails_discovery(tmp_path):
 
 def test_platform_split_keeps_every_suite_and_coverage_input():
     matrix = CI["build_matrix"](ROOT)
-    linux, platforms = CI["split_matrix"](matrix)
+    linux, windows, macos = CI["split_matrix"](matrix)
     assert all(entry["os"] == "ubuntu-latest" for entry in linux["include"])
-    assert {entry["os"] for entry in platforms["include"]} == {"macos-26", "windows-latest"}
-    assert all(entry["suite"] == "regular" for entry in platforms["include"])
-    combined = linux["include"] + platforms["include"]
+    assert {entry["os"] for entry in windows["include"]} == {"windows-latest"}
+    assert {entry["os"] for entry in macos["include"]} == {"macos-26"}
+    assert all(entry["suite"] == "regular" for entry in windows["include"] + macos["include"])
+    combined = linux["include"] + windows["include"] + macos["include"]
     assert len(combined) == len(matrix["include"])
     assert all(combined.count(entry) == 1 for entry in matrix["include"])
     assert CI["coverage_files"](linux) == CI["coverage_files"](matrix)

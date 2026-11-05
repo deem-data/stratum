@@ -558,17 +558,16 @@ class StratumFusedTableVectorizer(_FusedTableVectorizer):
             executor = getattr(self, "_executor", None)
             if executor is not None:
                 self._executor = None
-                executor.shutdown(wait=True)
+        if executor is not None:
+            # Workers may need another vectorizer's pool while finishing.
+            # Never join them while holding the shared creation lock.
+            executor.shutdown(wait=True)
 
-    def __del__(self):
-        # Estimators do not have a common lifecycle hook, so release workers
-        # when an instance is collected as a fallback for callers that do not
-        # explicitly call close().
-        # TODO: Move threadpool creation and shutdown to the parallelization planner
-        try:
-            self.close()
-        except Exception:
-            pass
+    # Do not call close() from __del__: GC can interrupt executor construction
+    # while _executor_init_lock is held, or run on a pool worker. Taking locks
+    # or joining threads there can deadlock. ThreadPoolExecutor's own weakref
+    # cleanup wakes its workers when the executor is collected; they exit after
+    # queued work finishes. close() remains available for synchronous cleanup.
 
     def __getstate__(self):
         # ThreadPoolExecutor and its locks are runtime state, not fitted state.

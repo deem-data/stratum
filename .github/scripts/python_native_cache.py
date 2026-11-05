@@ -16,7 +16,6 @@ import sysconfig
 from zipfile import ZipFile
 
 
-NATIVE_MODULE = Path("stratum/_rust_backend_native.abi3.so")
 BUILD_INPUTS = [
     "_rust",
     "pyproject.toml",
@@ -26,7 +25,13 @@ BUILD_INPUTS = [
     "rust-toolchain*",
     ".github/workflows/python_tests.yml",
     ".github/scripts/python_native_cache.py",
+    ".github/actions/build-python-extension/action.yml",
 ]
+
+
+def native_module() -> Path:
+    suffix = "pyd" if sys.platform == "win32" else "abi3.so"
+    return Path(f"stratum/_rust_backend_native.{suffix}")
 
 
 def source_digest(root: Path) -> str:
@@ -67,17 +72,18 @@ def cache_key(root: Path) -> str:
 
 
 def editable_wheel(artifact: Path) -> Path:
-    wheels = list(artifact.glob("*-cp311-abi3-linux_*.whl"))
+    platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    wheels = list(artifact.glob(f"*-cp311-abi3-{platform_tag}.whl"))
     if len(wheels) != 1:
-        raise ValueError(f"Expected one cp311-abi3 Linux wheel, found {wheels}")
+        raise ValueError(f"Expected one cp311-abi3 {platform_tag} wheel, found {wheels}")
     with ZipFile(wheels[0]) as archive:
         # A regular wheel would install stale Python code on a native cache hit.
         if "stratum_ai.pth" not in archive.namelist() or any(
             name.startswith("stratum/") for name in archive.namelist()
         ):
             raise ValueError("Expected an editable wheel containing metadata and a .pth only")
-    if not (artifact / NATIVE_MODULE).is_file():
-        raise ValueError(f"Missing native extension: {artifact / NATIVE_MODULE}")
+    if not (artifact / native_module()).is_file():
+        raise ValueError(f"Missing native extension: {artifact / native_module()}")
     return wheels[0]
 
 
@@ -88,9 +94,9 @@ def build(root: Path, artifact: Path) -> None:
     # The PEP 660 hook creates both an in-place extension and a metadata-only
     # editable wheel without installing the project's ML dependencies.
     maturin.build_editable(str(artifact), config_settings={"build-args": "--profile release --locked"})
-    destination = artifact / NATIVE_MODULE
+    destination = artifact / native_module()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(root / NATIVE_MODULE, destination)
+    shutil.copy2(root / native_module(), destination)
     editable_wheel(artifact)
 
 
@@ -108,7 +114,7 @@ def install(root: Path, artifact: Path) -> None:
     relocated = pth.with_suffix(".pth.tmp")
     relocated.write_text(str(root.resolve()) + "\n", encoding="utf-8")
     relocated.replace(pth)
-    shutil.copy2(artifact / NATIVE_MODULE, root / NATIVE_MODULE)
+    shutil.copy2(artifact / native_module(), root / native_module())
 
 
 if __name__ == "__main__":

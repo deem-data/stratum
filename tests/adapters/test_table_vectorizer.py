@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import time
 import warnings
 
@@ -581,6 +585,126 @@ def test_stratum_fused_uses_four_column_workers(monkeypatch):
 
     assert worker_counts == [4]
     assert submit_counts == [8]
+
+
+def _run_executor_lifecycle_script(script):
+    # A regression must fail in a child process rather than deadlock pytest.
+    setup = """
+        import faulthandler
+        import gc
+        import weakref
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event, current_thread
+        from unittest.mock import patch
+
+        from stratum.adapters import table_vectorizer as module
+        from stratum.adapters.table_vectorizer import StratumFusedTableVectorizer
+
+        faulthandler.dump_traceback_later(10, exit=True)
+        # Collect only at the exact point exercised by each regression.
+        gc.disable()
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(setup) + textwrap.dedent(script)],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_stratum_fused_collects_old_pool_during_executor_creation():
+    _run_executor_lifecycle_script("""
+        old = StratumFusedTableVectorizer()
+        executor = old._get_executor()
+        worker = executor.submit(current_thread).result(timeout=5)
+        old_ref = weakref.ref(old)
+        executor_ref = weakref.ref(executor)
+        # Simulate an unreachable estimator retained by a pipeline cycle.
+        old.cycle = old
+        del executor, old
+
+        class CollectingExecutor(ThreadPoolExecutor):
+            def __init__(self, *args, **kwargs):
+                # Allocation can trigger GC while _get_executor holds its lock.
+                gc.collect()
+                super().__init__(*args, **kwargs)
+
+        new = StratumFusedTableVectorizer()
+        with patch.object(module, "ThreadPoolExecutor", CollectingExecutor):
+            assert new._get_executor().submit(lambda: 42).result(timeout=5) == 42
+        new.close()
+
+        assert old_ref() is None
+        assert executor_ref() is None
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "collected vectorizer leaked its worker"
+    """)
+
+
+def test_stratum_fused_collection_does_not_wait_for_running_jobs():
+    _run_executor_lifecycle_script("""
+        started = Event()
+        release = Event()
+
+        def job():
+            started.set()
+            release.wait()
+            return current_thread()
+
+        vectorizer = StratumFusedTableVectorizer()
+        executor = vectorizer._get_executor()
+        pending = executor.submit(job)
+        assert started.wait(timeout=5)
+        vectorizer_ref = weakref.ref(vectorizer)
+        executor_ref = weakref.ref(executor)
+        vectorizer.cycle = vectorizer
+        del executor, vectorizer
+
+        try:
+            # GC may run in any thread: it must not wait for running jobs.
+            gc.collect()
+            assert vectorizer_ref() is None
+            assert executor_ref() is None
+        finally:
+            release.set()
+        worker = pending.result(timeout=5)
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "worker did not exit after its job finished"
+    """)
+
+
+def test_stratum_fused_close_allows_other_vectorizers_to_create_workers():
+    _run_executor_lifecycle_script("""
+        closing = Event()
+        other = StratumFusedTableVectorizer()
+
+        def job():
+            assert closing.wait(timeout=5)
+            # A running leaf must be able to use another vectorizer while
+            # close() waits for it to finish.
+            return other._get_executor().submit(lambda: 42).result(timeout=5)
+
+        vectorizer = StratumFusedTableVectorizer()
+        executor = vectorizer._get_executor()
+        worker = executor.submit(current_thread).result(timeout=5)
+        pending = executor.submit(job)
+        shutdown = executor.shutdown
+
+        def signal_shutdown(*args, **kwargs):
+            closing.set()
+            return shutdown(*args, **kwargs)
+
+        with patch.object(executor, "shutdown", signal_shutdown):
+            vectorizer.close()
+        assert pending.result(timeout=5) == 42
+        assert not worker.is_alive(), "explicit close did not join workers"
+        vectorizer.close()  # Repeated close is harmless.
+        assert vectorizer._get_executor().submit(lambda: 43).result(timeout=5) == 43
+        vectorizer.close()
+        other.close()
+    """)
 
 
 def test_stratum_fused_allows_mixed_rust_and_python_leaves():
