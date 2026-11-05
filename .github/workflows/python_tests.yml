@@ -157,23 +157,25 @@ jobs:
           tree = ET.parse('coverage.xml')
           root = tree.getroot()
           
-          # Get coverage percentage from XML
-          line_rate = float(root.get('line-rate', 0))
-          branch_rate_str = root.get('branch-rate')
-          
-          if branch_rate_str is not None:
-              branch_rate = float(branch_rate_str)
-              coverage_percent = (line_rate + branch_rate) / 2 * 100
-              print(f'Line coverage: {line_rate * 100:.2f}%')
-              print(f'Branch coverage: {branch_rate * 100:.2f}%')
-              print(f'Overall coverage: {coverage_percent:.2f}%')
+          # Match coverage.py / pytest-cov: weight by executable opportunities.
+          lines_covered = int(root.attrib['lines-covered'])
+          lines_valid = int(root.attrib['lines-valid'])
+          branches_covered = int(root.get('branches-covered', 0))
+          branches_valid = int(root.get('branches-valid', 0))
+          total = lines_valid + branches_valid
+          if total == 0:
+              print('ERROR: Coverage report contains no executable lines or branches')
+              sys.exit(1)
+          coverage_percent = 100 * (lines_covered + branches_covered) / total
+          line_percent = 100 * lines_covered / lines_valid if lines_valid else 0.0
+          print(f'Line coverage: {line_percent:.2f}%')
+          if branches_valid:
+              branch_percent = 100 * branches_covered / branches_valid
+              print(f'Branch coverage: {branch_percent:.2f}%')
           else:
-              # Fallback to line coverage only if branch coverage not available
-              coverage_percent = line_rate * 100
-              print(f'Line coverage: {line_rate * 100:.2f}%')
-              print(f'Branch coverage: Not available (use --cov-branch flag)')
-              print(f'Overall coverage: {coverage_percent:.2f}% (line coverage only)')
-          
+              print('Branch coverage: No branch opportunities in report')
+          print(f'Overall coverage: {coverage_percent:.2f}% (pytest-cov total)')
+
           # Coverage threshold (adjust as needed)
           threshold = 80.0
           print(f'Threshold: {threshold}%')
