@@ -18,7 +18,7 @@ from stratum.optimizer._lineage import (
     compute_lineage_keys, lineage_key,
 )
 from stratum.optimizer.logical._base import IRNode, OperandRef
-from stratum.optimizer.logical._ops import ValueOp
+from stratum.optimizer.logical._ops import CallOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._representation import FrameLib
 
@@ -128,8 +128,7 @@ def test_arrow_dtype_metadata_is_encoded():
 
 
 def test_operators_must_opt_in():
-    # The foundation does not yet opt any production operator into reuse.
-    for op in (IRNode(), PhysicalOp(), ValueOp(1)):
+    for op in (IRNode(), PhysicalOp(), CallOp(func=len)):
         with pytest.raises(Uncacheable, match="not a cacheable operator"):
             lineage_key(op, [])
     assert ConfiguredOp({"offset": 1}).lineage_config() == {"config": {"offset": 1}}

@@ -617,6 +617,9 @@ class ChoiceOp(Op):
 
 class ValueOp(Op):
     fields = ["value"]
+    # Plain constants can be keyed; the encoder rejects frames, arrays and other
+    # values whose contents cannot be named exactly and cheaply.
+    cacheable = True
 
     @property
     def index_effect(self):
