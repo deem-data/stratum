@@ -239,6 +239,10 @@ def estimator_key(est: BaseEstimator):
     return ("__estimator__", type(est), frozenset(items))
 
 
+class Uncacheable(Exception):
+    """An operator or its configuration cannot be given a safe lineage key."""
+
+
 def clone_value(value):
     if isinstance(value, dict):
         return rebuild_dict(value, ((k, clone_value(v)) for k, v in value.items()))
@@ -308,6 +312,23 @@ class IRNode:
         ``PhysicalOp``, not an ``Op``).
         """
         self.output_schema = None
+
+    #: Opt-in contract: the output is a deterministic function of the inputs and
+    #: lineage_config(). Generic calls and unknown operators remain uncacheable.
+    cacheable = False
+
+    def lineage_config(self):
+        """Configuration naming this op's output, apart from its inputs.
+
+        Cacheable ops return their declared ``fields`` as plain values. Operators
+        needing a different encoding override this method; unsupported values are
+        rejected by the lineage encoder. The configuration must include everything
+        that can change the output. Raises :class:`Uncacheable` for ops that have
+        not opted in.
+        """
+        if not self.cacheable:
+            raise Uncacheable(f"{type(self).__name__} is not a cacheable operator")
+        return {name: getattr(self, name) for name in type(self).fields}
 
     def to_str_helper(self):
         class_name = (self.__class__.__name__ if self._is_physical
