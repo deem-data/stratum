@@ -82,6 +82,7 @@ class ColumnMethodOp(MapOp):
     #: on a float bound, ``where`` null-pads the rows it masks out, and ``astype``
     #: is handed its target, so none of them is certain here.
     boolean_result = False
+    cacheable = True
 
     def __init__(self, inputs=None, outputs=None):
         super().__init__(name=self.method, inputs=inputs, outputs=outputs)

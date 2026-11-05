@@ -17,6 +17,7 @@ class JoinOp(Op):
     """
     logical_family = "Join"
     fields = ["how", "left_on", "right_on", "left_index", "right_index", "suffixes"]
+    cacheable = True
 
     def __init__(
         self,
@@ -121,6 +122,7 @@ class FilteringJoinOp(Op):
     # Keeps the left rows' labels, and matches key values, never labels.
     index_effect = IndexEffect.NEW
     aligns_by_label = False
+    cacheable = True
 
     def __init__(
         self,

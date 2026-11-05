@@ -20,12 +20,16 @@ class ConversionOp(PhysicalOp):
 
     logical_family = "Conversion"
     index_effect = IndexEffect.KEEP
+    cacheable = True
 
     def __init__(self, source: FrameLib, target: FrameLib, inputs=None, outputs=None):
         super().__init__(name=f"{source}->{target}", inputs=inputs, outputs=outputs)
         self.source = source
         self.target = target
         self.frame_lib = target
+
+    def lineage_config(self):
+        return str(self.source), str(self.target)
 
     @classmethod
     def accepts_input_lib(cls, op, index: int, lib) -> bool:

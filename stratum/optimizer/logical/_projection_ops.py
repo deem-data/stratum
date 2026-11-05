@@ -61,6 +61,7 @@ class DropOp(ProjectionOp):
     by index label, which extraction turns into a ``DropLabelsSelectionOp``.
     """
     fields = ["columns", "level", "errors"]
+    cacheable = True
 
     def __init__(self, columns=None, level=None, errors="raise",
                  inputs: list[Op] = None, outputs: list[Op] = None):
@@ -103,6 +104,7 @@ class ColumnSelectorOp(ProjectionOp):
     physical impls, see ``physical/_projection_execs.py``).
     """
     fields = ["selector"]
+    cacheable = True
 
     def __init__(self, selector, inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=f"select[{selector!r}]", inputs=inputs, outputs=outputs)
@@ -129,6 +131,7 @@ class ColumnProjectionOp(ProjectionOp):
     positional indexing.
     """
     fields = ["key"]
+    cacheable = True
 
     def __init__(self, key, inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=f"cols[{key!r}]", inputs=inputs, outputs=outputs)

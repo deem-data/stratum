@@ -12,7 +12,7 @@ which leaves it an opaque method call that runs on pandas exactly as recorded.
 """
 from __future__ import annotations
 
-from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._base import IndexEffect, Uncacheable
 from stratum.optimizer.logical._ops import (
     FRAME_TYPES, OperandRef, OutputType, GetItemOp, MethodCallOp, Op, substitute_op)
 from stratum.optimizer.logical._column_expr import ColumnExpr
@@ -25,6 +25,7 @@ class SelectionOp(Op):
     Never instantiated directly. Impls register on the concrete subclasses.
     """
     logical_family = "Selection"
+    cacheable = True
 
     def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)
@@ -137,6 +138,13 @@ class SampleSelectionOp(SelectionOp):
         self.weights = weights
         self.seed = seed
         self.ignore_index = ignore_index
+
+    def lineage_config(self):
+        """The fields. ``sample`` draws different rows on every call unless it is
+        seeded, so an unseeded one has no key."""
+        if self.seed is None:
+            raise Uncacheable("sample() without a random_state")
+        return super().lineage_config()
 
 
 class DropLabelsSelectionOp(SelectionOp):

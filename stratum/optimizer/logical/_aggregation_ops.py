@@ -45,6 +45,7 @@ class AggregateOp(Op):
     logical_family = "Aggregation"
     fields = ["grouped", "grouping", "aggregations", "sort_keys", "drop_null_keys",
               "observed", "keys_as_columns", "level", "sort_categories", "output_type"]
+    cacheable = True
 
     def __init__(self, grouped: bool = False,
                  grouping: tuple = (),
@@ -141,6 +142,9 @@ class AggregateOp(Op):
 
     def update_name(self):
         self.name = _render_name(self.grouping, self.aggregations)
+
+    def lineage_config(self):
+        return {**super().lineage_config(), "output_type": self.output_type.name}
 
     def propagate_output_schema(self):
         """See :func:`_schema.aggregate_schema` for which entries are knowable.

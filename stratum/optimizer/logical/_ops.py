@@ -740,6 +740,7 @@ def _elementwise_schema(op: "Op", operands) -> "pl.Schema | None":
 
 class GetItemOp(Op):
     fields = ["key", "is_filter"]
+    cacheable = True
     
     def __init__(self, key=None, name=None, is_filter=False):
         # key is either a constant or an OperandRef (when the key is graph-fed).
