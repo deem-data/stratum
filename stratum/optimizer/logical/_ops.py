@@ -343,6 +343,21 @@ class BaseEstimatorOp(Op):
                                          if hasattr(self.estimator, m))
         self.parallelism = os.cpu_count() # TODO:this will should be set during physical planning phase
 
+    #: Keyed when the estimator is known and deterministic for its configuration.
+    cacheable = True
+
+    def lineage_config(self):
+        """Name the unfitted prototype, which every fitting pass clones."""
+        from stratum.optimizer._estimator_lineage import estimator_lineage, selector_lineage
+
+        config = {name: getattr(self, name) for name in type(self).fields}
+        params = self.original_estimator.get_params()
+        config["estimator"] = estimator_lineage(
+            self.original_estimator, graph_inputs=tuple(params[name] for name in self.param_refs))
+        config["cols"] = selector_lineage(self.cols)
+        config["exclude_cols"] = selector_lineage(self.exclude_cols)
+        return config
+
     def effective_mode(self, mode: str) -> str:
         """The method ``mode`` actually calls on this op's estimator.
 

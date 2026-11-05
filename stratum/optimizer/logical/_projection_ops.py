@@ -110,6 +110,11 @@ class ColumnSelectorOp(ProjectionOp):
         super().__init__(name=f"select[{selector!r}]", inputs=inputs, outputs=outputs)
         self.selector = selector
 
+    def lineage_config(self):
+        from stratum.optimizer._estimator_lineage import selector_lineage
+
+        return {"selector": selector_lineage(self.selector)}
+
 
 def make_column_selector_op(op: TransformerOp) -> ColumnSelectorOp:
     """Rewrite a ``TransformerOp`` wrapping skrub's ``SelectCols`` into a
