@@ -132,6 +132,9 @@ class BufferPoolStats:
 class BufferPool:
     """Cache for intermediates with spill-to-disk eviction.
 
+    In-memory values are stored and borrowed by reference, without copying.
+    Readers must treat them as read-only, including any nested mutable objects.
+
     When `memory_usage` exceeds `memory_budget`, unpinned entries are spilled to
     disk under `spill_root`, in the order the eviction policy ranks them (LRU by
     default). A spilled entry stays in `live_variable_map` so subsequent `pin`
@@ -162,7 +165,7 @@ class BufferPool:
         self.stats = BufferPoolStats()
 
     def put(self, key: Hashable, data: Any):
-        """Store data for a key. Overwrites any existing entry."""
+        """Store data by reference for a key. Overwrites any existing entry."""
         if key in self.live_variable_map:
             self._drop(key)
         size = get_size(data)
@@ -172,7 +175,7 @@ class BufferPool:
         self.check_for_eviction()
 
     def pin(self, key: Hashable) -> Any:
-        """Retrieve stored data for a key, or None if absent.
+        """Borrow stored data read-only for a key, or None if absent.
 
         Locks the entry against eviction (refcounted; balance every `pin` with
         an `unpin`). If the entry was previously spilled to disk, it is

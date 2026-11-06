@@ -3,7 +3,8 @@
 The planner decides which results have reliable keys. This store accepts every
 such result that fits its budget, without cost-based admission. It owns a reference
 to each cached object; a reader keeps its own reference even after eviction.
-Callers must not mutate values after insertion or retrieval.
+Outputs are shared with execution without copying. Callers must not mutate values
+after insertion or retrieval, including nested objects.
 
 The budget accounts for estimated object sizes using the same sizing helper as
 the BufferPool. It is not a bound on total process memory: readers can keep evicted

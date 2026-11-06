@@ -1,5 +1,9 @@
 from __future__ import annotations
+from copy import deepcopy
 from time import perf_counter
+from typing import TYPE_CHECKING
+import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split, check_cv
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._dataframe_ops import SplitOp
@@ -10,11 +14,18 @@ import polars as pl
 import logging
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from stratum.runtime._reuse_cache import ReuseCache
+
 
 class Scheduler:
-    """Scheduler for executing pre-planned Op DAGs in linearized order."""
+    """Scheduler for executing pre-planned Op DAGs in linearized order.
 
-    def __init__(self, print_heavy_hitters=False, t0=None):
+    Operators borrow inputs read-only. The pool and reuse cache share these
+    objects; operators requiring mutation must make their own copies.
+    """
+
+    def __init__(self, print_heavy_hitters=False, t0=None, reuse_cache: ReuseCache | None = None):
         self.mode = "fit_transform"
         self.linearized_dag = None
         self.recompute_ops: list[Op] = []
@@ -27,6 +38,18 @@ class Scheduler:
         self.t0 = t0 if t0 is not None else perf_counter()
         self._pinned_ops: set[Op] = set()
         self.buffer_pool_overhead = 0
+        #: Shared in-memory cache for read-only outputs.
+        self.reuse_cache = reuse_cache
+        #: Results may alias cached values, including through uncacheable ops.
+        #: Detach them once when returning to the caller, outside execution.
+        self._shares_cache_values = reuse_cache is not None
+
+    def _pool_cache_hits(self) -> None:
+        """Borrow the values retained during reuse planning without copying."""
+        for op in self.linearized_dag:
+            if op.cache_hit is not None:
+                self._shares_cache_values = True
+                self.pool.put(op, op.cache_hit.take())
 
     def _finish(self):
         """End of execution. Remove all buffers."""
@@ -37,6 +60,13 @@ class Scheduler:
 
     def evaluate(self, seed: int = 42, test_size=0.2):
         """Evaluate the pipeline with a train/test split and return predictions."""
+        try:
+            result = self._evaluate(seed, test_size)
+            return _copy_result(result) if self._shares_cache_values else result
+        finally:
+            self._finish()
+
+    def _evaluate(self, seed: int, test_size):
         try:
             split_op = self.compute_xy()
         except RuntimeError as e:
@@ -60,6 +90,13 @@ class Scheduler:
         An explicit ``cv`` takes precedence over the splitter the plan declares with
         ``mark_as_X(cv=...)``, as in skrub. With neither, the folds are ``KFold(5)``.
         """
+        try:
+            result = self._grid_search(cv)
+            return _copy_result(result) if self._shares_cache_values else result
+        finally:
+            self._finish()
+
+    def _grid_search(self, cv):
         if cv is not None:
             cv = check_cv(cv)
         logger.debug("\n" + "="*100 + "\n" + "Starting grid search" + "\n" + "="*100 + "\n")
@@ -82,7 +119,6 @@ class Scheduler:
         results = self.cross_validate(split_op, cv, predictions, results,
                                       sink.emit_predictions, sink.response_mode)
         self.results_ = results
-        self._finish()
         return predictions if sink.emit_predictions else None
 
     def _declared_splitter(self, split_op: SplitOp):
@@ -151,6 +187,10 @@ class Scheduler:
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""
+        if op.cache_hit is not None:
+            # Already loaded into the pool. Reuse planning cut its inputs, so
+            # this op has no work or input removals left to perform.
+            return op
         if self.mode == FITTING_MODE and op.dead_in_fit:
             # Nothing this pass runs reads its output, so it is not pinned, run or
             # stored. Its removals still happen: it is the last consumer of those
@@ -174,6 +214,13 @@ class Scheduler:
             t1 = perf_counter()
             result = op.process(mode=self.mode, inputs=inputs)
             t2 = perf_counter()
+
+            # Retain eligible results while they are still in memory. Admission
+            # never needs to reload or take ownership of a spilled pool entry.
+            # Operators read inputs without mutating them, so the cache can
+            # retain the same objects as this execution.
+            if self.reuse_cache is not None and op.cache_key is not None:
+                self.reuse_cache.put(op.cache_key, result)
 
             # 3. unpin inputs
             for in_op in op.inputs:
@@ -212,32 +259,16 @@ class Scheduler:
 
 class SequentialScheduler(Scheduler):
     def __init__(self, linearized_dag, split_pos, recompute_ops,
-                 print_heavy_hitters=False, t0=None):
-        super().__init__(print_heavy_hitters, t0=t0)
+                 print_heavy_hitters=False, t0=None, reuse_cache: ReuseCache | None = None):
+        super().__init__(print_heavy_hitters, t0=t0, reuse_cache=reuse_cache)
         self.linearized_dag = linearized_dag
         self.pos_split_op = split_pos
         self.recompute_ops = recompute_ops
-
-    def evaluate(self, seed: int = 42, test_size=0.2):
-        """Evaluate the pipeline with a train/test split and return predictions."""
-
         try:
-            split_op = self.compute_xy()
-        except RuntimeError as e:
-            if "X and y nodes not found in the DAG" in str(e):
-                logger.warning("X and y nodes not found in the DAG, returning the last node")
-                return self.pool.pin(self.linearized_dag[-1])
-            else:
-                raise e
-
-        x_data = self.pool.pin(split_op.inputs[0])
-        train_index, test_index = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
-        split_op.indices = train_index
-        self.compute(self.pos_split_op)
-        split_op.indices = test_index
-        rows = self.compute(self.pos_split_op, mode="predict")
-        self._finish()
-        return self._format_predict_result(rows)["vals"][0]
+            self._pool_cache_hits()
+        except BaseException:
+            self._finish()
+            raise
 
     def compute(self, start_pos: int, mode="fit_transform"):
         """Compute the plan from start_pos onwards; outside the fitting pass, return its sink."""
@@ -262,3 +293,45 @@ class SequentialScheduler(Scheduler):
                 return op
             self.process_op(op)
         raise RuntimeError("X and y nodes not found in the DAG")
+
+
+def _copy_result(value):
+    """Detach a public result from the read-only values shared during execution.
+
+    Used only on return from evaluate/grid_search, never on cache admission or
+    retrieval. Pandas 3 copy-on-write and polars clones avoid copying ordinary
+    frame buffers. Python objects inside cells need recursive copies; NumPy
+    arrays and arbitrary Python objects need independent storage.
+    """
+    if isinstance(value, pd.DataFrame):
+        copied = value.copy(deep=False)
+        for i, dtype in enumerate(value.dtypes):
+            if dtype == object:
+                # Work by position to preserve duplicate column labels and keep
+                # object dtype rather than inferring a different dtype on copy.
+                copied.isetitem(i, pd.Series(deepcopy(value.iloc[:, i].to_numpy()),
+                                            index=value.index, dtype=object))
+        return copied
+    if isinstance(value, pd.Series):
+        copied = value.copy(deep=False)
+        if value.dtype == object:
+            copied.iloc[:] = deepcopy(value.to_numpy())
+        return copied
+    if isinstance(value, pl.DataFrame):
+        # Candidate predictions can be Python arrays stored in Object cells.
+        columns = [_copy_result(value[name]) for name, dtype in value.schema.items()
+                   if dtype == pl.Object]
+        return value.with_columns(columns) if columns else value.clone()
+    if isinstance(value, pl.Series):
+        if value.dtype == pl.Object:
+            return pl.Series(value.name, [_copy_result(item) for item in value], dtype=pl.Object)
+        return value.clone()
+    if isinstance(value, np.ndarray) and not value.dtype.hasobject:
+        return value.copy()
+    if type(value) is list:
+        return [_copy_result(item) for item in value]
+    if type(value) is tuple:
+        return tuple(_copy_result(item) for item in value)
+    if type(value) is dict:
+        return {deepcopy(key): _copy_result(item) for key, item in value.items()}
+    return deepcopy(value)

@@ -260,6 +260,11 @@ class IRNode:
     logical and physical layers. Layer-specific behaviour (CSE keys, choice
     detection, backend selection) lives on the ``Op`` / ``PhysicalOp``
     subclasses, not here.
+
+    Execution borrows inputs and fitted states read-only, including nested
+    objects. An operator that needs to mutate them must copy them itself before
+    writing. Published outputs and states may be shared with other consumers and
+    the reuse cache, so the operator must not mutate them after returning either.
     """
 
     #: Display label for a logical op: the semantic family (SELECT, PROJECT, ...)
