@@ -291,19 +291,25 @@ def polars_dt_attribute_unsupported(attr: str) -> str | None:
 
 # --- pd.to_datetime -------------------------------------------------------------
 
-def polars_to_datetime(obj, format=None, exact=None, cache=True, errors="raise"):
+def polars_to_datetime(obj, format=None, exact=None, cache=True, errors="raise", *,
+                       obj_dtype=None):
     """Parse a polars string Series or expression the way ``pd.to_datetime`` would.
 
     The arguments are the fields of ``DatetimeConversionOp``; ``exact=None`` keeps
-    polars' default, which matches pandas'.
+    polars' default, which matches pandas'. ``obj_dtype`` is the dtype of an
+    expression, when it is known.
     """
     if errors not in ("raise", "coerce"):
         raise ValueError(f"errors must be 'raise' or 'coerce', got {errors!r}")
+    dtype = getattr(obj, "dtype", None) or obj_dtype
+    if isinstance(dtype, pl.Datetime):
+        # pandas returns datetimes as they are, whatever the options.
+        return obj
     kwargs = {"format": format, "cache": cache, "strict": errors == "raise"}
     if exact is not None:
         kwargs["exact"] = exact
-    # TODO: Support already-datetime and numeric operands natively; the
-    # Polars string namespace only accepts string input.
+    # TODO: Support numeric operands, and datetimes inside an expression whose
+    # dtype is not known (FIXME #216); the string namespace only accepts strings.
     return obj.str.to_datetime(**kwargs)
 
 
