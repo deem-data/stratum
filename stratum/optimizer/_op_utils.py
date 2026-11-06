@@ -166,7 +166,13 @@ def validate_operands(op: Op) -> None:
     """Assert every OperandRef stored on `op` indexes a valid entry of op.inputs.
 
     Catches rewrites that drop/reorder inputs without renumbering operand refs.
+    A cache hit retains its original configuration for inspection, but those
+    fields no longer execute and its former OperandRefs are unused.
     """
+    if op.cache_hit is not None:
+        if op.inputs:
+            raise ValueError(f"A cache hit must have no inputs: {op!r}")
+        return
     n = len(op.inputs)
     for attr, value in op.__dict__.items():
         if attr in ("inputs", "outputs", "remove_after"):

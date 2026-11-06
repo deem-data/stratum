@@ -4,7 +4,7 @@ from skrub._data_ops._data_ops import Apply
 from skrub._data_ops._subsampling import SubsamplePreviews
 from collections import deque, defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .logical.rewrites._cse import apply_op_cse
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
@@ -20,6 +20,7 @@ from .logical.rewrites._relational import relational_rewrites
 from ._linearization import linearize_dag
 from ._fit_pass_planning import mark_fit_dead_ops
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
+from ._reuse_planning import apply_reuse_cache
 from .physical._plan_context import PlanContext
 from .physical._lowering import lower_to_physical
 from .physical._impl_selection import (ImplementationSelector, get_implementation_selector, select_implementations)
@@ -30,6 +31,9 @@ from stratum._profiler._diagnostics import capture_plan, diagnostics_enabled
 from stratum.utils._utils import start_time, log_time
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from stratum.runtime._reuse_cache import ReuseCache
 
 
 def topological_traverse(nodes, parents, children):
@@ -145,7 +149,7 @@ def _debug_validate_dag(root: Op):
         validate_dag(root)
 
 def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
-             search: SearchConfig | None = None):
+             search: SearchConfig | None = None, reuse_cache: "ReuseCache | None" = None):
     """Entry point for the optimizer. Runs the three planning phases and returns
     the linearized physical plan ``(linearized_dag, split_pos, flagged_ops)``.
 
@@ -157,12 +161,14 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
     2. :func:`~stratum.optimizer.physical._lowering.lower_to_physical` -- lower
        logical ops to physical ops (one logical op may become several).
     3. :func:`physical_optimize` -- select a concrete implementation per
-       physical op, then linearize and plan intermediate last use as the final step.
+       physical op, optionally prune work found in ``reuse_cache``, then linearize
+       and plan intermediate last use as the final step.
 
     ``env`` (variable name -> value), when supplied, lets the converter resolve
     variables to compile-time constants (ValueOps) instead of VariableOps. ``search``,
     when supplied, makes this a search plan: it ends in a scoring operator rather than
-    one that only labels its candidates."""
+    one that only labels its candidates. ``reuse_cache`` enables planning against
+    an explicit in-memory cache; cache hits require a scheduler that consumes them."""
     start = start_time()
     if config is None:
         config = OptConfig()
@@ -183,7 +189,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
 
     # Step 3: physical optimization (implementation selection + linearization).
     # TODO: May need physical-level rewrites before or after operator selection
-    result = physical_optimize(root, ctx, selector=config.selector)
+    result = physical_optimize(root, ctx, selector=config.selector, reuse_cache=reuse_cache)
 
     log_time("Optimization took in total", start)
     return result
@@ -254,18 +260,22 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 
 
 def physical_optimize(root: Op, ctx: PlanContext, registry=None,
-                      selector: ImplementationSelector | None = None):
-    """Step 3: select concrete implementations, then linearize and plan removals.
+                      selector: ImplementationSelector | None = None,
+                      reuse_cache: "ReuseCache | None" = None):
+    """Step 3: select implementations, plan reuse, then linearize and plan removals.
     Implementation selection resolves each op with registered candidates to a
     concrete implementation (consulting the default PhysicalRegistry unless one
-    is injected). Linearization and buffer-removal planning run last, as the
-    final step of the whole pipeline."""
+    is injected). An explicit cache supplies hits and admission keys before
+    linearization, so buffer-removal and fit-pass planning see the pruned graph."""
 
     # TODO: add physical rewrites here (or afterwards)
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
     root = select_implementations(root, ctx, registry=registry, selector=selector)
     _debug_validate_dag(root)
+    if reuse_cache is not None:
+        apply_reuse_cache(root, reuse_cache)
+        _debug_validate_dag(root)
     _debug_show_graph(root, "physical_impl")
     # similarly we can do the things like parallelization planning here
 

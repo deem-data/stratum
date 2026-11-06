@@ -301,6 +301,11 @@ class IRNode:
         self.remove_after: list[IRNode] = []
         #: Set by fit-pass planning: nothing the fitting pass runs needs this output.
         self.dead_in_fit = False
+        #: Set by reuse planning: admit this result under its lineage key.
+        self.cache_key: str | None = None
+        #: A retained cached value replaces execution; the op then has no inputs.
+        #: See _reuse_planning.CacheHit for the one-time handoff to the scheduler.
+        self.cache_hit = None
 
     def propagate_output_schema(self):
         """Default rule for the schema-propagation pass: the output is unknown.
