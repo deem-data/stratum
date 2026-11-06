@@ -67,6 +67,10 @@ stratum.set_config(
     stats=True,
 )
 ```
+
+`set_config` and nested `config(...)` contexts change only the settings supplied;
+`None` preserves the current value. Use `explain=False` to turn plan printing off.
+
 ### Example Code
 
 ```python
