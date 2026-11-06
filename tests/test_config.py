@@ -43,6 +43,14 @@ def test_config_restores_partial_changes_when_setup_raises(monkeypatch):
     assert "SKRUB_RUST" not in os.environ
 
 
+@pytest.mark.parametrize("bad", [0, -0.1, 1.1, float("nan"), float("inf"), "half", []])
+def test_invalid_reuse_fraction_does_not_change_config(bad):
+    original = get_config()
+    with pytest.raises(ValueError, match="reuse_cache_memory_fraction"):
+        st.set_config(reuse_cache=True, reuse_cache_memory_fraction=bad)
+    assert get_config() == original
+
+
 def test_config_changes_only_what_it_is_given():
     with st.config(implementation_selector="greedy", cse=False, explain=True,
                    graph_format="png"):
@@ -55,3 +63,19 @@ def test_config_changes_only_what_it_is_given():
             assert os.environ["STRATUM_IMPLEMENTATION_SELECTOR"] == "greedy"
         with st.config(explain=False):
             assert get_config()["explain"] == ()
+
+
+def test_reuse_settings_survive_other_config_calls_and_restore_after_failure():
+    original = get_config()
+    with st.config(reuse_cache=True, reuse_cache_memory_fraction=0.25):
+        st.set_config(stats=True)
+        assert get_config()["reuse_cache"] is True
+        assert get_config()["reuse_cache_memory_fraction"] == 0.25
+        with pytest.raises(RuntimeError):
+            with st.config(reuse_cache=False, reuse_cache_memory_fraction=1):
+                assert get_config()["reuse_cache"] is False
+                assert get_config()["reuse_cache_memory_fraction"] == 1.0
+                raise RuntimeError("test")
+        assert get_config()["reuse_cache"] is True
+        assert get_config()["reuse_cache_memory_fraction"] == 0.25
+    assert get_config() == original

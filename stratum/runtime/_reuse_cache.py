@@ -18,6 +18,8 @@ from operator import index
 from threading import Lock
 from typing import Any
 
+from stratum._config import FLAGS
+from stratum.runtime._buffer_pool import _resolve_memory_budget
 from stratum.runtime._eviction_policy import LRUPolicy
 from stratum.runtime._object_size import get_size
 
@@ -158,3 +160,26 @@ class ReuseCache:
             self._entries.clear()
             self._policy = LRUPolicy()
             self._memory_usage = 0
+
+
+_active: ReuseCache | None = None
+_active_lock = Lock()
+
+
+def active_reuse_cache() -> ReuseCache | None:
+    """One lazily created memory cache shared by enabled runs in this process.
+
+    Disabled runs neither create nor discard it. The configured budget takes
+    effect on each enabled call; reducing it can evict existing entries. The
+    lock ensures concurrent first callers receive the same cache instance.
+    """
+    global _active
+    if not FLAGS.reuse_cache:
+        return None
+    with _active_lock:
+        budget = _resolve_memory_budget(FLAGS.reuse_cache_memory_fraction, name="reuse cache")
+        if _active is None:
+            _active = ReuseCache(memory_budget=budget)
+        else:
+            _active.memory_budget = budget
+        return _active

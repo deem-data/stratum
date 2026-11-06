@@ -71,6 +71,15 @@ stratum.set_config(
 `set_config` and nested `config(...)` contexts change only the settings supplied;
 `None` preserves the current value. Use `explain=False` to turn plan printing off.
 
+To reuse eligible preprocessing results across runs in the same process, add
+`reuse_cache=True` to the configuration. `reuse_cache_memory_fraction=0.1`
+sets its estimated memory budget to 10% of system memory, separate from the
+BufferPool budget. Results are keyed by Merkle lineage, kept only in memory,
+and evicted in least-recently-used order. Reuse is limited to work before the
+train/test split; file-backed inputs can be keyed, while in-memory input data
+currently cannot. Disabling reuse bypasses the cache and retains its entries
+for later enabled runs. Budget changes apply before the next enabled run.
+
 ### Example Code
 
 ```python

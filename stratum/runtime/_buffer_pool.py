@@ -66,15 +66,15 @@ def _host_memory_bytes() -> int | None:
     return None
 
 
-def _resolve_memory_budget(fraction: float) -> int:
-    """Memory budget for the BufferPool: ``fraction`` of the detected memory.
+def _resolve_memory_budget(fraction: float, *, name: str = "buffer pool") -> int:
+    """Memory budget: ``fraction`` of the detected memory.
     A failed detection logs a warning and falls back to _FALLBACK_MEMORY_BUDGET
     """
     host_memory = _host_memory_bytes()
     if host_memory is None:
         logger.warning(
             "Could not detect system memory; falling back to a "
-            f"{prettify_bytes(_FALLBACK_MEMORY_BUDGET)} buffer pool budget."
+            f"{prettify_bytes(_FALLBACK_MEMORY_BUDGET)} {name} budget."
         )
         return _FALLBACK_MEMORY_BUDGET
     # Clamp to at least one byte: budget 0 would silently disable eviction.

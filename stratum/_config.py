@@ -61,16 +61,17 @@ def _read_explain_levels(value) -> tuple[str, ...]:
 
 # Memory fraction of host memory to use for the buffer pool.
 _DEFAULT_BUFFER_POOL_MEMORY_FRACTION = 0.7 # default 70%
+_DEFAULT_REUSE_CACHE_MEMORY_FRACTION = 0.1
 
-def _read_memory_fraction(value) -> float:
+def _read_memory_fraction(value, name="buffer_pool_memory_fraction") -> float:
     try:
         fraction = float(value)
     except (TypeError, ValueError):
         raise ValueError(
-            f"buffer_pool_memory_fraction must be a float in (0, 1], got {value!r}.")
+            f"{name} must be a float in (0, 1], got {value!r}.")
     if not 0 < fraction <= 1:
         raise ValueError(
-            f"buffer_pool_memory_fraction must be in (0, 1], got {value!r}.")
+            f"{name} must be in (0, 1], got {value!r}.")
     return fraction
 
 
@@ -98,6 +99,8 @@ class _Flags:
     make_column_projection: bool = True
     rechunk: bool = True
     buffer_pool_memory_fraction: float = _DEFAULT_BUFFER_POOL_MEMORY_FRACTION
+    reuse_cache: bool = _env_bool("STRATUM_REUSE_CACHE", False)
+    reuse_cache_memory_fraction: float = _DEFAULT_REUSE_CACHE_MEMORY_FRACTION
 
 FLAGS = _Flags()
 
@@ -152,6 +155,8 @@ def set_config(rust_backend: bool | None = None,
     rechunk: bool | None = None,
     buffer_pool_memory_fraction: float | None = None,
     implementation_selector: str | None = None,
+    reuse_cache: bool | None = None,
+    reuse_cache_memory_fraction: float | None = None,
                ) -> None:
     """Runtime toggles (synced env for Rust to read).
 
@@ -220,6 +225,22 @@ def set_config(rust_backend: bool | None = None,
             Share of the detected system memory used as the buffer pool's memory
             budget. The byte budget is resolved when a BufferPool is constructed
             (fixed 2 GiB fallback when host memory cannot be detected).
+
+        reuse_cache: bool, default false
+            Reuse eligible pre-split results by Merkle lineage key across
+            Stratum evaluation and grid-search runs in this process. The cache
+            is created lazily and kept only in memory. Every keyed result except
+            constants is eligible for admission. Disabling reuse bypasses reads
+            and writes while retaining existing entries for later enabled runs.
+            Defaults from STRATUM_REUSE_CACHE at import time.
+
+        reuse_cache_memory_fraction: float in (0, 1], default 0.1
+            Share of detected system memory used as the reuse cache's estimated
+            byte budget, separate from the BufferPool budget (fixed 2 GiB
+            fallback when host memory cannot be detected). Applied before each
+            enabled run, evicting least recently used entries if necessary.
+            This limits stored entries, not total process memory; active plans
+            and returned results may retain their own copies.
     """
     if implementation_selector is not None:
         implementation_selector = _read_implementation_selector(implementation_selector)
@@ -227,6 +248,9 @@ def set_config(rust_backend: bool | None = None,
         explain = _read_explain_levels(explain)
     if buffer_pool_memory_fraction is not None:
         buffer_pool_memory_fraction = _read_memory_fraction(buffer_pool_memory_fraction)
+    if reuse_cache_memory_fraction is not None:
+        reuse_cache_memory_fraction = _read_memory_fraction(
+            reuse_cache_memory_fraction, "reuse_cache_memory_fraction")
     if rust_backend is not None:
         FLAGS.rust_backend = bool(rust_backend)
         os.environ["SKRUB_RUST"] = "1" if FLAGS.rust_backend else "0"
@@ -267,6 +291,10 @@ def set_config(rust_backend: bool | None = None,
         FLAGS.buffer_pool_memory_fraction = buffer_pool_memory_fraction
     if explain is not None:
         FLAGS.explain = explain
+    if reuse_cache is not None:
+        FLAGS.reuse_cache = bool(reuse_cache)
+    if reuse_cache_memory_fraction is not None:
+        FLAGS.reuse_cache_memory_fraction = reuse_cache_memory_fraction
 
 
 def get_config() -> dict:
