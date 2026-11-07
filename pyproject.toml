@@ -132,6 +132,7 @@ dev = [
 
 [tool.coverage.run]
 source = ["stratum"]
+patch = ["subprocess"]  # Server integration tests launch `python -m stratum`.
 omit = [
     "**/tests/**",
     "*/__pycache__/*",

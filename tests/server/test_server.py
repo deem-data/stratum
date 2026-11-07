@@ -1,4 +1,5 @@
 """Stratum as a server: scripts and DAGs run in one process and share its reuse cache."""
+import base64
 import io
 import json
 import os
@@ -21,8 +22,8 @@ from stratum.__main__ import main
 from stratum._api import evaluate, grid_search
 from stratum._config import FLAGS
 from stratum.server._client import (SERVER_INFO, JobFailed, ServerError, ServerNotRunning,
-                                    StratumClient, dump_call)
-from stratum.server._server import run_call, run_script
+                                    StratumClient, dump_call, runtime)
+from stratum.server._server import StratumServer, run_call, run_script
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -73,10 +74,16 @@ def test_run_script_behaves_like_python(tmp_path):
     assert run_script(write(tmp_path / "f.py", "1 / 0"), stderr=err) == 1
     assert "ZeroDivisionError" in err.getvalue()
 
+    err = io.StringIO()
+    assert run_script(write(tmp_path / "exit.py", "raise SystemExit('bad input')"),
+                      stderr=err) == 1
+    assert err.getvalue() == "bad input\n"
 
-def test_run_script_restores_process_state(tmp_path):
+
+@pytest.mark.parametrize("ending, exit_code", [("", 0), ("raise RuntimeError('job failed')", 1)])
+def test_run_script_restores_process_state(tmp_path, ending, exit_code):
     write(tmp_path / "helper_mod.py", "VALUE = 1\n")
-    script = write(tmp_path / "s.py", """
+    script = write(tmp_path / "s.py", f"""
         import os, sys, stratum as st, skrub
         import helper_mod
         print(helper_mod.VALUE)
@@ -84,19 +91,20 @@ def test_run_script_restores_process_state(tmp_path):
         skrub.set_config(eager_data_ops=False)
         os.environ["STRATUM_TEST_VAR"] = "1"
         sys.argv.append("x")
+        {ending}
     """)
     import skrub
     before = (dict(vars(FLAGS)), skrub.get_config(), dict(os.environ), list(sys.argv),
               os.getcwd())
     out = io.StringIO()
-    assert run_script(script, cwd=str(tmp_path), stdout=out) == 0
+    assert run_script(script, cwd=str(tmp_path), stdout=out) == exit_code
     after = (dict(vars(FLAGS)), skrub.get_config(), dict(os.environ), list(sys.argv),
              os.getcwd())
     assert after == before
     assert "helper_mod" not in sys.modules, "user modules are dropped after a job"
     # A different size: the bytecode cache checks size and whole-second mtime.
     write(tmp_path / "helper_mod.py", "VALUE = 22\n")
-    assert run_script(script, cwd=str(tmp_path), stdout=out) == 0
+    assert run_script(script, cwd=str(tmp_path), stdout=out) == exit_code
     assert out.getvalue().split() == ["1", "22"], "an edited helper is re-imported"
 
 
@@ -239,7 +247,7 @@ def run(server_dir, *argv):
     return float(lines["pred"]), int(lines["reads"])
 
 
-def test_submitted_scripts_share_the_cache(tmp_path, job_dir):
+def test_submitted_scripts_share_the_cache(tmp_path, job_dir, capsys):
     server_dir = tmp_path / "server"
     proc = start_server(server_dir)
     try:
@@ -256,9 +264,11 @@ def test_submitted_scripts_share_the_cache(tmp_path, job_dir):
                 client.start("missing.py")
             stats = client.stats()
         assert stats["jobs"] == 3 and stats["entries"] > 0
-        with StratumClient(server_dir=server_dir) as client:
-            cleared = client.clear()
-            assert cleared["entries"] == cleared["memory_usage"] == 0
+        assert main(["--server-dir", str(server_dir), "clear"]) == 0
+        out, err = capsys.readouterr()
+        assert err == ""
+        cleared = json.loads(out)
+        assert cleared["entries"] == cleared["memory_usage"] == 0
         after_clear, reads = run(server_dir, "1.0")
         assert after_clear == edited and reads == stats["stats"]["hits"]
     finally:
@@ -346,8 +356,11 @@ def test_the_server_answers_while_a_job_runs(tmp_path, job_dir, capsys):
             time.sleep(0.05)
         assert client.health()["jobs"] == 1
         assert client.stats()["jobs"] == 1
-        queued = client.start("wait.py")
+        frame = pd.DataFrame({"v": [1, 2]})
+        queued = client.start_call("evaluate", query(frame), cwd=tmp_path / "client-only")
         assert client.job(queued)["status"] == "queued"
+        with pytest.raises(ServerError, match="409.*queued"):
+            client.result(queued)
         (job_dir / "go").touch()
         out = io.StringIO()
         assert client.follow(job, stdout=out) == 0
@@ -357,6 +370,7 @@ def test_the_server_answers_while_a_job_runs(tmp_path, job_dir, capsys):
         assert client.follow(job, stdout=out) == 0
         assert out.getvalue() == "waiting\ndone\n"
         assert client.follow(queued, stdout=io.StringIO()) == 0
+        pd.testing.assert_frame_equal(client.result(queued), frame.assign(w=[10, 20]))
         info = client.job(job)
         assert info["status"] == "finished" and info["exit_code"] == 0
 
@@ -460,7 +474,88 @@ def test_calls_run_dags_built_by_the_client(tmp_path, job_dir, sales_csv, pricin
         stop_server(server_dir, proc)
 
 
-def test_no_server(tmp_path):
+@pytest.mark.parametrize("payload, error", [
+    ("a", "base64"),
+    (base64.b64encode(b"not a pickle").decode("ascii"), "UnpicklingError"),
+])
+def test_bad_call_payload_fails_the_job_and_the_server_keeps_running(tmp_path, payload, error):
+    server_dir = tmp_path / "server"
+    proc = start_server(server_dir)
+    try:
+        with StratumClient(server_dir=server_dir) as client:
+            job = client._request("POST", "/v1/calls", json={
+                "function": "evaluate", "payload": payload, "config": {},
+                "runtime": runtime(), "cwd": str(tmp_path),
+            })["id"]
+            err = io.StringIO()
+            assert client.follow(job, stderr=err) == 1
+            assert error in err.getvalue()
+            assert client.job(job)["status"] == "finished"
+            with pytest.raises(ServerError, match="409.*failed with exit code 1"):
+                client.result(job)
+
+            frame = pd.DataFrame({"v": [1, 2]})
+            pd.testing.assert_frame_equal(client.evaluate(query(frame)), frame.assign(w=[10, 20]))
+    finally:
+        stop_server(server_dir, proc)
+
+
+def test_a_second_server_cannot_replace_a_running_server(tmp_path):
+    server_dir = tmp_path / "server"
+    proc = start_server(server_dir)
+    try:
+        info = (server_dir / SERVER_INFO).read_text()
+        with pytest.raises(RuntimeError, match="already running"):
+            StratumServer(server_dir).serve_forever()
+        assert (server_dir / SERVER_INFO).read_text() == info
+        with StratumClient(server_dir=server_dir) as client:
+            assert client.health()["ok"]
+    finally:
+        stop_server(server_dir, proc)
+
+
+def test_cli_shutdown_finishes_queued_jobs(tmp_path, capsys):
+    server_dir = tmp_path / "server"
+    waiting = write(tmp_path / "wait.py", """
+        import pathlib, time
+        pathlib.Path("ready").touch()
+        while not pathlib.Path("go").exists():
+            time.sleep(0.05)
+        pathlib.Path("completed").write_text("first\\n")
+    """)
+    second = write(tmp_path / "second.py", """
+        import pathlib
+        with pathlib.Path("completed").open("a") as f:
+            f.write("second\\n")
+    """)
+    proc = start_server(server_dir)
+    try:
+        with StratumClient(server_dir=server_dir) as client:
+            client.start(waiting, cwd=tmp_path)
+            deadline = time.monotonic() + 20
+            while not (tmp_path / "ready").exists():
+                assert time.monotonic() < deadline, "job did not start"
+                time.sleep(0.05)
+            queued = client.start(second, cwd=tmp_path)
+            assert client.job(queued)["status"] == "queued"
+
+        assert main(["--server-dir", str(server_dir), "shutdown"]) == 0
+        assert capsys.readouterr() == ("", "")
+        assert proc.poll() is None, "shutdown must wait for the running job"
+        (tmp_path / "go").touch()
+        out, _ = proc.communicate(timeout=30)
+        assert proc.returncode == 0, out
+        assert (tmp_path / "completed").read_text().splitlines() == ["first", "second"]
+        assert not (server_dir / SERVER_INFO).exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+
+
+def test_no_server(tmp_path, capsys):
     with pytest.raises(ServerNotRunning, match="No stratum server"):
         StratumClient(server_dir=tmp_path)
     assert main(["--server-dir", str(tmp_path), "stats"]) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and "No stratum server" in err
