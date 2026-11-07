@@ -13,21 +13,29 @@ only as long as this cache instance and are never serialized.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
+import logging
 from operator import index
 from threading import Lock
-from typing import Any
+import time
+from typing import Any, Callable
 
 from stratum._config import FLAGS
 from stratum.runtime._buffer_pool import _resolve_memory_budget
 from stratum.runtime._eviction_policy import LRUPolicy
 from stratum.runtime._object_size import get_size
 
+logger = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
+
+@dataclass
 class _CacheEntry:
     data: Any
     size: int
+    admission_id: int
+    label: str | None = None
+    hits: int = 0
+    last_access: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -64,6 +72,8 @@ class ReuseCache:
         self._policy = LRUPolicy()
         self._stats = ReuseCacheStats()
         self._lock = Lock()
+        #: Optional diagnostic observers, called outside the cache lock.
+        self.listeners: list[Callable[[str], None]] = []
 
     def __contains__(self, key: str) -> bool:
         with self._lock:
@@ -88,8 +98,9 @@ class ReuseCache:
         value = _budget_bytes(value)
         with self._lock:
             self._memory_budget = value
-            if value:
-                self._evict(self._memory_usage - value)
+            freed = self._evict(self._memory_usage - value) if value else 0
+        if freed:
+            self._notify("evict")
 
     @property
     def stats(self) -> ReuseCacheStats:
@@ -97,7 +108,28 @@ class ReuseCache:
         with self._lock:
             return replace(self._stats)
 
-    def put(self, key: str, data: Any) -> bool:
+    def snapshot(self, *, include_entries: bool = False) -> dict:
+        """Copy counters and memory state atomically, optionally with entry metadata.
+
+        Entry details contain no cached values and do not affect lookup counters
+        or LRU order. Evicted entries leave no per-key history behind.
+        """
+        with self._lock:
+            report = {
+                "stats": asdict(self._stats),
+                "entries": len(self._entries),
+                "memory_usage": self._memory_usage,
+                "memory_budget": self._memory_budget,
+            }
+            if include_entries:
+                report["entry_details"] = [{
+                    "key": key, "label": entry.label, "size": entry.size,
+                    "admission_id": entry.admission_id,
+                    "hits": entry.hits, "last_access": entry.last_access,
+                } for key, entry in self._entries.items()]
+            return report
+
+    def put(self, key: str, data: Any, *, label: str | None = None) -> bool:
         """Keep ``data`` if it fits, evicting older entries as needed.
 
         A duplicate key keeps the existing value. An oversized entry is refused
@@ -113,11 +145,12 @@ class ReuseCache:
                 return False
             if self._memory_budget:
                 self._evict(self._memory_usage + size - self._memory_budget)
-            self._entries[key] = _CacheEntry(data, size)
+            self._entries[key] = _CacheEntry(data, size, self._stats.puts + 1, label=label)
             self._memory_usage += size
             self._policy.on_insert(key, size)
             self._stats.puts += 1
-            return True
+        self._notify("admit")
+        return True
 
     def get(self, key: str, default: Any = None) -> Any:
         """Return the cached object and refresh its LRU position, or ``default``."""
@@ -128,7 +161,11 @@ class ReuseCache:
                 return default
             self._policy.on_access(key)
             self._stats.hits += 1
-            return entry.data
+            entry.hits += 1
+            entry.last_access = time.time()
+            data = entry.data
+        self._notify("read")
+        return data
 
     def evict(self, bytes_needed: int) -> int:
         """Drop least recently used entries until enough estimated bytes are freed.
@@ -137,7 +174,10 @@ class ReuseCache:
         if the cache is exhausted. Existing readers retain their references.
         """
         with self._lock:
-            return self._evict(bytes_needed)
+            freed = self._evict(bytes_needed)
+        if freed:
+            self._notify("evict")
+        return freed
 
     def _evict(self, bytes_needed: int) -> int:
         """Evict while the caller holds the lock."""
@@ -160,6 +200,15 @@ class ReuseCache:
             self._entries.clear()
             self._policy = LRUPolicy()
             self._memory_usage = 0
+        self._notify("clear")
+
+    def _notify(self, event: str) -> None:
+        """Observers may inspect the cache; failures must not affect execution."""
+        for listener in tuple(self.listeners):
+            try:
+                listener(event)
+            except Exception:
+                logger.warning("Could not record reuse cache event %s", event, exc_info=True)
 
 
 _active: ReuseCache | None = None

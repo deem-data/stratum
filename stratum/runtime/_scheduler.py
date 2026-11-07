@@ -220,7 +220,7 @@ class Scheduler:
             # Operators read inputs without mutating them, so the cache can
             # retain the same objects as this execution.
             if self.reuse_cache is not None and op.cache_key is not None:
-                self.reuse_cache.put(op.cache_key, result)
+                self.reuse_cache.put(op.cache_key, result, label=str(op))
 
             # 3. unpin inputs
             for in_op in op.inputs:

@@ -185,7 +185,8 @@ def set_config(rust_backend: bool | None = None,
 
         stats: bool, default false
             Print optimization and scheduler execution timing,
-            DataOp heavy hitters, and BufferPool statistics.
+            DataOp heavy hitters, BufferPool statistics, and reuse-cache
+            lifetime counters and memory usage when reuse is enabled.
 
         stats_top_k: int >= 0, default 20
             Set the number of heavy hitters to print when stats is enabled.

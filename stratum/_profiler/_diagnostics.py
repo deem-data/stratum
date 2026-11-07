@@ -112,6 +112,30 @@ def current_diagnostics():
     return _active_run.get()
 
 
+def record_reuse_plan(ops, region, keys, reasons):
+    """Record planning decisions for surviving nodes, before execution."""
+    run = current_diagnostics()
+    if run is None:
+        return
+    try:
+        decisions = {}
+        for op in ops:
+            if op.cache_hit is not None:
+                decision = {"status": "hit", "key": op.cache_hit.key}
+            elif op.cache_key is not None:
+                decision = {"status": "eligible", "key": op.cache_key}
+            elif op not in region:
+                decision = {"status": "outside"}
+            elif keys.get(op) is None:
+                decision = {"status": "unkeyed", "reason": reasons.get(op)}
+            else:
+                decision = {"status": "keyed", "key": keys[op]}
+            decisions[op] = decision
+        run.reuse_plan = decisions
+    except Exception:
+        logger.warning("Could not capture reuse diagnostics", exc_info=True)
+
+
 class RunDiagnostics:
     def __init__(self, directory, kind, config):
         self.directory = Path(directory).expanduser()
@@ -126,6 +150,41 @@ class RunDiagnostics:
         self.optimization_start = None
         self.execution_start = None
         self.hardware = None
+        self.reuse_cache = None
+        self.reuse_stats_before = None
+        self.reuse_plan = {}
+
+    def attach_reuse_cache(self, cache):
+        """Start the counter interval before this run plans its cache reuse."""
+        self.reuse_cache = cache
+        self.reuse_stats_before = asdict(cache.stats)
+
+    def reuse_cache_report(self, sched):
+        """Cache-wide state plus this run's planning decisions by physical node ID.
+
+        Counters cover the run's interval, as in server job reports. Concurrent
+        users of the same cache can contribute to that interval too.
+        """
+        report = self.reuse_cache.snapshot(include_entries=True)
+        entries = {entry["key"]: entry for entry in report.pop("entry_details")}
+        report["stats"] = {name: value - self.reuse_stats_before[name]
+                           for name, value in report["stats"].items()}
+        report["stats_scope"] = "run_interval"
+        nodes = report["nodes"] = {}
+        for i, op in enumerate(sched.linearized_dag if sched is not None else ()):
+            decision = self.reuse_plan.get(op)
+            if decision is None:
+                continue
+            node = dict(decision)
+            if node["status"] in ("hit", "eligible"):
+                node["label"] = str(op)
+            if node["status"] == "eligible":
+                entry = entries.get(node["key"])
+                node["stored"] = entry is not None
+                if entry is not None:
+                    node["size"] = entry["size"]
+            nodes[str(i)] = node
+        return report
 
     def partial_timings(self, start):
         """Timings of a run that did not reach ``record_timings``, split by stage marks."""
@@ -152,7 +211,10 @@ class RunDiagnostics:
             "timings": self.timings,
             "node_timings": {}, "heavy_hitters": [], "buffer_pool": None,
             "hardware": self.hardware,
+            "reuse_cache": None,
         }
+        if self.reuse_cache is not None:
+            document["reuse_cache"] = self.reuse_cache_report(sched)
         if sched is not None:
             node_timings = (sched.observer.node_timings if sched.observer is not None else None) or {}
             document["node_timings"] = {

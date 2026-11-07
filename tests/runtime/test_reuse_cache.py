@@ -1,7 +1,7 @@
 """Memory reuse retains references, respects its byte budget, and is thread-safe."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from threading import Barrier
+from threading import Barrier, Thread
 import weakref
 
 import numpy as np
@@ -172,11 +172,92 @@ def test_stats_are_independent_snapshots():
     assert cache.stats.hits == 0
 
 
+def test_snapshot_is_independent_and_does_not_change_counters_or_lru():
+    cache = ReuseCache(memory_budget=160)
+    cache.put("a", _arr(10))
+    cache.put("b", _arr(10))
+    snapshot = cache.snapshot()
+    assert snapshot == {
+        "stats": dict(puts=2, rejected=0, hits=0, misses=0, evictions=0),
+        "entries": 2, "memory_usage": 160, "memory_budget": 160,
+    }
+    cache.put("c", _arr(10))
+    assert "a" not in cache and "b" in cache
+    assert snapshot["stats"]["puts"] == 2 and snapshot["stats"]["evictions"] == 0
+    snapshot["stats"]["hits"] = 100
+    snapshot["memory_budget"] = 0
+    assert cache.stats.hits == 0 and cache.memory_budget == 160
+
+
 def test_instances_share_neither_entries_nor_lru_state():
     first, second = ReuseCache(), ReuseCache()
     first.put("key", _arr(10))
     assert second.get("key") is None and second.memory_usage == 0
     assert first.stats.misses == 0
+
+
+def test_entry_details_are_independent_and_contain_no_cached_values():
+    cache = ReuseCache(memory_budget=160)
+    value = _arr(10)
+    cache.put("a", value, label="source")
+    cache.put("b", _arr(10), label="result")
+    before = cache.snapshot(include_entries=True)
+    cache.get("b")
+    after = cache.snapshot(include_entries=True)
+    assert sum(entry["size"] for entry in after["entry_details"]) == after["memory_usage"]
+    assert before["entry_details"][1]["hits"] == 0
+    assert after["entry_details"][1]["hits"] == 1
+    assert after["entry_details"][1]["last_access"] >= before["entry_details"][1]["last_access"]
+    assert set(after["entry_details"][0]) == {
+        "key", "label", "size", "admission_id", "hits", "last_access"}
+    assert after["entry_details"][0]["label"] == "source"
+    after["entry_details"][0]["label"] = "changed"
+    assert cache.snapshot(include_entries=True)["entry_details"][0]["label"] == "source"
+    cache.put("c", _arr(10))
+    assert "a" not in cache, "inspection must not refresh LRU order"
+    assert {entry["key"] for entry in cache.snapshot(include_entries=True)["entry_details"]} == {"b", "c"}
+    cache.clear()
+    assert cache.snapshot(include_entries=True)["entry_details"] == []
+
+
+def test_cache_observers_can_snapshot_without_deadlocking():
+    cache = ReuseCache(memory_budget=160)
+    samples, errors = [], []
+    cache.listeners.append(lambda event: samples.append((event, cache.snapshot(include_entries=True))))
+
+    def exercise():
+        try:
+            cache.put("a", _arr(10))
+            cache.put("b", _arr(10))
+            cache.get("a")
+            cache.memory_budget = 80
+            cache.evict(80)
+            cache.clear()
+        except BaseException as error:
+            errors.append(error)
+
+    # A lock regression must fail the test instead of hanging the pytest process.
+    thread = Thread(target=exercise, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "cache observer deadlocked while taking a snapshot"
+    assert not errors
+    assert [event for event, _ in samples] == ["admit", "admit", "read", "evict", "evict", "clear"]
+    assert samples[-1][1]["memory_usage"] == 0
+
+
+def test_a_broken_observer_does_not_change_cache_results(caplog):
+    cache = ReuseCache()
+
+    def fail(event):
+        raise ValueError("diagnostics unavailable")
+
+    cache.listeners.append(fail)
+    assert cache.put("key", 42)
+    assert cache.get("key") == 42
+    cache.clear()
+    assert "Could not record reuse cache event" in caplog.text
+    assert cache.stats.puts == cache.stats.hits == 1
 
 
 def test_merkle_keys_reuse_equivalent_configurations():

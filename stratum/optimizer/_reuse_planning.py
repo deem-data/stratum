@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from stratum._profiler._diagnostics import current_diagnostics, record_reuse_plan
 from stratum.optimizer._lineage import compute_lineage_keys
 from stratum.optimizer._linearization import is_recomputed
 from stratum.optimizer._op_utils import topological_iterator
@@ -75,17 +76,22 @@ def apply_reuse_cache(root: IRNode, cache: ReuseCache) -> None:
     ops = list(topological_iterator(root))
     if any(op.cache_hit is not None for op in ops):
         raise ValueError("reuse planning needs an unpruned graph; optimize the plan again")
-    keys = compute_lineage_keys(ops, cacheable_region(ops))
+    region = cacheable_region(ops)
+    reasons = {} if current_diagnostics() is not None else None
+    keys = compute_lineage_keys(ops, region, reasons=reasons)
     for op in ops:
         op.cache_key = None
 
     hits = _take_cached(root, keys, cache)
     admitted = 0
-    for op in topological_iterator(root):
+    remaining = list(topological_iterator(root))
+    for op in remaining:
         if (keys.get(op) is not None and op.cache_hit is None
                 and not isinstance(op, ValueOp)):
             op.cache_key = keys[op]
             admitted += 1
+    if reasons is not None:
+        record_reuse_plan(remaining, region, keys, reasons)
     logger.debug("Reuse planning: %d cache hits, %d admission candidates", hits, admitted)
 
 

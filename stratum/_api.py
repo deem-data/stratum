@@ -8,6 +8,7 @@ from stratum._config import FLAGS
 from stratum.optimizer._optimize import SearchConfig, optimize
 from stratum.optimizer.logical._scoring import resolve_declared_scoring, resolve_scoring
 from stratum.runtime._reuse_cache import active_reuse_cache
+from stratum.runtime._object_size import prettify_bytes
 from stratum.runtime._scheduler import SequentialScheduler
 from stratum.frontend._skrub_graph import get_data
 from time import perf_counter
@@ -77,6 +78,8 @@ def _execute(dag, env, t0, execute, search=None):
     profiling = profiler.enabled()
     cache = active_reuse_cache()
     if profiling:
+        if cache is not None:
+            profiler.reuse_cache_attached(cache)
         profiler.optimization_started()
     optimize_start = perf_counter()
     linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search,
@@ -123,4 +126,14 @@ def stats_printer(sched: SequentialScheduler, run: RunTimings):
         print("=" * 80)
         print("BufferPool detail (serialize/deserialize times are included in Execution):")
         print(sched.pool.stats)
+        if sched.reuse_cache is not None:
+            cache = sched.reuse_cache.snapshot()
+            stats = cache["stats"]
+            budget = prettify_bytes(cache["memory_budget"]) if cache["memory_budget"] else "unlimited"
+            print("Reuse cache (cache lifetime counters):")
+            print(f"  Hits: {stats['hits']}, misses: {stats['misses']}, "
+                  f"insertions: {stats['puts']}, rejections: {stats['rejected']}, "
+                  f"evictions: {stats['evictions']}")
+            print(f"  Entries: {cache['entries']}, "
+                  f"memory: {prettify_bytes(cache['memory_usage'])} / {budget}")
         print("=" * 80 + "\n")
