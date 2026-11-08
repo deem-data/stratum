@@ -48,7 +48,9 @@ from sklearn.linear_model import (ElasticNet, Lasso, LinearRegression,
                                   SGDClassifier, SGDRegressor)
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.tree._tree import NODE_DTYPE, Tree
 
+from stratum import _rust_backend as rb
 from stratum.adapters.tree_classifier import (
     RustRandomForestClassifier,
     supports_rust_histogram_random_forest_classifier,
@@ -56,13 +58,30 @@ from stratum.adapters.tree_classifier import (
 )
 from stratum.optimizer.logical._ops import PredictorOp
 from stratum.optimizer.physical._lowering import lowering_rule
-from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp
+from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp, EstimatorExecution
 from stratum.optimizer.physical._registry import rust_impl, sklearn_skrub_impl
+
+
+class _PredictorExecution(EstimatorExecution, PredictorOp, PhysicalOp):
+    # TODO: specialize linear, neighbor and third-party model sizing. Until then
+    # the generic estimate is computed once per fit, never on a response pass.
+    pass
+
+
+def _sklearn_tree_size(tree: Tree) -> int:
+    """Native node/value allocations, without constructing serialization state."""
+    return tree.capacity * (NODE_DTYPE.itemsize + 8 * tree.n_outputs * tree.max_n_classes)
+
+
+class _SklearnForestState:
+    def _measure_retained_state(self) -> int:
+        # TODO: include Python metadata and auxiliary fitted arrays.
+        return sum(_sklearn_tree_size(tree.tree_) for tree in self.estimator.estimators_)
 
 
 # --- Pass-through ------------------------------------------------------------
 @sklearn_skrub_impl(of=PredictorOp)
-class PassthroughPredictor(PredictorOp, PhysicalOp):
+class PassthroughPredictor(_PredictorExecution):
     """Impl for any predictor without a family -- scikit-learn, third-party or
     user-defined -- that runs the estimator as-is, much like a UDF.
 
@@ -80,13 +99,13 @@ class PassthroughPredictor(PredictorOp, PhysicalOp):
 
 
 # --- Random forest -----------------------------------------------------------
-class RandomForestOp(PredictorOp, PhysicalOp):
+class RandomForestOp(_PredictorExecution):
     """Abstract physical random forest (``RandomForestClassifier``/``Regressor``)."""
     is_abstract = True
 
 
 @sklearn_skrub_impl(of=RandomForestOp, implementation_name="sklearn_rf")
-class SklearnRandomForestClassifier(RandomForestOp):
+class SklearnRandomForestClassifier(_SklearnForestState, RandomForestOp):
     """Reference impl: runs the scikit-learn forest as-is."""
     is_abstract = False
 
@@ -114,6 +133,13 @@ class _RustRandomForestPhysicalOp(RandomForestOp, RustPhysicalOp):
     """Shared physical binding for the exact and histogram algorithm variants."""
     is_abstract = True
     histogram_backend = False
+
+    def _measure_retained_state(self) -> int:
+        # Predictors are not wrapped by Skrub, so the fitted handle is directly
+        # available. EstimatorExecution stores this estimate after fitting.
+        # TODO: return this scalar from native fit without computing model_info's
+        # other diagnostics. Include Vec spare capacity and native/Python metadata.
+        return rb.forest_model_info(self.estimator._forest_model_handle_)["model_bytes"]
 
     @classmethod
     def supports(cls, op: RandomForestOp, ctx: Any) -> bool:
@@ -149,20 +175,20 @@ class StratumHistogramRandomForestClassifier(_RustRandomForestPhysicalOp):
     histogram_backend = True
 
 
-class ExtraTreesOp(PredictorOp, PhysicalOp):
+class ExtraTreesOp(_PredictorExecution):
     """Abstract physical extremely randomized trees
     (``ExtraTreesClassifier``/``Regressor``)."""
     is_abstract = True
 
 
 @sklearn_skrub_impl(of=ExtraTreesOp)
-class SklearnExtraTrees(ExtraTreesOp):
+class SklearnExtraTrees(_SklearnForestState, ExtraTreesOp):
     """Reference impl: runs the scikit-learn extra-trees ensemble as-is."""
     is_abstract = False
 
 
 # --- Decision tree -----------------------------------------------------------
-class DecisionTreeOp(PredictorOp, PhysicalOp):
+class DecisionTreeOp(_PredictorExecution):
     """Abstract physical decision tree (``DecisionTreeClassifier``/``Regressor``)."""
     is_abstract = True
 
@@ -172,9 +198,13 @@ class SklearnDecisionTree(DecisionTreeOp):
     """Reference impl: runs the scikit-learn decision tree as-is."""
     is_abstract = False
 
+    def _measure_retained_state(self) -> int:
+        # TODO: include Python metadata and auxiliary fitted arrays.
+        return _sklearn_tree_size(self.estimator.tree_)
+
 
 # --- Histogram gradient boosting ----------------------------------------------
-class HistGradientBoostingOp(PredictorOp, PhysicalOp):
+class HistGradientBoostingOp(_PredictorExecution):
     """Abstract physical histogram gradient boosting
     (``HistGradientBoostingClassifier``/``Regressor``)."""
     is_abstract = True
@@ -187,7 +217,7 @@ class SklearnHistGradientBoosting(HistGradientBoostingOp):
 
 
 # --- Nearest neighbors -------------------------------------------------------
-class KNeighborsOp(PredictorOp, PhysicalOp):
+class KNeighborsOp(_PredictorExecution):
     """Abstract physical k-nearest neighbors (``KNeighborsClassifier``/``Regressor``)."""
     is_abstract = True
 
@@ -199,7 +229,7 @@ class SklearnKNeighbors(KNeighborsOp):
 
 
 # --- Linear models -----------------------------------------------------------
-class LinearRegressionOp(PredictorOp, PhysicalOp):
+class LinearRegressionOp(_PredictorExecution):
     """Abstract physical ordinary least squares (``LinearRegression``)."""
     is_abstract = True
 
@@ -210,7 +240,7 @@ class SklearnLinearRegression(LinearRegressionOp):
     is_abstract = False
 
 
-class RidgeOp(PredictorOp, PhysicalOp):
+class RidgeOp(_PredictorExecution):
     """Abstract physical ridge model (``Ridge``/``RidgeClassifier``)."""
     is_abstract = True
 
@@ -221,7 +251,7 @@ class SklearnRidge(RidgeOp):
     is_abstract = False
 
 
-class LassoOp(PredictorOp, PhysicalOp):
+class LassoOp(_PredictorExecution):
     """Abstract physical lasso (``Lasso``)."""
     is_abstract = True
 
@@ -232,7 +262,7 @@ class SklearnLasso(LassoOp):
     is_abstract = False
 
 
-class ElasticNetOp(PredictorOp, PhysicalOp):
+class ElasticNetOp(_PredictorExecution):
     """Abstract physical elastic net (``ElasticNet``)."""
     is_abstract = True
 
@@ -243,7 +273,7 @@ class SklearnElasticNet(ElasticNetOp):
     is_abstract = False
 
 
-class LogisticRegressionOp(PredictorOp, PhysicalOp):
+class LogisticRegressionOp(_PredictorExecution):
     """Abstract physical logistic regression (``LogisticRegression``)."""
     is_abstract = True
 
@@ -254,7 +284,7 @@ class SklearnLogisticRegression(LogisticRegressionOp):
     is_abstract = False
 
 
-class SGDOp(PredictorOp, PhysicalOp):
+class SGDOp(_PredictorExecution):
     """Abstract physical SGD-trained linear model (``SGDClassifier``/``Regressor``)."""
     is_abstract = True
 
@@ -266,7 +296,7 @@ class SklearnSGD(SGDOp):
 
 
 # --- Gradient boosting libraries ----------------------------------------------
-class LightGBMOp(PredictorOp, PhysicalOp):
+class LightGBMOp(_PredictorExecution):
     """Abstract physical LightGBM model (any ``lightgbm.LGBMModel``)."""
     is_abstract = True
 
@@ -277,7 +307,7 @@ class LibLightGBM(LightGBMOp):
     is_abstract = False
 
 
-class XGBoostOp(PredictorOp, PhysicalOp):
+class XGBoostOp(_PredictorExecution):
     """Abstract physical XGBoost model (any ``xgboost.XGBModel``)."""
     is_abstract = True
 
@@ -288,7 +318,7 @@ class LibXGBoost(XGBoostOp):
     is_abstract = False
 
 
-class CatBoostOp(PredictorOp, PhysicalOp):
+class CatBoostOp(_PredictorExecution):
     """Abstract physical CatBoost model (any ``catboost.CatBoost``)."""
     is_abstract = True
 

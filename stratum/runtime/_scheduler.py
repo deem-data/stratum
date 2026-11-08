@@ -8,7 +8,9 @@ from sklearn.model_selection import train_test_split, check_cv
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._dataframe_ops import SplitOp
 from stratum.optimizer.logical._ops import FITTING_MODE, Op
+from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._object_size import prettify_bytes
 import polars as pl
 
 import logging
@@ -182,8 +184,28 @@ class Scheduler:
         results = results.group_by("id").mean().sort("scores", descending=True)
         return results
 
+    @property
+    def retained_state_memory_usage(self) -> int:
+        """Fitted state held by the plan, separate from evictable output buffers.
+
+        Each operator supplies a cached scalar. State remains live after pool
+        cleanup while the plan retains its operators; refits replace its size.
+        Shared storage across operators or outputs can be counted more than once.
+        TODO: reserve this unspillable state against the execution memory budget.
+        """
+        return sum(op.retained_state_size() for op in self.linearized_dag or ()
+                   if isinstance(op, PhysicalOp))
+
+    @property
+    def memory_usage(self) -> int:
+        """Estimated pool and operator-state bytes, excluding the reuse cache."""
+        return self.pool.memory_usage + self.retained_state_memory_usage
+
     def log_memory_usage(self):
-        logger.debug(f"Pool size: {self.pool.active_count}. Memory usage: {self.pool.total_size}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Pool size: %s. Buffer memory: %s. Retained operator state: %s",
+                         self.pool.active_count, self.pool.total_size,
+                         prettify_bytes(self.retained_state_memory_usage))
 
     def process_op(self, op: Op):
         """Process a single DataOp node and return its output."""

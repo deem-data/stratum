@@ -31,17 +31,17 @@ from stratum.adapters.table_vectorizer import (
 )
 from stratum.optimizer.logical._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
-from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp
+from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp, EstimatorExecution
 from stratum.optimizer.physical._registry import (physical_impl, rust_impl,
                                                   sklearn_skrub_impl)
 
 
-class _TransformerExecution:
+class _TransformerExecution(EstimatorExecution):
     """Shared physical execution for Skrub-compatible transformer estimators."""
-    def process(self, mode: str, inputs: list):
-        task_data = self.extract_args_from_inputs(mode, inputs)
-        result, self.estimator = self.get_process_task()(task_data)
-        return result
+    # TODO: specialize transformer sizing, especially the native TF-IDF and
+    # SVD/FD handles retained by RustStringEncoder and nested TableVectorizers.
+    # For now the generic fallback runs once per fit; native handles remain
+    # under-accounted until those kernels expose their retained byte counts.
 
 
 class PassthroughTransformer(_TransformerExecution, TransformerOp, PhysicalOp):
