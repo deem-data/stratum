@@ -208,3 +208,26 @@ def test_keys_are_stable_across_processes():
         result = subprocess.run([sys.executable, "-c", script], env=env, cwd=REPO,
                                 capture_output=True, text=True, check=True, timeout=60)
         assert json.loads(result.stdout.strip().splitlines()[-1]) == expected
+
+
+def test_calendar_offsets_are_named_by_all_they_configure():
+    # normalize is not in the repr; months=12 is another offset than years=1.
+    values = [pd.DateOffset(years=1), pd.DateOffset(months=12), pd.DateOffset(years=2),
+              pd.DateOffset(2, years=1), pd.DateOffset(years=1, normalize=True),
+              pd.DateOffset(years=1, months=2), pd.offsets.MonthEnd(2), pd.offsets.Day(3),
+              pd.offsets.Week(weekday=2), pd.offsets.Week(weekday=3), pd.DateOffset()]
+    digests = [digest(v) for v in values]
+    assert len(set(digests)) == len(values)
+    # The same offset spelled with its keywords in another order.
+    assert digest(pd.DateOffset(years=1, months=2)) == digest(pd.DateOffset(months=2, years=1))
+
+
+
+def test_offsets_of_unknown_code_are_never_encoded():
+    class Shifted(pd.DateOffset):
+        pass
+
+    # A user subclass, and a business calendar object inside an offset.
+    for value in (Shifted(years=1), pd.offsets.CustomBusinessDay(holidays=["2020-01-01"])):
+        with pytest.raises(Uncacheable):
+            digest(value)

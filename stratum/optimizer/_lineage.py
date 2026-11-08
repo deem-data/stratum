@@ -42,7 +42,8 @@ _SCALAR_TYPES = (np.generic, decimal.Decimal, datetime.date, datetime.time,
 
 
 def _dtype_field(value):
-    """An extension dtype's metadata as values the encoder understands."""
+    """A field of an extension dtype as plain values, or ``value`` itself if the
+    encoder takes it as it is."""
     if isinstance(value, pd.Index):
         return ("Index", _dtype_field(value.dtype), value.tolist())
     if isinstance(value, datetime.tzinfo):
@@ -67,9 +68,9 @@ class LineageEncoder:
     payloads are length-prefixed, so distinct values never encode alike. Plain
     values are ``None``, ``bool``, ``int``, ``float``, ``str``, ``bytes``, slices,
     tuples, lists, dicts and sets of plain values, ``OperandRef``s, the literals in
-    ``_SCALAR_TYPES`` and data types. An object can name itself by a ``lineage()``
-    method returning plain values, as column expressions do. Anything else raises
-    :class:`Uncacheable`.
+    ``_SCALAR_TYPES``, pandas' calendar offsets, and numpy and pandas data types. An object can name itself by
+    a ``lineage()`` method returning plain values, as column expressions do.
+    Anything else raises :class:`Uncacheable`.
     """
 
     def __init__(self):
@@ -144,13 +145,25 @@ class LineageEncoder:
             self._tag(b"~")
             self._str(type(value).__qualname__)
             self._str(repr(value))
+        elif isinstance(value, pd.offsets.BaseOffset):
+            # A calendar offset (``DateOffset(years=1)``) is what pandas compares it
+            # by; its repr leaves out ``normalize``. Only pandas' own classes: a
+            # subclass may move dates by code of its own.
+            cls = type(value)
+            if cls.__module__.partition(".")[0] != "pandas":
+                raise Uncacheable(f"no lineage encoding for {cls.__qualname__}")
+            self._tag(b"O")
+            self._str(cls.__qualname__)
+            self.encode(value.n)
+            self.encode(value.normalize)
+            self.encode(dict(sorted(value.kwds.items())))
         elif isinstance(value, np.dtype):
             self._tag(b"D")
             self._str(type(value).__qualname__)
             self._str(str(value))
         elif isinstance(value, pd.api.extensions.ExtensionDtype):
-            # Strings omit configuration such as categorical values and string
-            # storage. Encode the fields pandas uses to compare these dtypes.
+            # Named by the fields pandas compares dtypes by: its string leaves out
+            # the categories of a categorical, and a string dtype's storage.
             self._tag(b"E")
             self._str(type(value).__qualname__)
             fields = type(value)._metadata

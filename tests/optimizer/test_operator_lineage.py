@@ -264,3 +264,46 @@ def test_dataframe_keys_are_stable_across_processes(csv_path):
                                 env={**os.environ, "PYTHONHASHSEED": seed}, cwd=REPO,
                                 capture_output=True, text=True, check=True, timeout=60)
         assert json.loads(result.stdout.strip().splitlines()[-1]) == expected
+
+
+def test_a_window_by_calendar_offset_is_keyed(tmp_path):
+    path = tmp_path / "events.parquet"
+    pd.DataFrame({"date": pd.to_datetime(["2020-03-01", "2021-06-01"]),
+                  "cutoff": pd.to_datetime(["2020-01-01", "2020-01-01"])}).to_parquet(path)
+    events = st.as_data_op(str(path)).skb.apply_func(pd.read_parquet)
+    in_window = ((events["date"] >= events["cutoff"])
+                 & (events["date"] < events["cutoff"] + pd.DateOffset(years=1)))
+    reasons = {}
+    keys = plan_keys(events[in_window], reasons=reasons)
+    assert all(key is not None for _, key in keys), reasons
+
+
+def test_standalone_arithmetic_is_keyed(tmp_path):
+    # Arithmetic no assign or mask consumes stays a NumericOp: a number, a string
+    # concatenation, a calendar offset, a numpy ufunc.
+    path = tmp_path / "lots.parquet"
+    pd.DataFrame({"boro": ["1", "2"], "block": ["7", "88"], "x": [1.5, 2.0],
+                  "d": pd.to_datetime(["2020-02-29", "2021-03-01"])}).to_parquet(path)
+    lots = st.as_data_op(str(path)).skb.apply_func(pd.read_parquet)
+    for dag in (lots["x"] * 2 + 1, lots["boro"] + lots["block"],
+                lots["d"] + pd.DateOffset(years=1), lots["x"].skb.apply_func(np.log)):
+        reasons = {}
+        keys = plan_keys(dag, reasons=reasons)
+        assert all(key is not None for _, key in keys), reasons
+
+
+def test_numeric_ops_are_keyed_by_operation_and_operands(csv_path):
+    data = read_csv(csv_path)
+    x, y = data["x"], data["y"]
+    variants = [x + 1, x - 1, 1 - x, x * 2, x / 2, x ** 3, x + y, y + x,
+                x.skb.apply_func(np.exp), x.skb.apply_func(np.sqrt)]
+    final_keys = [plan_keys(v)[-1][1] for v in variants]
+    assert None not in final_keys
+    assert len(set(final_keys)) == len(variants)
+
+
+def test_an_unknown_numpy_function_is_uncacheable(csv_path):
+    reasons = {}
+    keys = plan_keys(read_csv(csv_path)["x"].skb.apply_func(np.cumsum), reasons=reasons)
+    assert keys[-1][1] is None
+    assert any("cumsum" in str(why) for why in reasons.values())

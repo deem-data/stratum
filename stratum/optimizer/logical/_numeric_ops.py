@@ -5,7 +5,8 @@ from enum import Enum
 import numpy as np
 import polars as pl
 
-from stratum.optimizer.logical._base import IndexEffect, _resolve_args, _resolve_kwargs
+from stratum.optimizer.logical._base import (
+    IndexEffect, Uncacheable, _resolve_args, _resolve_kwargs)
 from stratum.optimizer.logical._ops import BinOp, CallOp, Op, OperandRef
 
 class NumericOpType(Enum):
@@ -62,6 +63,16 @@ class NumericOp(Op):
     fields = ["func", "args", "kwargs", "type", "constant", "opt_operand", "reversed"]
     index_effect = IndexEffect.COMMON
     func = None
+    #: Keyed by its operation and operands; a GENERIC one holds a numpy function
+    #: stratum does not know, and is not.
+    cacheable = True
+
+    def lineage_config(self):
+        if self.type is NumericOpType.GENERIC:
+            raise Uncacheable(f"numpy.{self.func.__name__} is not an operation stratum knows")
+        return {"type": self.type.value, "args": self.args, "kwargs": self.kwargs,
+                "constant": self.constant, "opt_operand": self.opt_operand,
+                "reversed": self.reversed}
 
     def __init__(self, inputs=None, outputs=None, func=None, args=(), kwargs=None, type: NumericOpType = None, constant=None, opt_operand=None, reversed=False):
         if func is not None:
