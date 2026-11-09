@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from stratum._config import set_config
 
@@ -85,7 +86,7 @@ def main(argv=None) -> int:
 
 def _submit(client: StratumClient, script: str, argv: list[str]) -> int:
     try:
-        job = client.start(script, argv)
+        job = client.start(Path(script), argv)
     except FileNotFoundError as exc:  # as `python missing.py` reports it
         print(f"can't open file: {exc}", file=sys.stderr)
         return 2

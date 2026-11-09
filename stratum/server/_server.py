@@ -13,8 +13,8 @@ Two submission endpoints share a job queue::
     stdout / stderr   <-- GET /v1/jobs/{id}/output ------ output
     call return value <-- GET /v1/jobs/{id}/result ------ result
 
-* Scripts: run a shared file or uploaded source with the supplied arguments and
-  working directory when available. Data must be accessible to the server.
+* Scripts: run inline source or a shared/uploaded file with the supplied arguments
+  and working directory when available. Data must be accessible to the server.
 * DAG calls: send a serialized DAG and function arguments; Python, skrub and
   Stratum versions must match between client and server.
 * Jobs: submission returns an id immediately; output streaming supports resuming
@@ -48,6 +48,7 @@ import tempfile
 import threading
 import time
 import traceback
+import types
 import warnings
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
@@ -134,22 +135,34 @@ def _isolated_job(cwd: str, argv: list[str] | None = None, import_dir: str | Non
                 del sys.modules[name]
 
 
-def run_script(script: str | os.PathLike, argv: list[str] = (), cwd: str | None = None,
-               stdout=None, stderr=None) -> int:
-    """Run ``script`` in this process as ``__main__``. Returns its exit code.
+def run_script(script: str | os.PathLike | None, argv: list[str] = (), cwd: str | None = None,
+               stdout=None, stderr=None, *, source: str | None = None) -> int:
+    """Run a script file or inline ``source`` as ``__main__``. Returns its exit code.
 
     Output goes to ``stdout`` / ``stderr`` (the process's own by default). An
     uncaught exception is printed to ``stderr`` and gives exit code 1, as it would
     for ``python script.py``.
     """
     cwd = cwd or os.getcwd()
-    script = Path(cwd, script).resolve()
+    script = str(Path(cwd, script).resolve()) if source is None else "<string>"
+    import_dir = str(Path(script).parent) if source is None else cwd
     stdout = stdout if stdout is not None else sys.stdout
     stderr = stderr if stderr is not None else sys.stderr
-    with _isolated_job(cwd, [str(script), *argv], str(script.parent)):
+    with _isolated_job(cwd, [script, *argv], import_dir):
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             try:
-                runpy.run_path(str(script), run_name="__main__")
+                if source is None:
+                    runpy.run_path(script, run_name="__main__")
+                else:
+                    module = types.ModuleType("__main__")
+                    module.__file__ = script
+                    module.__cached__ = None
+                    previous = sys.modules["__main__"]
+                    sys.modules["__main__"] = module
+                    try:
+                        exec(compile(source, script, "exec", dont_inherit=True), module.__dict__)
+                    finally:
+                        sys.modules["__main__"] = previous
                 return 0
             except SystemExit as exc:
                 if exc.code is None or isinstance(exc.code, int):
@@ -209,13 +222,12 @@ def run_call(function: str, payload: bytes, config: dict | None = None,
 
 @contextlib.contextmanager
 def _job_files(request: JobRequest | CallRequest) -> Iterator[tuple[str | None, str]]:
-    """The script to run for ``request`` (None for a call) and the directory to run
-    it in.
+    """The script to run (None for a call or inline source) and its working directory.
 
     The client's file and working directory when this machine sees them too;
     otherwise the uploaded source, from a temporary directory.
     """
-    if isinstance(request, CallRequest):
+    if isinstance(request, CallRequest) or request.script is None:
         if os.path.isdir(request.cwd):
             yield None, request.cwd
             return
@@ -242,17 +254,17 @@ def _job_files(request: JobRequest | CallRequest) -> Iterator[tuple[str | None, 
 
 
 class JobRequest(BaseModel):
-    script: str  #: the script's absolute path on the client
+    script: str | None = None  #: absolute path on the client, or None for inline source
     source: str
     argv: list[str] = []
     cwd: str  #: the client's working directory
 
     @property
     def label(self) -> str:
-        return self.script
+        return self.script if self.script is not None else "<string>"
 
     def describe(self) -> dict:
-        return {"script": self.script, "argv": self.argv}
+        return {"script": self.label, "argv": self.argv}
 
 
 class CallRequest(BaseModel):
@@ -542,7 +554,8 @@ class StratumServer:
             code, job.result = run_call(request.function, base64.b64decode(request.payload),
                                         request.config, cwd, stdout=out, stderr=err)
             return code
-        return run_script(script, request.argv, cwd, stdout=out, stderr=err)
+        return run_script(script, request.argv, cwd, stdout=out, stderr=err,
+                          source=request.source if request.script is None else None)
 
     def _clear(self) -> dict:
         self.cache.clear()

@@ -81,7 +81,8 @@ def test_run_script_behaves_like_python(tmp_path):
 
 
 @pytest.mark.parametrize("ending, exit_code", [("", 0), ("raise RuntimeError('job failed')", 1)])
-def test_run_script_restores_process_state(tmp_path, ending, exit_code):
+@pytest.mark.parametrize("inline", [False, True], ids=["file", "source"])
+def test_run_script_restores_process_state(tmp_path, ending, exit_code, inline):
     write(tmp_path / "helper_mod.py", "VALUE = 1\n")
     script = write(tmp_path / "s.py", f"""
         import os, sys, stratum as st, skrub
@@ -95,17 +96,42 @@ def test_run_script_restores_process_state(tmp_path, ending, exit_code):
     """)
     import skrub
     before = (dict(vars(FLAGS)), skrub.get_config(), dict(os.environ), list(sys.argv),
-              os.getcwd())
+              os.getcwd(), sys.modules["__main__"])
     out = io.StringIO()
-    assert run_script(script, cwd=str(tmp_path), stdout=out) == exit_code
+    source = script.read_text() if inline else None
+    assert run_script(script, cwd=str(tmp_path), stdout=out, source=source) == exit_code
     after = (dict(vars(FLAGS)), skrub.get_config(), dict(os.environ), list(sys.argv),
-             os.getcwd())
+             os.getcwd(), sys.modules["__main__"])
     assert after == before
     assert "helper_mod" not in sys.modules, "user modules are dropped after a job"
     # A different size: the bytecode cache checks size and whole-second mtime.
     write(tmp_path / "helper_mod.py", "VALUE = 22\n")
-    assert run_script(script, cwd=str(tmp_path), stdout=out) == exit_code
+    assert run_script(script, cwd=str(tmp_path), stdout=out, source=source) == exit_code
     assert out.getvalue().split() == ["1", "22"], "an edited helper is re-imported"
+
+
+def test_inline_source_runs_in_its_own_main_module(tmp_path):
+    source = textwrap.dedent("""
+        import __main__, pickle
+        from dataclasses import dataclass
+
+        @dataclass
+        class Record:
+            value: int
+
+        assert __main__.Record is Record
+        assert Record.__annotations__['value'] is int
+        assert __name__ == '__main__'
+        assert __file__ == '<string>'
+        print(pickle.loads(pickle.dumps(Record(7))).value)
+    """)
+    out, err = io.StringIO(), io.StringIO()
+    assert run_script(None, cwd=str(tmp_path), stdout=out, stderr=err, source=source) == 0
+    assert out.getvalue() == "7\n"
+    assert err.getvalue() == ""
+    assert run_script(None, cwd=str(tmp_path), stderr=err,
+                      source="assert 'Record' not in globals()") == 0
+    assert not list(tmp_path.iterdir()), "inline code needs no script file"
 
 
 # --- running a call in-process ----------------------------------------------------
@@ -238,30 +264,99 @@ def job_dir(tmp_path, monkeypatch):
     return job
 
 
-def run(server_dir, *argv):
+def run(server_dir, *argv, inline=False):
     out, err = io.StringIO(), io.StringIO()
     with StratumClient(server_dir=server_dir) as client:
-        code = client.submit("job.py", list(argv), stdout=out, stderr=err)
+        script = Path("job.py")
+        code = client.submit(script.read_text() if inline else script, list(argv),
+                             stdout=out, stderr=err)
     assert code == 0, err.getvalue()
     lines = dict(line.split(" ", 1) for line in out.getvalue().splitlines())
     return float(lines["pred"]), int(lines["reads"])
 
 
-def test_submitted_scripts_share_the_cache(tmp_path, job_dir, capsys):
+def test_submit_accepts_source_strings_and_bytes(tmp_path):
+    server_dir = tmp_path / "server"
+    # A string is always source, even when a file has the same name.
+    write(tmp_path / "pass", "raise RuntimeError('a string was mistaken for a path')")
+    (tmp_path / "data.txt").write_text("local data", encoding="utf-8")
+    proc = start_server(server_dir)
+    try:
+        with StratumClient(server_dir=server_dir) as client:
+            for source, expected in [
+                ("", ""),
+                (b"", ""),
+                ("pass", ""),
+                ("message = 'hello'\nprint(message)", "hello\n"),
+                ("# coding: latin-1\nprint('café ☕')", "café ☕\n"),
+                ("print('café ☕')".encode("utf-8"), "café ☕\n"),
+                (b"\xef\xbb\xbfprint('BOM')", "BOM\n"),
+                (b"# coding: latin-1\r\nprint('caf\xe9')\r\n", "café\n"),
+            ]:
+                out, err = io.StringIO(), io.StringIO()
+                assert client.submit(source, cwd=tmp_path, stdout=out, stderr=err) == 0, err.getvalue()
+                assert out.getvalue() == expected
+                assert err.getvalue() == ""
+
+            # start() accepts source too, with the same arguments, working
+            # directory, output streams and exit-code handling as file jobs.
+            source = ("import pathlib, sys\n"
+                      "print(sys.argv)\n"
+                      "print(pathlib.Path('data.txt').read_text())\n"
+                      "print('stderr', file=sys.stderr)\n"
+                      "raise SystemExit(7)")
+            job = client.start(source, ["a b", "--alpha", "0.1"], cwd=tmp_path)
+            out, err = io.StringIO(), io.StringIO()
+            assert client.follow(job, stdout=out, stderr=err) == 7
+            assert out.getvalue() == "['<string>', 'a b', '--alpha', '0.1']\nlocal data\n"
+            assert err.getvalue() == "stderr\n"
+            assert client.job(job)["script"] == "<string>"
+
+            for source, error in [("1 / 0", "ZeroDivisionError"),
+                                  (b"if:", "SyntaxError"),
+                                  ("\x00", "SyntaxError")]:
+                err = io.StringIO()
+                assert client.submit(source, cwd=tmp_path, stderr=err) == 1
+                assert error in err.getvalue()
+
+            # A remote client's cwd need not exist on the server.
+            out = io.StringIO()
+            assert client.submit("import os; print(os.path.isdir(os.getcwd()))",
+                                 cwd=tmp_path / "client-only", stdout=out) == 0
+            assert out.getvalue() == "True\n", "the server survives failed source jobs"
+    finally:
+        stop_server(server_dir, proc)
+
+
+@pytest.mark.parametrize("source, error", [
+    (42, TypeError),
+    (None, TypeError),
+    (b"# coding: unknown-encoding\npass", SyntaxError),
+    (b"print('\xff')", SyntaxError),
+    (b"\n\nprint('\xff')", UnicodeDecodeError),
+])
+def test_invalid_source_is_rejected_before_submission(source, error):
+    with StratumClient("http://unused", check=False) as client:
+        with pytest.raises(error):
+            client.start(source)
+
+
+@pytest.mark.parametrize("inline", [False, True], ids=["file", "source"])
+def test_submitted_scripts_share_the_cache(tmp_path, job_dir, capsys, inline):
     server_dir = tmp_path / "server"
     proc = start_server(server_dir)
     try:
-        pred, reads = run(server_dir, "1.0")
+        pred, reads = run(server_dir, "1.0", inline=inline)
         assert reads == 0
-        again, reads = run(server_dir, "1.0")
+        again, reads = run(server_dir, "1.0", inline=inline)
         assert again == pred and reads > 0, "the second submission reads the first's work"
         # A different size: the bytecode cache checks size and whole-second mtime.
         write(job_dir / "helper.py", "OFFSET = 3  # edited\n")
-        edited, _ = run(server_dir, "1.0")
+        edited, _ = run(server_dir, "1.0", inline=inline)
         assert edited != pred, "an edited helper module is picked up"
         with StratumClient(server_dir=server_dir) as client:
             with pytest.raises(FileNotFoundError):
-                client.start("missing.py")
+                client.start(Path("missing.py"))
             stats = client.stats()
         assert stats["jobs"] == 3 and stats["entries"] > 0
         assert main(["--server-dir", str(server_dir), "clear"]) == 0
@@ -269,7 +364,7 @@ def test_submitted_scripts_share_the_cache(tmp_path, job_dir, capsys):
         assert err == ""
         cleared = json.loads(out)
         assert cleared["entries"] == cleared["memory_usage"] == 0
-        after_clear, reads = run(server_dir, "1.0")
+        after_clear, reads = run(server_dir, "1.0", inline=inline)
         assert after_clear == edited and reads == stats["stats"]["hits"]
     finally:
         log = stop_server(server_dir, proc)
@@ -279,7 +374,7 @@ def test_submitted_scripts_share_the_cache(tmp_path, job_dir, capsys):
     write(job_dir / "helper.py", "OFFSET = 2\n")
     proc = start_server(server_dir)
     try:
-        restarted, reads = run(server_dir, "1.0")
+        restarted, reads = run(server_dir, "1.0", inline=inline)
         assert restarted == pred and reads == 0
     finally:
         stop_server(server_dir, proc)
@@ -289,7 +384,7 @@ def test_a_server_records_its_session(tmp_path, job_dir, sales_csv, pricing):
     server_dir, runs = tmp_path / "server", tmp_path / "runs"
     proc = start_server(server_dir, "--diagnostics-dir", str(runs))
     try:
-        run(server_dir, "1.0")
+        run(server_dir, "1.0", inline=True)
         run(server_dir, "1.0")
         with StratumClient(server_dir=server_dir) as client:
             client.evaluate(sales_dag(sales_csv, pricing.net))
@@ -302,6 +397,7 @@ def test_a_server_records_its_session(tmp_path, job_dir, sales_csv, pricing):
 
     first, second, call = session["jobs"]
     assert first["exit_code"] == second["exit_code"] == call["exit_code"] == 0
+    assert first["script"] == "<string>"
     assert call["script"] == "<evaluate>"
     assert first["stats"]["puts"] > 0 and first["stats"]["hits"] == 0
     assert second["stats"]["hits"] > 0 and second["stats"]["puts"] == 0
@@ -349,7 +445,7 @@ def test_the_server_answers_while_a_job_runs(tmp_path, job_dir, capsys):
     proc = start_server(server_dir)
     try:
         client = StratumClient(server_dir=server_dir)
-        job = client.start("wait.py")
+        job = client.start(Path("wait.py"))
         deadline = time.monotonic() + 20
         while not (job_dir / "ready").exists():
             assert time.monotonic() < deadline, "job did not become ready"
@@ -466,7 +562,7 @@ def test_calls_run_dags_built_by_the_client(tmp_path, job_dir, sales_csv, pricin
             with pytest.raises(JobFailed, match="evaluate failed on the server"):
                 client.evaluate(failing, stderr=err)
             assert "KeyError: 'missing'" in err.getvalue()
-            job = client.start("job.py", ["1.0"])
+            job = client.start(Path("job.py"), ["1.0"])
             with pytest.raises(ServerError, match="404.*script"):
                 client.result(job)
             assert client.follow(job, stdout=io.StringIO()) == 0, "the server lives on"

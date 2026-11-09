@@ -1,4 +1,5 @@
 """CLI argument handling, exit codes, and interruption at the client boundary."""
+from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -22,7 +23,7 @@ def test_submit_preserves_script_arguments_and_exit_code(client):
     client.follow.return_value = 7
 
     assert _cli.main(["submit", "train.py", "--alpha", "0.1", "a b"]) == 7
-    client.start.assert_called_once_with("train.py", ["--alpha", "0.1", "a b"])
+    client.start.assert_called_once_with(Path("train.py"), ["--alpha", "0.1", "a b"])
     client.follow.assert_called_once_with("job-1")
     client.__exit__.assert_called_once()
 

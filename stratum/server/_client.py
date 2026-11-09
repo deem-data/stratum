@@ -2,7 +2,8 @@
 
     client = StratumClient()                 # the local server, found under ~/.stratum/server
     client = StratumClient("http://host:8787", token=...)   # or a remote one
-    exit_code = client.submit("train.py", ["--alpha", "1.0"])
+    exit_code = client.submit("print('hello from the server')")
+    exit_code = client.submit(Path("train.py"), ["--alpha", "1.0"])
     results = client.grid_search(pred, cv=3, scoring="r2")   # a DAG built here
     table = client.evaluate(query)
 
@@ -31,6 +32,7 @@ import sysconfig
 import time
 import types
 import warnings
+from importlib.util import decode_source
 from pathlib import Path
 
 import httpx
@@ -170,24 +172,38 @@ class StratumClient:
         """The server's version and how many jobs it has seen and queued."""
         return self._request("GET", "/v1/health")
 
-    def submit(self, script: str | os.PathLike, argv: list[str] = (), *,
+    def submit(self, script: str | bytes | os.PathLike, argv: list[str] = (), *,
                cwd: str | os.PathLike | None = None, stdout=None, stderr=None) -> int:
-        """Run ``script`` on the server, as if started here. Returns its exit code.
+        """Run Python source or a script file on the server. Returns its exit code.
 
+        Strings and bytes are source code, as with ``exec``. Bytes honor Python's
+        encoding declaration (UTF-8 by default). To submit a file, pass a
+        :class:`pathlib.Path` or another ``os.PathLike``, relative to ``cwd``.
         Its output is written to ``stdout`` / ``stderr`` (this process's own by
         default) as it arrives.
         """
         return self.follow(self.start(script, argv, cwd=cwd), stdout=stdout, stderr=stderr)
 
-    def start(self, script: str | os.PathLike, argv: list[str] = (), *,
+    def start(self, script: str | bytes | os.PathLike, argv: list[str] = (), *,
               cwd: str | os.PathLike | None = None) -> str:
-        """Queue ``script`` (relative to ``cwd``, by default this process's working
-        directory) with ``argv`` on the server. Returns the job's id."""
+        """Queue source code or a file, as for :meth:`submit`. Returns the job's id.
+
+        ``cwd`` defaults to this process's working directory; ``argv`` supplies
+        the script's command-line arguments.
+        """
         cwd = os.path.abspath(cwd or os.getcwd())
-        path = Path(cwd, script).resolve()
-        source = path.read_text(encoding="utf-8")
+        path = None
+        if isinstance(script, os.PathLike):
+            path = str(Path(cwd, script).resolve())
+            source = Path(path).read_text(encoding="utf-8")
+        elif isinstance(script, bytes):
+            source = decode_source(script)
+        elif isinstance(script, str):
+            source = script
+        else:
+            raise TypeError("script must be Python source (str or bytes) or an os.PathLike")
         reply = self._request("POST", "/v1/jobs", json={
-            "script": str(path), "source": source, "argv": [str(a) for a in argv], "cwd": cwd})
+            "script": path, "source": source, "argv": [str(a) for a in argv], "cwd": cwd})
         return reply["id"]
 
     def follow(self, job_id: str, *, stdout=None, stderr=None) -> int:

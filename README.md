@@ -150,16 +150,17 @@ exec(pipe)
 as in the example above, and submit the generated script:
 
 ```python
-from pathlib import Path
 import stratum
 
 with stratum.StratumClient() as client:
     pipe = MLEAgent.draft_skrub_pipeline()
-    Path("pipeline.py").write_text(pipe, encoding="utf-8")
-    client.submit("pipeline.py")
+    client.submit(pipe)
 ```
 
-`submit()` takes a script file path, streams its output, and returns its exit code.
+`submit()` accepts Python source as a `str` or `bytes`, streams its output, and
+returns its exit code. Bytes honor Python's source encoding declaration (UTF-8 by
+default). To submit a file, use `client.submit(Path("pipeline.py"))` with
+`from pathlib import Path`; strings are always treated as source code.
 Keep the server running across drafts to reuse eligible preprocessing results.
 
 For a DAG already built in Python, use the client:
