@@ -36,11 +36,14 @@ python -m pip install "stratum-ai==0.0.0.dev1"
 
 Pre-built Rust wheels are provided for the supported CPython 3.11+ platforms, so a Rust toolchain is not required for a normal installation. The source-build instructions below are for contributors developing Stratum itself.
 
-For source development, you need Python **3.11+**, a [Rust toolchain](https://rustup.rs/) (nightly not required; stable is fine), and [maturin](https://www.maturin.rs/) (`python -m pip install maturin`).
+For source development, you need Python **3.11+** and a [Rust toolchain](https://rustup.rs/) (nightly not required; stable is fine). Stratum uses [maturin](https://www.maturin.rs/) to build its Rust extension.
 
-From the repository root, install the extension in editable (development) mode:
+From the repository root, create and activate a virtual environment, then install the extension in editable (development) mode:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install maturin
 maturin develop --release
 ```
 
@@ -113,15 +116,17 @@ if __name__ == "__main__":
 
 ### Server
 
-Install the `server` extra and start a process that shares its in-memory cache
-across submitted scripts and DAGs:
+From the repository root, with your virtual environment activated, install the
+`server` extra and start a process that shares its in-memory cache across submitted
+scripts and DAGs:
 
 ```bash
-uv sync --extra server
+maturin develop --release --extras server
 python -m stratum serve --memory-fraction 0.1 --diagnostics-dir runs
 ```
 
-From another terminal, submit a script or inspect the cache:
+From another terminal with the same virtual environment activated, submit a script
+or inspect the cache:
 
 ```bash
 python -m stratum submit pipeline.py
@@ -130,9 +135,38 @@ python -m stratum clear
 python -m stratum shutdown
 ```
 
+To integrate a Machine Learning Engineering (MLE) agent, replace local execution
+with a submission to the running server. Here, `MLEAgent` stands for your agent,
+and `draft_skrub_pipeline()` returns Python source code.
+
+**Without Stratum:**
+
+```python
+pipe = MLEAgent.draft_skrub_pipeline()
+exec(pipe)
+```
+
+**With Stratum:** have the agent generate pipelines using `import stratum as skrub`,
+as in the example above, and submit the generated script:
+
+```python
+from pathlib import Path
+import stratum
+
+with stratum.StratumClient() as client:
+    pipe = MLEAgent.draft_skrub_pipeline()
+    Path("pipeline.py").write_text(pipe, encoding="utf-8")
+    client.submit("pipeline.py")
+```
+
+`submit()` takes a script file path, streams its output, and returns its exit code.
+Keep the server running across drafts to reuse eligible preprocessing results.
+
 For a DAG already built in Python, use the client:
 
 ```python
+import stratum
+
 with stratum.StratumClient() as client:
     results = client.grid_search(dag, cv=3, scoring="r2")
     uncached = client.evaluate(dag, config={"reuse_cache": False})
@@ -152,22 +186,17 @@ clear retained. Evicted entries leave no per-key history behind.
 
 ### Running the Tests
 
-Install all extras and run the full test suite:
+In your activated virtual environment, install the test dependencies and run the
+full test suite:
 
 ```bash
-uv sync --all-extras
-pytest -v tests
-```
-
-Or, more concisely:
-
-```bash
-uv run pytest
+maturin develop --release --extras test,cpu,hardware
+python -m pytest -v tests
 ```
 
 ---
 
-## Local Dev Install (Editable, without `uv`)
+## Local Dev Install (Editable)
 
 ```bash
 maturin develop				# Debug mode
@@ -195,4 +224,3 @@ python -m pip install ./dist/stratum_ai-*.whl
 
 ## License
 Apache License 2.0. See [LICENSE](LICENSE) for details.
-
