@@ -111,6 +111,43 @@ if __name__ == "__main__":
 ```
 ---
 
+### Server
+
+Install the `server` extra and start a process that shares its in-memory cache
+across submitted scripts and DAGs:
+
+```bash
+uv sync --extra server
+python -m stratum serve --memory-fraction 0.1 --diagnostics-dir runs
+```
+
+From another terminal, submit a script or inspect the cache:
+
+```bash
+python -m stratum submit pipeline.py
+python -m stratum stats
+python -m stratum clear
+python -m stratum shutdown
+```
+
+For a DAG already built in Python, use the client:
+
+```python
+with stratum.StratumClient() as client:
+    results = client.grid_search(dag, cv=3, scoring="r2")
+    uncached = client.evaluate(dag, config={"reuse_cache": False})
+```
+
+Jobs run sequentially in the server process. Local clients discover its address
+and token automatically. Scripts and DAGs must be trusted, and their data must be
+accessible to the server. DAG calls require matching Python, skrub, and Stratum
+versions. A new server process starts with an empty cache. With diagnostics
+enabled, session logs, live entry details and a memory-usage timeline are written
+under `runs/server/`, and each job's run artifacts are written under `runs/`.
+Entry details include operator labels, sizes, hits and the job that added them.
+Cache events are sampled at most once a second, with every job boundary and cache
+clear retained. Evicted entries leave no per-key history behind.
+
 ## Developer Instructions
 
 ### Running the Tests

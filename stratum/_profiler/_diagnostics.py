@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _active_run = ContextVar("stratum_diagnostics", default=None)
 _plan_capture = ContextVar("stratum_plan_capture", default=None)
 _capture_svg = ContextVar("stratum_capture_svg", default=False)
+_job = ContextVar("stratum_job", default=None)
 
 
 @dataclass
@@ -136,10 +137,25 @@ def record_reuse_plan(ops, region, keys, reasons):
         logger.warning("Could not capture reuse diagnostics", exc_info=True)
 
 
+@contextmanager
+def job_context(job_id: str):
+    """Attribute the runs exported inside to ``job_id`` (a server job).
+
+    Yields the job's record; ``run_ids`` collects the runs exported for it.
+    """
+    job = {"job_id": job_id, "run_ids": []}
+    token = _job.set(job)
+    try:
+        yield job
+    finally:
+        _job.reset(token)
+
+
 class RunDiagnostics:
     def __init__(self, directory, kind, config):
         self.directory = Path(directory).expanduser()
         self.run_id = uuid4().hex
+        self.job = _job.get()
         self.kind = kind
         self.config = config
         self.started_at = datetime.now(timezone.utc).isoformat()
@@ -202,6 +218,7 @@ class RunDiagnostics:
         sched = self.scheduler
         document = {
             "schema_version": 1, "run_id": self.run_id, "kind": self.kind,
+            "job_id": self.job["job_id"] if self.job is not None else None,
             "started_at": self.started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "status": "failed" if error is not None else "completed",
@@ -240,6 +257,8 @@ class RunDiagnostics:
             os.replace(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
+        if self.job is not None:
+            self.job["run_ids"].append(self.run_id)
 
 
 @contextmanager
