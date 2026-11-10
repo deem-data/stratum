@@ -17,11 +17,15 @@ pytestmark = pytest.mark.skipif(
 # Verify the exported native surface stays stable across the refactor.
 def test_native_extension_exports_expected_api():
     expected = {
+        "_CountVectorizerModelHandle",
         "_FdEmbedModelHandle",
         "_TfidfModelHandle",
         "_TruncatedSvdModelHandle",
         "_TreeModelHandle",
         "_ForestModelHandle",
+        "count_vectorize_fit",
+        "count_vectorize_transform",
+        "count_vectorize_fit_transform",
         "csr_to_dense",
         "fd_fit_from_csr",
         "fd_transform_from_csr",
@@ -46,6 +50,32 @@ def test_native_extension_exports_expected_api():
 
     actual = {name for name in dir(rb.native) if not name.startswith("__")}
     assert actual == expected
+
+
+def test_count_vectorizer_handle_survives_gc_and_concurrent_transforms():
+    from scipy.sparse import csr_matrix
+    from sklearn.feature_extraction.text import CountVectorizer
+
+    documents = ["alpha beta beta", "gamma delta", "alpha delta"]
+    model, *_ = rb.count_vectorize_fit_transform(documents, set(), worker_budget=2)
+    assert type(model).__name__ == "_CountVectorizerModelHandle"
+    alias = model
+    del model
+    gc.collect()
+    reference = CountVectorizer().fit(documents).transform(["alpha beta", "unknown"])
+
+    def transform(_):
+        data, indices, indptr = rb.count_vectorize_transform(
+            alias, ["alpha beta", "unknown"], set(), worker_budget=2,
+        )
+        return csr_matrix((data, indices, indptr), shape=(2, alias.n_features))
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        outputs = list(executor.map(transform, range(8)))
+    for output in outputs:
+        np.testing.assert_array_equal(output.toarray(), reference.toarray())
+    with pytest.raises(TypeError):
+        rb.count_vectorize_transform({}, documents, set())
 
 
 # Fit TF-IDF, drop references, and confirm the model stays alive through Python ownership.

@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 // Core Rust backend modules exposed through the Python extension.
+mod countvectorizer;
 mod csr;
 mod fd;
 mod hashing;
@@ -17,6 +18,7 @@ mod truncated_svd;
 // Register Rust classes and pyfunctions on the native extension module.
 #[pymodule]
 fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
+    m.add_class::<countvectorizer::CountVectorizerModelHandle>()?;
     m.add_class::<tfidf::TfidfModelHandle>()?;
     m.add_class::<fd::FdEmbedModel>()?;
     m.add_class::<truncated_svd::TruncatedSvdModel>()?;
@@ -42,5 +44,8 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tree::forest_fit_hist, m)?)?;
     m.add_function(wrap_pyfunction!(tree::forest_predict, m)?)?;
     m.add_function(wrap_pyfunction!(tree::forest_model_info, m)?)?;
+    m.add_function(wrap_pyfunction!(countvectorizer::count_vectorize_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(countvectorizer::count_vectorize_transform, m)?)?;
+    m.add_function(wrap_pyfunction!(countvectorizer::count_vectorize_fit_transform, m)?)?;
     Ok(())
 }

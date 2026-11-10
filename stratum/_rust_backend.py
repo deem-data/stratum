@@ -86,3 +86,6 @@ forest_predict = getattr(native, "forest_predict", None) if native else None
 forest_model_info = getattr(native, "forest_model_info", None) if native else None
 standard_scale_fit = getattr(native, "standard_scale_fit", None) if native else None
 standard_scale_transform = getattr(native, "standard_scale_transform", None) if native else None
+count_vectorize_fit = getattr(native, "count_vectorize_fit", None) if native else None
+count_vectorize_transform = getattr(native, "count_vectorize_transform", None) if native else None
+count_vectorize_fit_transform = getattr(native, "count_vectorize_fit_transform", None) if native else None
