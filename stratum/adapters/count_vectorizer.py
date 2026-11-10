@@ -100,7 +100,6 @@ class RustyCountVectorizer(_SKCountVectorizer):
         vocabulary=None,
         binary=False,
         dtype=np.int64,
-        n_jobs=None,
     ):
         super().__init__(
             input=input,
@@ -121,16 +120,6 @@ class RustyCountVectorizer(_SKCountVectorizer):
             binary=binary,
             dtype=dtype,
         )
-        cores = os.cpu_count() or 1
-        if n_jobs is not None and (
-            not isinstance(n_jobs, numbers.Integral) or n_jobs < 1
-        ):
-            raise ValueError("n_jobs must be a positive integer or None")
-        if n_jobs is not None and n_jobs > cores:
-            logger.warning(
-                "n_jobs %s > core count %s, setting n_jobs to %s", n_jobs, cores, cores
-            )
-        self.n_jobs = cores if n_jobs is None else min(n_jobs, cores)
 
     def _bind_native_worker_budget(self, workers):
         if not isinstance(workers, numbers.Integral) or workers < 1:
@@ -164,9 +153,8 @@ class RustyCountVectorizer(_SKCountVectorizer):
         self.__dict__["vocabulary_"] = vocabulary
 
     def _native_workers(self):
-        if hasattr(self, "_stratum_worker_budget"):
-            return self._stratum_worker_budget
-        return min(self.n_jobs, get_config()["num_threads"] or self.n_jobs)
+        workers = getattr(self, "_stratum_worker_budget", get_config()["num_threads"])
+        return int(workers) or (os.cpu_count() or 1)
 
     def _n_chunks(self, corpus):
         return min(max(1, len(corpus) // MIN_BLOCK_LEN), self._native_workers())

@@ -70,7 +70,7 @@ def test_fit_transform_matches_sklearn_various_sizes(n_sentences, capfd):
     )
     set_config(rust_backend=True, allow_patch=True, debug_timing=True, num_threads=4)
 
-    rv = RustyCountVectorizer(n_jobs=4)
+    rv = RustyCountVectorizer()
     Z = rv.fit_transform(corpus)
 
     sk = SKCountVectorizer()
@@ -157,58 +157,63 @@ def test_stopwords_set_custom_list():
 
 
 # ---------------------------------------------------------------------------
-# n_jobs / chunking
+# Configured thread count / chunking
 # ---------------------------------------------------------------------------
 
 
-def test_n_jobs_defaults_to_cpu_count():
+def test_configured_threads_are_not_capped_by_cpu_count(monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: 3)
     rv = RustyCountVectorizer()
-    assert rv.n_jobs == os.cpu_count()
+    assert rv._native_workers() == 4
+    assert rv._n_chunks(["hello"] * 10) == 4
+    with config(num_threads=1):
+        assert rv._native_workers() == 1
+        assert rv._n_chunks(["hello"] * 10) == 1
 
 
-def test_n_jobs_explicit_value_kept():
-    rv = RustyCountVectorizer(n_jobs=1)
-    assert rv.n_jobs == 1
-    assert rv._n_chunks(["hello"] * 10) == 1
+def test_bound_worker_budget_overrides_config():
+    rv = RustyCountVectorizer()._bind_native_worker_budget(2)
+    assert rv._native_workers() == 2
+    assert rv._n_chunks(["hello"] * 10) == 2
+
+
+def test_zero_configured_threads_uses_cpu_count(monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: 3)
+    with config(num_threads=0):
+        assert RustyCountVectorizer()._native_workers() == 3
 
 
 def test_unknown_cpu_count_uses_one_worker(monkeypatch):
     monkeypatch.setattr(os, "cpu_count", lambda: None)
-    rv = RustyCountVectorizer()
-    assert rv.n_jobs == 1
-    assert rv._n_chunks(["hello"] * 10) == 1
+    with config(num_threads=0):
+        rv = RustyCountVectorizer()
+        assert rv._native_workers() == 1
+        assert rv._n_chunks(["hello"] * 10) == 1
 
 
-@pytest.mark.parametrize("n_jobs", [0, -1, 1.5])
-def test_invalid_n_jobs_rejected(n_jobs):
-    with pytest.raises(ValueError, match="n_jobs"):
-        RustyCountVectorizer(n_jobs=n_jobs)
-
-
-def test_n_jobs_above_cpu_count_capped_with_warning(caplog):
-    cores = os.cpu_count()
-    with caplog.at_level(logging.WARNING):
-        rv = RustyCountVectorizer(n_jobs=cores + 100)
-    assert rv.n_jobs == cores
-    assert any("n_jobs" in r.message for r in caplog.records)
+def test_n_jobs_is_not_an_estimator_parameter():
+    assert "n_jobs" not in RustyCountVectorizer().get_params()
+    with pytest.raises(TypeError, match="n_jobs"):
+        RustyCountVectorizer(n_jobs=4)
 
 
 @pytest.mark.parametrize(
-    "corpus_len,n_jobs,expected",
+    "corpus_len,num_threads,expected",
     [
-        (MIN_BLOCK_LEN, 4, 1),  # corpus smaller than n_jobs -> capped by corpus size
-        (3, 4, 3),  # corpus smaller than n_jobs -> capped by corpus size
-        (4, 4, 4),  # corpus equal to n_jobs -> full parallelism
-        (5, 4, 4),  # corpus bigger than n_jobs -> capped by n_jobs
-        (100, 4, 4),  # corpus bigger than n_jobs -> capped by n_jobs
+        (MIN_BLOCK_LEN, 4, 1),
+        (3, 4, 3),
+        (4, 4, 4),
+        (5, 4, 4),
+        (100, 4, 4),
     ],
 )
-def test_n_chunks_formula(corpus_len, n_jobs, expected):
-    # With MIN_BLOCK_LEN=1, n_chunks = min(corpus_len, n_jobs): parallelism is
-    # only limited by corpus size (never below it), otherwise by n_jobs.
-    rv = RustyCountVectorizer(n_jobs=n_jobs)
-    corpus = [""] * corpus_len
-    assert rv._n_chunks(corpus) == expected
+def test_n_chunks_formula(corpus_len, num_threads, expected, monkeypatch):
+    # Configured threads must work independently of the runner's CPU count.
+    monkeypatch.setattr(os, "cpu_count", lambda: 3)
+    with config(num_threads=num_threads):
+        rv = RustyCountVectorizer()
+        corpus = [""] * corpus_len
+        assert rv._n_chunks(corpus) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +426,7 @@ def test_dtype_fitted_state_and_clone_parity(dtype):
     from sklearn.base import clone
 
     set_config(rust_backend=True, allow_patch=True)
-    estimator = RustyCountVectorizer(dtype=dtype, stop_words=["the"], n_jobs=2)
+    estimator = RustyCountVectorizer(dtype=dtype, stop_words=["the"])
     cloned = clone(estimator)
     assert cloned.get_params() == estimator.get_params()
     assert cloned.stop_words is not estimator.stop_words
