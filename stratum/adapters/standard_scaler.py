@@ -24,7 +24,12 @@ def supports_rust_standard_scaler(estimator) -> tuple[bool, str]:
         return False, "estimator is not a supported StandardScaler"
     if not (rb.HAVE_RUST and rb.standard_scale_fit and rb.standard_scale_transform):
         return False, "Rust StandardScaler runtime is not available"
-    if not (estimator.with_mean and estimator.with_std and estimator.copy):
+    # Only boolean parameters can enable the native kernels.
+    # FIXME: Inline DataOp literals, e.g., with_mean = st.as_data_op(True)
+    if not all(
+        isinstance(value, (bool, np.bool_)) and value
+        for value in (estimator.with_mean, estimator.with_std, estimator.copy)
+    ):
         return False, "Rust requires with_mean=True, with_std=True and copy=True"
     return True, ""
 

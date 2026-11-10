@@ -28,6 +28,8 @@ def test_native_extension_exports_expected_api():
         "hashing_tfidf_csr",
         "hashing_tfidf_csr_with_idf",
         "ohe_transform_csr",
+        "standard_scale_fit",
+        "standard_scale_transform",
         "tfidf_fit_csr",
         "tfidf_transform_csr",
         "truncated_svd_fit_from_csr",
