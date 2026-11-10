@@ -10,9 +10,11 @@ the sklearn/skrub reference (``@physical_impl``) or the native Rust kernel
 Estimators without a dedicated physical operator use the generic Skrub
 transformer implementation.
 """
+
 from __future__ import annotations
 
 from sklearn.base import clone
+from sklearn.preprocessing import StandardScaler as _SklearnStandardScaler
 from typing import Any
 
 from skrub import TableVectorizer as _SkrubTableVectorizer
@@ -29,15 +31,29 @@ from stratum.adapters.string_encoder import (
 from stratum.adapters.table_vectorizer import (
     StratumFusedTableVectorizer as _StratumFusedTableVectorizer,
 )
+from stratum.adapters.standard_scaler import (
+    NumpyStandardScaler,
+    RustyStandardScaler,
+    supports_rust_standard_scaler,
+)
 from stratum.optimizer.logical._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
-from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp, EstimatorExecution
-from stratum.optimizer.physical._registry import (physical_impl, rust_impl,
-                                                  sklearn_skrub_impl)
+from stratum.optimizer.physical._physical_ops import (
+    PhysicalOp,
+    RustPhysicalOp,
+    EstimatorExecution,
+)
+from stratum.optimizer.physical._registry import (
+    physical_impl,
+    rust_impl,
+    numpy_impl,
+    sklearn_skrub_impl,
+)
 
 
 class _TransformerExecution(EstimatorExecution):
     """Shared physical execution for Skrub-compatible transformer estimators."""
+
     # TODO: specialize transformer sizing, especially the native TF-IDF and
     # SVD/FD handles retained by RustStringEncoder and nested TableVectorizers.
     # For now the generic fallback runs once per fit; native handles remain
@@ -56,18 +72,21 @@ class TableVectorizerOp(_TransformerExecution, TransformerOp, PhysicalOp):
     for supported configurations; unsupported configurations use the reference
     implementation.
     """
+
     is_abstract = True
 
 
 @sklearn_skrub_impl(of=TableVectorizerOp)
 class SkrubTableVectorizer(TableVectorizerOp):
     """Reference implementation that runs Skrub TableVectorizer unchanged."""
+
     is_abstract = False
 
 
 @physical_impl(of=TableVectorizerOp, backend="stratum")
 class StratumTableVectorizer(TableVectorizerOp):
     """Skrub TableVectorizer orchestration with supported Rust leaf encoders."""
+
     is_abstract = False
 
     @classmethod
@@ -90,9 +109,7 @@ class StratumTableVectorizer(TableVectorizerOp):
 
     def on_impl_selected(self, ctx: Any) -> None:
         self.estimator = _bind_table_vectorizer_leaves(self.estimator)
-        self.original_estimator = _bind_table_vectorizer_leaves(
-            self.original_estimator
-        )
+        self.original_estimator = _bind_table_vectorizer_leaves(self.original_estimator)
 
 
 def _bind_table_vectorizer_leaves(estimator: _SkrubTableVectorizer):
@@ -121,6 +138,7 @@ def _bind_table_vectorizer_leaves(estimator: _SkrubTableVectorizer):
 @physical_impl(of=TableVectorizerOp, backend="stratum")
 class StratumFusedTableVectorizer(TableVectorizerOp):
     """Multithreaded fused orchestration with eligible Rust leaf encoders."""
+
     is_abstract = False
 
     @classmethod
@@ -155,12 +173,14 @@ class StringEncoderOp(_TransformerExecution, TransformerOp, PhysicalOp):
     unchanged -- they differ only in *which* estimator object ``process`` runs
     (the plain skrub encoder, or the Rust adapter swapped in at plan time).
     """
+
     is_abstract = True
 
 
 @sklearn_skrub_impl(of=StringEncoderOp)
 class SkrubStringEncoder(StringEncoderOp):
     """Reference impl: runs the skrub ``StringEncoder`` as-is."""
+
     is_abstract = False
 
 
@@ -169,6 +189,7 @@ class RustStringEncoder(StringEncoderOp, RustPhysicalOp):
     """Native Rust impl: swaps in the ``RustyStringEncoder`` adapter at plan time,
     so ``process`` runs the Rust kernel with no run-time decision left. Its Rust
     capability hints come from ``RustPhysicalOp`` (Rayon: GIL-free, data-parallel)."""
+
     is_abstract = False
 
     @classmethod
@@ -229,23 +250,106 @@ def _as_rusty_one_hot_encoder(estimator) -> RustyOneHotEncoder:
     return rusty
 
 
+# --- StandardScaler ----------------------------------------------------------
+class StandardScalerOp(_TransformerExecution, TransformerOp, PhysicalOp):
+    """Abstract physical standardization operator."""
+
+    is_abstract = True
+
+
+@sklearn_skrub_impl(of=StandardScalerOp)
+class SklearnStandardScaler(StandardScalerOp):
+    """Reference sklearn standardization."""
+
+    is_abstract = False
+
+
+@numpy_impl(of=StandardScalerOp)
+class NumpyStandardScalerExec(StandardScalerOp):
+    """NumPy dense statistics with reference fallbacks."""
+
+    is_abstract = False
+
+    @classmethod
+    def supports(cls, op, ctx):
+        return (
+            type(op.original_estimator) is _SklearnStandardScaler and not op.param_refs
+        )
+
+    def on_impl_selected(self, ctx):
+        self.estimator = NumpyStandardScaler(**self.estimator.get_params(deep=False))
+        self.original_estimator = NumpyStandardScaler(
+            **self.original_estimator.get_params(deep=False)
+        )
+
+
+@rust_impl(of=StandardScalerOp)
+class RustStandardScaler(StandardScalerOp, RustPhysicalOp):
+    """Rust kernels for standardization."""
+
+    is_abstract = False
+
+    @classmethod
+    def supports(cls, op, ctx):
+        return (
+            not op.param_refs
+            and supports_rust_standard_scaler(op.original_estimator)[0]
+        )
+
+    def on_impl_selected(self, ctx):
+        for name in ("estimator", "original_estimator"):
+            estimator = RustyStandardScaler(
+                **getattr(self, name).get_params(deep=False),
+            )
+            estimator._bind_native_worker_budget(ctx.parallelism)
+            estimator._stratum_force_rust = True
+            setattr(self, name, estimator)
+
+
 @lowering_rule(TransformerOp)
 def lower_transformer(op: TransformerOp, ctx) -> PhysicalOp | None:
     """Lower a ``TransformerOp`` to the matching abstract physical transformer.
 
     Dedicated estimators get their own physical op; others run through Skrub.
     """
+    if type(op.original_estimator) is _SklearnStandardScaler:
+        return StandardScalerOp(
+            estimator=op.estimator,
+            y=op.y,
+            cols=op.cols,
+            exclude_cols=op.exclude_cols,
+            no_wrap=op.no_wrap,
+            allow_reject=op.allow_reject,
+            unsupervised=op.unsupervised,
+            kwargs=op.kwargs,
+            param_refs=op.param_refs,
+            feeds_estimator=op.feeds_estimator,
+        )
     if isinstance(op.original_estimator, _SkrubTableVectorizer):
         return TableVectorizerOp(
-            estimator=op.estimator, y=op.y, cols=op.cols, exclude_cols=op.exclude_cols,
-            no_wrap=op.no_wrap, allow_reject=op.allow_reject, unsupervised=op.unsupervised,
-            kwargs=op.kwargs, param_refs=op.param_refs, feeds_estimator=op.feeds_estimator,
+            estimator=op.estimator,
+            y=op.y,
+            cols=op.cols,
+            exclude_cols=op.exclude_cols,
+            no_wrap=op.no_wrap,
+            allow_reject=op.allow_reject,
+            unsupervised=op.unsupervised,
+            kwargs=op.kwargs,
+            param_refs=op.param_refs,
+            feeds_estimator=op.feeds_estimator,
         )
     if isinstance(op.original_estimator, _SkrubStringEncoder):
         return StringEncoderOp(
-            estimator=op.estimator, y=op.y, cols=op.cols, exclude_cols=op.exclude_cols,
-            no_wrap=op.no_wrap, allow_reject=op.allow_reject, unsupervised=op.unsupervised,
-            kwargs=op.kwargs, param_refs=op.param_refs, feeds_estimator=op.feeds_estimator,
+            estimator=op.estimator,
+            y=op.y,
+            cols=op.cols,
+            exclude_cols=op.exclude_cols,
+            no_wrap=op.no_wrap,
+            allow_reject=op.allow_reject,
+            unsupervised=op.unsupervised,
+            kwargs=op.kwargs,
+            param_refs=op.param_refs,
+            feeds_estimator=op.feeds_estimator,
         )
     op.__class__ = PassthroughTransformer
     return op

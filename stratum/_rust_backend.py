@@ -84,3 +84,5 @@ forest_fit_exact = getattr(native, "forest_fit_exact", None) if native else None
 forest_fit_hist = getattr(native, "forest_fit_hist", None) if native else None
 forest_predict = getattr(native, "forest_predict", None) if native else None
 forest_model_info = getattr(native, "forest_model_info", None) if native else None
+standard_scale_fit = getattr(native, "standard_scale_fit", None) if native else None
+standard_scale_transform = getattr(native, "standard_scale_transform", None) if native else None
