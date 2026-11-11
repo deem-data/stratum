@@ -1,4 +1,4 @@
-"""Fit-pass planning: what the fitting pass is allowed to skip, and what it is not.
+"""Dead code elimination during fitting: which operators can be skipped.
 
 The dangerous half of this is the second one. Marking a step dead because nothing reads
 its output in the fitting pass would leave a step that has to be *fitted* unfitted, and
@@ -63,7 +63,7 @@ class RecordingTail(TransformerMixin, BaseEstimator):
         return X
 
 
-class FitPassPlanningTest(unittest.TestCase):
+class FitDeadCodeEliminationTest(unittest.TestCase):
     def setUp(self):
         # An eager preview would run the plan at construction time and count as a pass.
         self.enterContext(st.config_context(eager_data_ops=False))

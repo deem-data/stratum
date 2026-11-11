@@ -132,7 +132,7 @@ def test_predictor_lowers_to_its_family(module, name, family, _impl):
 
     assert type(lowered) is family
     assert lowered.is_abstract
-    # Still a PredictorOp, so response-mode and fit-pass planning see it as one.
+    # Still a PredictorOp for response-mode planning and dead code elimination.
     assert isinstance(lowered, PredictorOp)
     assert lowered.estimator is estimator
 

@@ -1,4 +1,4 @@
-"""Stable names for the values computed by operators.
+"""Stable lineage keys for operator results.
 
 A lineage key hashes an op's concrete implementation class, output frame library,
 configuration and input keys in operand order. Unlike the identity-based structure
@@ -31,19 +31,21 @@ __all__ = ["Uncacheable", "LineageEncoder", "compute_lineage_keys", "lineage_key
 #: Bytes of a lineage key (hex-encoded to twice as many characters).
 KEY_BYTES = 16
 
-#: The encoder gives up beyond this many encoded values: a constant that large is
-#: data, and encoding it would make key computation scale with it.
-MAX_ENCODED_VALUES = 100_000
+#: Reject configurations exceeding this many encoded values to limit
+#: element-by-element encoding work.
+MAX_ENCODED_VALUES = 10_000
 
-#: Scalars named exactly by their type and repr: numpy scalars, decimals, dates and
+#: Scalars encoded by their type and repr: numpy scalars, decimals, dates and
 #: times (pandas' Timestamp and Timedelta among them) and the missing-value markers.
 _SCALAR_TYPES = (np.generic, decimal.Decimal, datetime.date, datetime.time,
                  datetime.timedelta, type(pd.NaT), type(pd.NA))
 
 
 def _dtype_field(value):
-    """A field of an extension dtype as plain values, or ``value`` itself if the
-    encoder takes it as it is."""
+    """Convert extension dtype metadata to plain values where needed.
+
+    Return other values unchanged for the encoder to handle.
+    """
     if isinstance(value, pd.Index):
         return ("Index", _dtype_field(value.dtype), value.tolist())
     if isinstance(value, datetime.tzinfo):
@@ -65,17 +67,17 @@ class LineageEncoder:
     """Canonical byte encoding of plain values, digested with blake2b.
 
     Every value is written as a type tag followed by its payload; variable-length
-    payloads are length-prefixed, so distinct values never encode alike. Plain
+    payloads are length-prefixed to delimit their boundaries. Plain
     values are ``None``, ``bool``, ``int``, ``float``, ``str``, ``bytes``, slices,
     tuples, lists, dicts and sets of plain values, ``OperandRef``s, the literals in
-    ``_SCALAR_TYPES``, pandas' calendar offsets, and numpy and pandas data types. An object can name itself by
-    a ``lineage()`` method returning plain values, as column expressions do.
+    ``_SCALAR_TYPES``, pandas' calendar offsets, and numpy and pandas data types.
+    Objects can provide an encoding through a ``lineage()`` method returning plain
+    values, as column expressions do.
     Anything else raises :class:`Uncacheable`.
     """
 
     def __init__(self):
-        # One buffer, hashed once: thousands of small `update` calls cost more
-        # than the hashing itself.
+        # Accumulate one buffer to avoid repeated hash-update call overhead.
         self._buf = bytearray()
         self._count = 0
 
@@ -128,8 +130,8 @@ class LineageEncoder:
             self._tag(b"(" if type(value) is tuple else b"[")
             self._sequence(value)
         elif type(value) is dict:
-            # Insertion order is kept: it is semantic for some ops (the column
-            # order of `assign`), and deterministic for a given script.
+            # Preserve insertion order: it affects some operations, including
+            # the column order produced by `assign`.
             self._tag(b"{")
             self._str(str(len(value)))
             for k, v in value.items():
@@ -146,9 +148,9 @@ class LineageEncoder:
             self._str(type(value).__qualname__)
             self._str(repr(value))
         elif isinstance(value, pd.offsets.BaseOffset):
-            # A calendar offset (``DateOffset(years=1)``) is what pandas compares it
-            # by; its repr leaves out ``normalize``. Only pandas' own classes: a
-            # subclass may move dates by code of its own.
+            # Encode calendar offset parameters explicitly: repr omits normalize.
+            # Only pandas classes are supported; user subclasses may override
+            # date arithmetic.
             cls = type(value)
             if cls.__module__.partition(".")[0] != "pandas":
                 raise Uncacheable(f"no lineage encoding for {cls.__qualname__}")
@@ -162,8 +164,8 @@ class LineageEncoder:
             self._str(type(value).__qualname__)
             self._str(str(value))
         elif isinstance(value, pd.api.extensions.ExtensionDtype):
-            # Named by the fields pandas compares dtypes by: its string leaves out
-            # the categories of a categorical, and a string dtype's storage.
+            # Encode the metadata fields pandas uses for dtype comparison.
+            # String representations omit categories and string storage backends.
             self._tag(b"E")
             self._str(type(value).__qualname__)
             fields = type(value)._metadata

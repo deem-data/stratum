@@ -6,9 +6,9 @@ plus operators recomputed each pass, cannot supply reusable results here.
 
 Starting at the root, a hit cuts off the work needed only by that operator. Its
 value is retained by the plan so cache eviction cannot invalidate the plan.
-Remaining keyed operations except constants are admitted by the fixed allow-all
-oracle policy when their results are computed by the scheduler. The cache and
-execution share these values by reference; operators must treat them as read-only.
+The scheduler attempts to cache each remaining keyed result except constants,
+subject to the cache budget. The cache and execution share these values by
+reference; operators must treat them as read-only.
 """
 from __future__ import annotations
 

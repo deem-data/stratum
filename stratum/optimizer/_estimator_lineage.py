@@ -1,14 +1,14 @@
-"""Lineage of estimators: what a fit computes, named by class and parameters.
+"""Estimator lineage keys derived from classes and constructor parameters.
 
 An estimator op is keyed like any other cacheable op (see
 :mod:`stratum.optimizer._lineage`), with the estimator itself named by its class
-and its constructor parameters. That is sound only for estimators whose fit is a
-deterministic function of their parameters and data, so only estimators from the
-libraries stratum knows are keyed, and an estimator that draws random numbers must
-be seeded. Anything else raises :class:`Uncacheable`.
+and its constructor parameters. Reuse assumes fitting is deterministic for those
+parameters and input data. Eligibility checks reject unsupported packages,
+frozen estimators, and unset seeds except for known deterministic configurations
+or packages with fixed default seeds. Rejected estimators raise :class:`Uncacheable`.
 
-Parameters that only say *how* to run (``n_jobs``, ``verbose``) are left out, so a
-fit on more cores still finds the entry a fit on fewer wrote.
+Execution parameters such as ``n_jobs`` and ``verbose`` are excluded so changes
+to these settings do not invalidate cache entries.
 """
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ from skrub.selectors import _base as _selectors
 
 from stratum.optimizer.logical._base import OperandRef, Uncacheable
 
-#: Top-level packages whose estimators are keyed. A user-defined estimator may do
-#: anything in ``fit``, so it is not.
+#: Top-level packages eligible for estimator lineage. User-defined estimators
+#: are excluded because their fitting behavior is not known.
 KNOWN_ESTIMATOR_PACKAGES = frozenset({"sklearn", "skrub", "stratum", "lightgbm", "xgboost",
                                       "catboost"})
 
-#: Parameters that change how an estimator runs, never what it computes.
+#: Parameters treated as execution settings and excluded from estimator lineage.
 RUNTIME_PARAMETERS = frozenset({"n_jobs", "verbose", "verbosity", "silent", "thread_count",
                                 "n_threads", "nthread", "copy", "copy_X"})
 
@@ -39,7 +39,7 @@ _DEFAULT_SEEDED_PACKAGES = frozenset({"lightgbm", "xgboost", "catboost"})
 _SEED_PARAMETERS = ("random_state", "random_seed", "seed")
 
 #: Estimators with a seed parameter that only matters in some configurations: the
-#: predicate says when an unseeded one is deterministic all the same.
+#: predicate identifies configurations that are deterministic without a seed.
 _SEEDLESS_WHEN = {
     "Ridge": lambda p: p.get("solver") not in ("sag", "saga"),
     "RidgeClassifier": lambda p: p.get("solver") not in ("sag", "saga"),
@@ -50,8 +50,9 @@ _SEEDLESS_WHEN = {
 
 
 def estimator_lineage(estimator: BaseEstimator, *, graph_inputs: tuple = ()):
-    """Name a fit, with ``graph_inputs`` already represented by operator operands.
+    """Return the estimator class and parameters used to compute its lineage key.
 
+    ``graph_inputs`` are already represented by operator operands.
     An unbound DataOp parameter has no input key and must be rejected.
     """
     cls = type(estimator)
@@ -107,8 +108,8 @@ def _parameter(value, graph_inputs):
 def selector_lineage(selector):
     """A skrub column selector (``cols=`` of ``.skb.apply()``) as plain values.
 
-    Column names are plain already. A selector is named by its structure; a filter
-    by its predicate, which must be skrub's or the glob matcher it uses, since an
+    Column names can be encoded directly. Selectors are encoded by structure and
+    filters by predicate. The predicate must be skrub's or its glob matcher, since an
     arbitrary predicate may depend on mutable state or randomness.
     """
     if selector is None or isinstance(selector, (str, int, OperandRef)):

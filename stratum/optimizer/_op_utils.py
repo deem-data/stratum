@@ -22,7 +22,10 @@ def replace_op_in_outputs(op: Op, replacement: Op):
 
 
 def get_all_outputs(op: Op, stop_at_op: Op = None):
-    """Returns a list of all output ops. If stop_at_op is given, the outputs of the stop_at_op are not included."""
+    """Return reachable consumers and their inputs within the traversed subgraph.
+
+    Do not visit ``stop_at_op`` or traverse its output edges.
+    """
     queue = [op]
     visited = set()
     inputs_internal = {}
@@ -41,18 +44,21 @@ def get_all_outputs(op: Op, stop_at_op: Op = None):
     
 
 def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
-    """Clones a sub-dag of the given Op. Excluding the given Op, but including all its internal outputs.
-    Returns a list of all ops in the sub-dag, a list of the root ops of the sub-dag and a list of the leaf nodes of the sub-dag.
+    """Clone consumers downstream of ``root_op`` and return the cloned leaves.
+
+    Rebind references to ``root_op`` to ``new_root_op`` when supplied. Keep
+    external inputs shared and connect clones to ``stop_at_op`` where the
+    original edges reach it.
     """
     if new_root_op is None:
         new_root_op = root_op
 
-    # Topological search inside sub-dag --> inputs_internal contains only the input ops, which are inside the sub-dag
+    # Count only input edges within the subgraph when ordering its clones.
     outputs, inputs_internal = get_all_outputs(root_op, stop_at_op)
     indegree = {c: len(inputs_internal[c]) for c in outputs}
     queue = []
 
-    # clone_look_up: Look-up table for setting parents correctly
+    # Map original operators to clones when reconnecting their inputs.
     sub_dag_leaves, clone_look_up = [], {root_op: new_root_op}
     for out_ in root_op.outputs:
         queue.append(out_)
@@ -62,7 +68,7 @@ def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
         op_clone = op.clone()
         clone_look_up[op] = op_clone
 
-        # update op_clones's parents and the parents's chidlren
+        # Connect the clone's inputs and their reverse output edges.
         for in_ in op.inputs:
             in_ = clone_look_up.get(in_, in_)
             op_clone.add_input(in_)
@@ -73,7 +79,7 @@ def clone_sub_dag(root_op: Op, stop_at_op: Op = None, new_root_op: Op = None):
                 if out_ is stop_at_op:
                     op_clone.add_output(stop_at_op)
                     stop_at_op.add_input(op_clone)
-                    # we dont add the output to the sub-dag and dont add it to op_clone's outputs
+                    # Connect to the boundary operator without cloning or visiting it.
                     assert len(op.outputs) == 1, "Op before stop Op should have only one output"
                     sub_dag_leaves.append(op_clone)
                     continue
@@ -98,8 +104,9 @@ def topological_iterator(root: Op) -> Iterator[Op]:
         return topological_iterator_dfs(queue2, indegree)
 
 
+# TODO: Correct the return annotation to tuple[dict[Op, int], deque[Op]].
 def compute_graph_node_indegree(root: Op) -> tuple[deque[Op], dict[Op, int]]:
-    # first we need to bfs for finding all sources in the dag
+    # Traverse input edges breadth-first to find the graph's source operators.
     queue1 = deque([root])
     indegree = {root: 0 if not root.inputs else len(root.inputs)}
     queue2 = deque()
@@ -193,14 +200,11 @@ def validate_dag(root: Op) -> None:
 def show_graph(root: Op, filename: str = 'plan'):
     """Show the runtime plan of the DataOp DAG.
 
-    Rendered as SVG by default (see the ``graph_format`` config flag). A plan of
-    any size lays out wider than the 32767 pixel side that the cairo renderer
-    caps bitmaps at, and graphviz reacts by scaling the whole drawing down to
-    fit, which shrinks the labels past legibility. SVG carries no such cap.
+    Render as SVG by default (see ``graph_format``). Large plans can exceed
+    Cairo's bitmap dimensions, causing Graphviz to scale down the drawing and
+    make labels difficult to read. SVG avoids that bitmap size limit.
 
-    The DOT source is kept next to the rendered file so a plan can be laid out
-    again -- other format, other engine, other attributes -- without paying for
-    the pipeline that produced it.
+    The render call removes the temporary DOT source after creating the output.
     """
     dot = Digraph(
         comment=filename,

@@ -12,7 +12,7 @@ def explain_linear_plan(
 
     For plans with a splitting/CV operation (split_pos is not None), this prints
     the plan structure divided into pre-split, split, fit, and predict phases,
-    remapping the operations in the predict phase to their predicted indices
+    remapping the operations in the predict phase to their displayed indices
     to make dependencies clear.
 
     Parameters
@@ -30,7 +30,7 @@ def explain_linear_plan(
 
     fmt_idx = lambda i: f"[{i:0{idx_width}d}]"
 
-    # Compute layout widths for nice arrow alignment
+    # Compute layout widths to align dependency arrows.
     pre_split_len = split_pos + 1 if split_pos is not None else None
     widths = [
         5 + idx_width + len(str(op))

@@ -18,7 +18,7 @@ from ._explain import explain_linear_plan
 from .logical.rewrites._algebraic import algebraic_rewrites, AlgebraicRewritesConfig
 from .logical.rewrites._relational import relational_rewrites
 from ._linearization import linearize_dag
-from ._fit_pass_planning import mark_fit_dead_ops
+from ._dead_code_elimination import mark_dead_ops_during_fit
 from ._input_removal_planning import compute_pinned_ops, plan_input_removals
 from ._reuse_planning import apply_reuse_cache
 from .physical._plan_context import PlanContext
@@ -72,7 +72,7 @@ class SearchConfig:
 
 
 class OptConfig():
-    # TODO we should move this class to the _config.py file
+    # TODO: Move this class to _config.py.
     def __init__(
         self,
         cse: bool = True,
@@ -88,19 +88,16 @@ class OptConfig():
         pandas_query: bool = False,
         literal_inlining: bool = True,
     ):
-        """``selector`` overrides the implementation-selection policy for this
-        plan. Left ``None``, the policy named by ``FLAGS.implementation_selector``
-        is used, which is the only route users have. Passing one is how a caller
-        reaches a policy that has no config name -- notably
-        ``FlagBasedSelector(backend="polars")``, which pins a plan to one
-        dataframe backend so the polars impls can be exercised directly.
+        """Configure optimization and implementation selection for one plan.
 
-        ``pandas_query`` lets ``PandasQuerySelectionOp`` bid for a mask selection
-        whose predicate compiles to a query string. It lives here, on the
-        optimizer's own config, because it is a technical impl choice between two
-        pandas selection kernels rather than anything a user should reason about:
-        no ``set_config`` parameter reaches it, and ``make_grid_search`` (a skrub
-        drop-in, ADR 0002) builds its plan with the default."""
+        - ``selector=None`` uses ``FLAGS.implementation_selector``. An explicit
+          selector can select a policy without a public config name, such as
+          ``FlagBasedSelector(backend="polars")`` for testing Polars implementations.
+        - ``pandas_query`` enables ``PandasQuerySelectionOp`` as a candidate for
+          masks whose predicates compile to query strings. This optimizer-only
+          setting selects between pandas kernels; ``set_config`` does not expose
+          it, and ``make_grid_search`` uses the default.
+        """
         self.cse = cse
         self.dataframe_ops = dataframe_ops
         self.unroll_choices = unroll_choices
@@ -132,8 +129,8 @@ def _debug_explain_linear_plan(name: str, linearized_dag: list, split_pos: int |
 def _debug_explain_dag(level: str, root: Op):
     """Print a topological plan for a non-linearized IR level (logical/physical).
 
-    These levels have no split/CV structure yet, so the plan is a flat
-    topological listing (``split_pos=None``)."""
+    These levels have not been linearized around the split operator, so display
+    a flat topological listing (``split_pos=None``)."""
     if diagnostics_enabled():
         capture_plan(level, topological_iterator(root))
     if level in FLAGS.explain:
@@ -143,8 +140,8 @@ def _debug_explain_dag(level: str, root: Op):
 def _debug_validate_dag(root: Op):
     """Assert every OperandRef indexes a valid input edge across the whole DAG.
 
-    Gated by FLAGS.validate_dag so a rewrite that drops/reorders inputs without
-    renumbering its operand refs fails loudly instead of silently miswiring."""
+    With FLAGS.validate_dag enabled, reject out-of-range operand references
+    left by rewrites that remove or reorder inputs."""
     if FLAGS.validate_dag:
         validate_dag(root)
 
@@ -231,13 +228,13 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
         _debug_show_graph(root, "algebraic_rewrite")
 
-    # The relational rewrites read schemas (projection pushup does), so propagate
-    # them first. From here on a rewrite keeps them current for the ops it creates.
+    # Projection pushup reads schemas, so propagate them before relational rewrites.
+    # These rewrites must maintain schemas for the operators they create or change.
     if config.propagate_schema:
         propagate_output_schema(root)
 
-    # Shape rewrites after the expression ones, and after CSE, so the build side
-    # a promoted join reads is already shared with whatever else produced it.
+    # Run relational rewrites after expression rewrites and CSE so a converted
+    # join can reuse the build-side operator shared by other consumers.
     root = relational_rewrites(root, semi_join=config.semi_join_rewrite,
                                projection_pushup=config.projection_pushup)
     _debug_show_graph(root, "relational_rewrite")
@@ -266,7 +263,8 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
     Implementation selection resolves each op with registered candidates to a
     concrete implementation (consulting the default PhysicalRegistry unless one
     is injected). An explicit cache supplies hits and admission keys before
-    linearization, so buffer-removal and fit-pass planning see the pruned graph."""
+    linearization, so buffer-removal planning and dead code elimination see the
+    pruned graph."""
 
     # TODO: add physical rewrites here (or afterwards)
     if selector is None:
@@ -277,13 +275,13 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
         apply_reuse_cache(root, reuse_cache)
         _debug_validate_dag(root)
     _debug_show_graph(root, "physical_impl")
-    # similarly we can do the things like parallelization planning here
+    # Parallel execution planning could also run here, before linearization.
 
     # Linearize and mark last used intermediates for removal
     linearized_dag, split_pos, flagged_ops = linearize_dag(root)
     pinned_ops = compute_pinned_ops(linearized_dag, split_pos, flagged_ops)
     plan_input_removals(linearized_dag, pinned_ops)
-    mark_fit_dead_ops(linearized_dag, split_pos, flagged_ops)
+    mark_dead_ops_during_fit(linearized_dag, split_pos, flagged_ops)
 
     if diagnostics_enabled():
         capture_plan("physical_impl", linearized_dag, split_pos, flagged_ops)
@@ -302,7 +300,7 @@ def run_op_cse_pass(root: Op) -> Op:
 
 
 def extract_frame_operators(root):
-    """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
+    """Extract specialized dataframe operators from generic calls in the DAG."""
     start = start_time()
     for op in topological_iterator(root):
         root, _ = extract_dataframe_op(op, root, FLAGS.make_selection_op,
@@ -313,7 +311,7 @@ def extract_frame_operators(root):
 
 
 def extract_numeric_operators(root):
-    """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
+    """Extract numeric operators from generic calls in the DAG."""
     start = start_time()
     for op in topological_iterator(root):
         root, _ = extract_numeric_op(op, root)
@@ -325,9 +323,8 @@ def extract_numeric_operators(root):
 def propagate_output_schema(root, check: bool = False):
     """Propagate each op's output schema from its inputs, bottom-up.
 
-    With ``check``, a schema an op already had must match the recomputed one: a
-    rewrite that left it stale would mislead every rewrite that read it. A missing
-    schema is not checked, since unknown is always a safe answer.
+    With ``check``, compare each existing schema to the recomputed one to detect
+    stale schema metadata left by a rewrite. Skip comparisons for missing schemas.
     """
     start = start_time()
     for op in topological_iterator(root):
@@ -381,14 +378,13 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
 
 
 def _apply_fed_nodes(nodes: dict, parents: dict, order: list) -> set:
-    """Keys of the nodes whose value some `.skb.apply()` consumes, directly or not.
+    """Return node keys with a downstream `.skb.apply()` consumer.
 
-    skrub decides at evaluation time whether an Apply is the last estimator: if
-    another Apply is still waiting on its output, it transforms (or predicts) in
-    every response pass instead of answering the scorer. The plan settles the same
-    question once, from the graph: any downstream Apply, through any of its fields,
-    counts. skrub's answer can depend on the order its traversal first reaches a
-    node shared by an Apply and a non-Apply path; this static rule ignores that.
+    An Apply feeding another Apply must transform or predict for that consumer
+    during response passes. Determine this dependency from all graph edges,
+    including estimator parameters. Unlike skrub's evaluation-time check, this
+    rule does not depend on traversal order when Apply and non-Apply paths share
+    a node.
     """
     fed = set()
     for key in reversed(order):
@@ -401,16 +397,15 @@ def _apply_fed_nodes(nodes: dict, parents: dict, order: list) -> set:
 def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
     """Terminate the plan in a candidate-set operator.
 
-    Unrolling leaves a `ChoiceOp` at the sink that no longer chooses anything, so it is
-    replaced. A plan with no choice has one candidate and gets the same node appended: a
-    set of one is still a set, and the runtime then has one shape to read rather than
-    two. See `docs/adr/0003-scoring-is-a-plan-operator.md`.
+    Replace the sink `ChoiceOp` left by unrolling with explicit candidate inputs
+    and labels. For a plan without choices, append a candidate-set operator with
+    one input so the runtime uses the same result representation.
     """
     start = start_time()
     fold = _split_outputs(root)
     if fold is None:
-        # No split op, so the plan is not evaluated against folds and has no candidates
-        # to set against each other. `Scheduler.evaluate` reports that itself.
+        # Without a split, evaluate returns the final operator result;
+        # grid_search requires X/y markers.
         return root
     replacing = isinstance(root, ChoiceOp)
     names = root.make_outcome_names() if replacing else ["default"]
@@ -508,15 +503,13 @@ def _referenced(value):
 
 
 def _response_mode(metric, names: list[str], candidates: list[Op]) -> str:
-    """The response method the scoring pass runs, chosen once here.
+    """Select a response method supported by every candidate in the scoring pass.
 
-    A metric declares what it can read, best first: `roc_auc` takes a decision function
-    or probabilities. One pass has one mode, so the choice has to serve every candidate.
-    `predict` always does, because a predict pass produces predictions whether or not a
-    candidate ends in an estimator; anything else has to come from one.
-
-    A metric no candidate can feed is refused here, before any data is touched, rather
-    than at the first fold.
+    - Try the metric's response methods in preference order. For example,
+      `roc_auc` accepts decision scores or probabilities.
+    - Accept `predict` for any candidate, including a precomputed prediction DAG.
+      Other responses require a compatible estimator in each candidate.
+    - Raise when no common response method is available, before executing folds.
     """
     estimators = [_last_estimator(c) for c in candidates]
     for response in metric.response_method:
@@ -536,8 +529,7 @@ def _response_mode(metric, names: list[str], candidates: list[Op]) -> str:
 def _last_estimator(op: Op) -> BaseEstimatorOp | None:
     """The estimator nearest the end of a candidate's path, or None if it has none.
 
-    The candidate's own tail may be post-processing; what decides which responses the
-    plan can produce is the estimator feeding it, as it is the final `Apply` in skrub.
+    Search input edges breadth-first, allowing for post-processing after an estimator.
     """
     seen, queue = set(), [op]
     while queue:

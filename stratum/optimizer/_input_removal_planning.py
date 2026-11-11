@@ -3,7 +3,7 @@
 Removal planning marks the last use of each intermediate in the DAG. The list of
 intermediates to be removed is materialized in each op's ``op.remove_after`` attribute.
 Skrub/stratum's execution plan does not include control flow, so we can mark the last
-use of each intermediate in the compile time.
+use of each intermediate at compile time.
 
 How it works:
 - Each op starts with a consumer count equal to ``len(op.outputs)`` (min 1).
@@ -11,9 +11,10 @@ How it works:
   another op, its remaining count is decremented.
 - When the count hits zero, the intermediate is scheduled for removal right after
   the current op finishes (set via ``op.remove_after``).
-- Pinned ops (pre-split ops that feed post-split / re-executed ops) are
-  never removed by the schedule; they persist across CV folds.
-- At execution time the scheduler calls ``buffers.remove()`` for every
+- Outputs retained across folds (pre-split ops that feed post-split or
+  re-executed ops) are excluded from this removal schedule. These outputs can
+  still spill to disk; ``pinned_ops`` does not imply ``BufferPool.pin`` residency.
+- At execution time the scheduler calls ``pool.remove()`` for every
   entry in ``op.remove_after``.
 """
 from __future__ import annotations
@@ -30,7 +31,7 @@ def compute_pinned_ops(
     split_pos: int | None,
     recompute_ops: list[Op],
 ) -> set[Op]:
-    """Return pre-split ops that must persist across CV folds."""
+    """Return pre-split ops whose outputs must remain available across CV folds."""
     start = start_time()
     if split_pos is None:
         return set()

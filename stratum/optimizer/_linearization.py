@@ -11,20 +11,19 @@ logger = logging.getLogger(__name__)
 
 
 def is_recomputed(op: Op) -> bool:
-    """Whether this op runs again in every pass, wherever it sits in the plan."""
+    """Whether this operator is recomputed each pass regardless of plan position."""
     return isinstance(op, ImplOp) and isinstance(op.skrub_impl, EvalMode)
 
 
 def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None, list[Op]]:
     """Topologically sort a DAG and enforce the split invariant.
 
-    Single-pass DFS that defers the split op on the stack: whenever the
-    split op is ready but other ops are too, prefer the non-split ops.
-    This naturally ensures all non-descendants are processed first.
+    Use Kahn's algorithm with a stack of ready operators. When the split
+    operator and another operator are ready, defer the split operator.
 
-    Guarantees that every op at index >= split_pos is a descendant of the
-    split op (i.e. in its subtree). This makes downstream scheduling
-    trivial: ops[:split_pos] are pre-split, ops[split_pos:] are post-split.
+    For a DAG with one split, this places all non-descendants before it.
+    ``ops[:split_pos]`` are pre-split operators; ``ops[split_pos:]`` contains
+    the split operator and its descendants.
 
     Returns:
         linearized_dag: Linearized list of ops with the split invariant.
