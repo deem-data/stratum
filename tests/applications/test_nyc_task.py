@@ -15,7 +15,7 @@ from stratum.optimizer._optimize import OptConfig, logical_optimize
 from stratum.optimizer.logical._column_expr import ColumnExpr, OperandLeaf
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._ops import MethodCallOp
-from tests.application._nyc_task import (
+from tests.applications._nyc_task import (
     apply_hgb, base_features, load_xy, model_features,
 )
 

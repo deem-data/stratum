@@ -522,7 +522,7 @@ def test_server_memory_budget_rejects_oversized_results(tmp_path, job_dir):
 
 
 def test_calls_run_dags_built_by_the_client(tmp_path, job_dir, sales_csv, pricing):
-    from tests.application.pds.test_q1_pipeline import build_q1, make_lineitem
+    from tests.applications.pds.test_q1_pipeline import build_q1, make_lineitem
     server_dir = tmp_path / "server"
     dag = sales_dag(sales_csv, pricing.net)
     local = grid_search(dag, cv=3, scoring="r2").results_.sort("id")
