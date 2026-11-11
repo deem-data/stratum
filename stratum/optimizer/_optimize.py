@@ -69,7 +69,6 @@ class SearchConfig:
 
 
 class OptConfig():
-    # TODO: Move this class to _config.py.
     def __init__(
         self,
         cse: bool = True,

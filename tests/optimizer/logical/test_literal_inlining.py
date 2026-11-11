@@ -9,7 +9,7 @@ import pytest
 from sklearn.linear_model import Ridge
 
 import stratum as st
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from stratum.optimizer._optimize import OptConfig, extract_numeric_operators, logical_optimize, optimize
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
 from stratum.optimizer.logical._aggregation_ops import AggregateOp

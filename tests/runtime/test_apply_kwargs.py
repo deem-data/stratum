@@ -15,7 +15,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 
-from stratum._api import grid_search
+from stratum.frontend._api import grid_search
 
 
 class RecordingTransformer(TransformerMixin, BaseEstimator):

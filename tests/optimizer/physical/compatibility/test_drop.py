@@ -5,7 +5,7 @@ import pytest
 import skrub
 
 import stratum as st
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from stratum.optimizer.physical._conversion import to_pandas
 
 FRAME = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"], "c": [0.5, 1.5, 2.5]})

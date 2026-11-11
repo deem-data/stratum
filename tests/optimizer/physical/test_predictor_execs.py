@@ -23,7 +23,7 @@ from sklearn.tree import ExtraTreeClassifier
 
 import stratum as st
 from stratum.adapters.tree_classifier import RustRandomForestClassifier
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._base import All
 from stratum.optimizer.logical._ops import OperandRef, PredictorOp

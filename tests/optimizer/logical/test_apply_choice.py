@@ -6,8 +6,7 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 from skrub import ApplyToCols
-from skrub._utils import PassThrough
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer._optimize import convert_to_ops
 from stratum.optimizer.logical.rewrites._choice_unrolling import choice_unrolling

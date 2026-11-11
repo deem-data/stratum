@@ -1,6 +1,6 @@
 from skrub._data_ops._skrub_namespace import SkrubNamespace
 from stratum._config import FLAGS
-from stratum._api import grid_search as stratum_grid_search
+from stratum.frontend._api import grid_search as stratum_grid_search
 from stratum.optimizer.logical._scoring import resolve_declared_scoring
 
 # Store reference to original method before patching

@@ -7,7 +7,7 @@ from sklearn.preprocessing import StandardScaler
 import skrub
 from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from tests.runtime.runtime_test_utils import RuntimeTest, datetime_pipeline1
 import stratum
 import logging
@@ -155,7 +155,7 @@ class TwoAxisIndexerTest(RuntimeTest):
         # raised only under `config(scheduler=True)`, at scoring time.
         pipeline = self._pipeline(
             lambda s: s.loc[s["category"] == "a", ["gid"]]["gid"].nunique())
-        ours = stratum._api.grid_search(pipeline, cv=KFold(n_splits=2), scoring="r2")
+        ours = stratum.frontend._api.grid_search(pipeline, cv=KFold(n_splits=2), scoring="r2")
         theirs = pipeline.skb.make_grid_search(
             fitted=True, cv=KFold(n_splits=2), scoring="r2")
         np.testing.assert_allclose(theirs.results_["mean_test_score"],

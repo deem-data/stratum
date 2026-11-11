@@ -63,7 +63,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import stratum
-from stratum._api import evaluate, grid_search
+from stratum.frontend._api import evaluate, grid_search
 from stratum._config import DEV_FLAGS, FLAGS, dev_config, set_config
 from stratum._profiler._diagnostics import job_context
 from stratum.runtime._reuse_cache import active_reuse_cache

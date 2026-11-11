@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from stratum._api import grid_search
+from stratum.frontend._api import grid_search
 from stratum._config import config, get_config, set_config
 from stratum.runtime import _buffer_pool as _bp
 from stratum.runtime._buffer_pool import BufferPool

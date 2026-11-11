@@ -6,7 +6,7 @@ import pytest
 from sklearn.dummy import DummyRegressor
 
 import stratum as st
-from stratum._api import evaluate, grid_search
+from stratum.frontend._api import evaluate, grid_search
 from stratum.optimizer.logical._ops import Op
 from stratum.runtime._scheduler import SequentialScheduler
 from stratum._profiler._observer import observe
@@ -120,7 +120,7 @@ def test_failed_run_exports_partial_measurements_and_preserves_exception(tmp_pat
 def test_optimization_failure_exports_stage(tmp_path, monkeypatch):
     def fail_optimize(*args, **kwargs):
         raise ValueError("invalid plan")
-    monkeypatch.setattr(st._api, "optimize", fail_optimize)
+    monkeypatch.setattr(stratum.frontend._api, "optimize", fail_optimize)
     with st.dev_config(diagnostics_dir=tmp_path):
         with pytest.raises(ValueError, match="invalid plan"):
             evaluate(st.as_data_op(1))

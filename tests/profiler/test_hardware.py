@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import stratum as st
-from stratum._api import evaluate, grid_search
+from stratum.frontend._api import evaluate, grid_search
 from stratum._profiler import _hardware
 from stratum._profiler._hardware import HardwareTracker, hardware_run
 from stratum._profiler._hardware_sampler import sample_tree
@@ -61,7 +61,7 @@ def test_sampler_report_failure_preserves_result_and_reaps_sampler(tmp_path, mon
 
 
 def test_hardware_starts_before_input_preparation(tmp_path, monkeypatch):
-    from stratum import _api
+    from stratum.frontend import _api
     original = _api.get_data
     def get_data(dag):
         assert _hardware.get_hardware_tracker() is not None

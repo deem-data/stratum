@@ -6,7 +6,7 @@ import pytest
 import skrub
 
 import stratum
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from stratum.optimizer.logical._base import (
     OperandRef, _resolve_operand, clone_value, config_key, rebuild_dict,
     remap_operand_refs)

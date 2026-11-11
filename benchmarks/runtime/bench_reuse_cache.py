@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 import stratum as st
-from stratum import _api
+from stratum.frontend import _api
 from stratum.runtime import _reuse_cache
 
 

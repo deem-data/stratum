@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 import stratum as st
-from stratum import _api
+from stratum.frontend import _api
 from stratum.runtime import _buffer_pool, _reuse_cache, _scheduler
 from tests.optimizer.test_reuse_planning import features, hits, model
 from tests.runtime.test_reuse_execution import assert_equal

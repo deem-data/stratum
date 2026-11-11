@@ -19,7 +19,7 @@ from sklearn.linear_model import Ridge
 
 import stratum as st
 from stratum.__main__ import main
-from stratum._api import evaluate, grid_search
+from stratum.frontend._api import evaluate, grid_search
 from stratum._config import FLAGS
 from stratum.server._client import (SERVER_INFO, JobFailed, ServerError, ServerNotRunning,
                                     StratumClient, dump_call, runtime)

@@ -23,7 +23,6 @@ class RunTimings:
     execution: float
 
 
-#TODO: Rename this file
 @profiler.record_run("grid_search")
 def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, env=None):
     """Perform grid search with cross-validation on a DataOp DAG.

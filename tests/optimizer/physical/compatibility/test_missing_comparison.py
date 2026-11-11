@@ -5,7 +5,7 @@ import pytest
 import skrub
 
 import stratum as st
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 
 FRAME = pd.DataFrame({"x": [1.5, np.nan, -3.0], "s": pd.Series(["a", None, "c"], dtype="str")})
 

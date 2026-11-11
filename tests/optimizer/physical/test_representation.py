@@ -5,7 +5,7 @@ import pytest
 import skrub
 
 import stratum as st
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._base import FRAME_TYPES

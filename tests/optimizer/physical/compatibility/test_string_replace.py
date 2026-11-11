@@ -7,7 +7,7 @@ import pytest
 import skrub
 
 import stratum
-from stratum._api import evaluate
+from stratum.frontend._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.physical._polars_translate import polars_string_method
