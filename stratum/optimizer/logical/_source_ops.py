@@ -1,4 +1,4 @@
-"""Data sources (the Source family): where data enters the plan.
+"""Source operators for in-memory frames and file reads.
 
 :class:`InMemoryFrameOp` wraps a frame passed in as a value; the read ops stand
 for a recorded ``pd.read_csv``, ``pd.read_parquet`` or ``np.load`` call.
@@ -34,15 +34,17 @@ def _is_gcs_path(file_path) -> bool:
 class SourceOp(Op):
     """Abstract base of the source family. Impls register on the subclasses."""
     logical_family = "Source"
-    # A reader numbers the rows it reads 0..n-1.
+    # TODO: Derive index effects for readers that restore stored labels or accept
+    # index_col; those outputs need not have a default 0..n-1 RangeIndex.
     index_effect = IndexEffect.DEFAULT
 
 
 def file_fingerprint(path, storage_options=None) -> tuple:
-    """Name a file or directory by its path, file sizes and modification times.
+    """Fingerprint a file or directory by path, file sizes and modification times.
 
     File contents are assumed unchanged when their metadata is unchanged. The
-    fingerprint reads metadata only, so its cost is independent of data size.
+    fingerprint reads metadata without scanning file contents; directory traversal
+    cost grows with the number of entries.
     GCS sources use object sizes and generations instead. Unsupported or
     unavailable sources raise :class:`Uncacheable`.
     """
@@ -84,7 +86,7 @@ def file_fingerprint(path, storage_options=None) -> tuple:
 
 
 def _gcs_fingerprint(path: str, storage_options) -> tuple:
-    """Name GCS objects by size and generation, without reading their contents.
+    """Fingerprint GCS objects by size and generation without reading their contents.
 
     GCS assigns a new generation on every write. Disable cached listings so an
     overwritten object changes the fingerprint between plans in one process.
@@ -146,7 +148,7 @@ class InMemoryFrameOp(SourceOp):
         raise Uncacheable("in-memory input frame")
 
     def propagate_output_schema(self):
-        """Read off the frame itself."""
+        """Derive the schema from the in-memory frame."""
         self.output_schema = _schema.schema_of_frame(self.data)
 
 
@@ -202,10 +204,11 @@ class ReadCSVOp(FileReadOp):
     fields = ["file_path", *OPTIONS, "pandas_options"]
 
     def propagate_output_schema(self):
-        """The names in the file header, dtypes Unknown; unknown when they can't
-        be read statically (graph-fed path) or only at a cost the optimizer
-        shouldn't pay (a GCS path: the header probe is a network round-trip at
-        plan time)."""
+        """Read column names from a static path, leaving dtypes unknown.
+
+        Skip graph-fed paths, which are unresolved, and GCS paths, which would
+        require a network request during planning.
+        """
         if isinstance(self.file_path, OperandRef) or _is_gcs_path(self.file_path):
             self.output_schema = None
         else:
@@ -216,10 +219,8 @@ class ReadCSVOp(FileReadOp):
 
         Must pass this op's own options: several of them (``sep``, ``header``,
         ``names``, ``usecols``, ``index_col``, ...) change the resulting column
-        set, so ignoring them would yield a confidently wrong schema rather than
-        an unknown one. That is also why the probe is pandas and not
-        ``pl.read_csv`` -- polars renames every one of those options and has no
-        ``index_col`` at all, so translating would silently drift.
+        set. Use the original pandas reader to preserve these options' meanings,
+        including ``index_col``, which Polars does not support.
 
         Names are not necessarily strings (``header=None`` yields integer labels);
         the ``_schema`` helpers already fall back to unknown on those.
@@ -246,8 +247,10 @@ class ReadParquetOp(FileReadOp):
 
 
 class LoadNumpyOp(SourceOp):
-    """``np.load``: an ndarray (a MATRIX), not a frame. ``options`` are
-    ``np.load``'s keyword arguments."""
+    """An ``np.load`` call, currently classified as MATRIX output.
+
+    ``options`` are forwarded as keyword arguments to ``np.load``.
+    """
     fields = ["file_path", "options"]
     cacheable = True
 
@@ -256,6 +259,7 @@ class LoadNumpyOp(SourceOp):
         super().__init__(name=_path_name(file_path), inputs=inputs, outputs=outputs)
         self.file_path = file_path
         self.options = dict(options or {})
+        # TODO: Distinguish ndarray results from .npz archives, which return NpzFile.
         self.output_type = OutputType.MATRIX
 
     def lineage_config(self):

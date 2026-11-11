@@ -1,11 +1,8 @@
 """Logical row ordering (``sort_values`` / polars ``sort``).
 
-Kept apart from :class:`~stratum.optimizer.logical._selection_ops.SelectionOp`: a
-selection decides which rows survive, a sort decides what order they come out
-in. Splitting them is what lets ``value_counts`` be an aggregation *plus* an
-ordering rather than an aggregation with an ordering baked into its options, and
-it puts the ordering somewhere a later rewrite can drop it from once we can see
-that the consumer never observes row order.
+Sorting reorders rows; selection filters them. Representing ordering separately
+lets ``value_counts`` lower to an aggregation followed by a sort, and allows
+rewrites to remove a sort when its consumer does not depend on row order.
 """
 from stratum.optimizer.logical._base import IndexEffect
 from stratum.optimizer.logical._ops import MethodCallOp, Op, OutputType, substitute_op
@@ -47,8 +44,8 @@ class SortOp(Op):
     @property
     def index_effect(self):
         return IndexEffect.DEFAULT if self.ignore_index else IndexEffect.NEW
-        # A sort reorders rows and changes nothing else, so it keeps its input's
-        # kind; extraction overrides this with the propagated type.
+        # TODO: Move this assignment into __init__; it is unreachable after return.
+        # Sorting preserves the input kind; extraction sets the propagated type.
         self.output_type = OutputType.FRAME
 
     def update_name(self):

@@ -77,10 +77,9 @@ class ColumnMethodOp(MapOp):
     #: The :class:`~stratum.optimizer.logical._column_expr.ColumnMethodExpr` the
     #: folder turns this op into: the operand, then this op's fields by name.
     expr_class = None
-    #: Whether the result is a boolean mask whatever the input dtype is. The
-    #: others all depend on it: ``fillna`` upcasts on a float fill value, ``clip``
-    #: on a float bound, ``where`` null-pads the rows it masks out, and ``astype``
-    #: is handed its target, so none of them is certain here.
+    #: Whether the result is a boolean mask regardless of input dtype. Other
+    #: result dtypes depend on method arguments and input values, so the shared
+    #: schema rule leaves them unknown.
     boolean_result = False
     cacheable = True
 
@@ -248,7 +247,7 @@ def _map_fields(call: dict, frame: bool) -> dict | None:
     """A plain dict of scalar keys and values: a lookup that misses to NaN.
 
     Refused: functions and Series (arbitrary code / index alignment), dict
-    subclasses (``__missing__`` makes them a function), missing keys, and keys
+    subclasses (which may define ``__missing__``), missing-valued keys, and keys
     or values that mix types beyond int/float, whose pandas result dtype
     Polars would not reproduce.
     """

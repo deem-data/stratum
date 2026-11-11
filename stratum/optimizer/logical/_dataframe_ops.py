@@ -96,7 +96,7 @@ class ArrayConcatOp(ConcatOp):
         self.output_type = OutputType.MATRIX
 
     def propagate_output_schema(self):
-        """An array has no columns."""
+        """An array has no named column schema."""
         self.output_schema = None
 
 
@@ -178,7 +178,7 @@ def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
 
 
 def _is_receiver(value) -> bool:
-    """Whether a call argument is the call's frame-world operand 0."""
+    """Whether a call argument references the dataframe or series at input 0."""
     return isinstance(value, OperandRef) and value.k == 0
 
 
@@ -198,15 +198,16 @@ def _is_row_col_indexer(op: GetItemOp) -> bool:
 def _getitem_output_type(op: GetItemOp) -> OutputType:
     """Infer the output type of a ``GetItemOp`` whose container is frame-like.
 
-    Indexing into a SERIES yields a SERIES. For a FRAME: ``df["col"]`` selects a
-    single column -> SERIES; ``df[["a", "b"]]`` selects a sub-frame -> FRAME;
-    ``df[mask]`` / ``df[label_series]`` (a graph-fed key, i.e. an
-    :class:`OperandRef`) or a slice selects rows -> FRAME.
+    SERIES inputs currently retain SERIES as an approximation. For FRAME inputs,
+    ``df["col"]`` yields SERIES; column lists, graph-fed keys, and slices retain
+    FRAME.
 
-    A two-axis ``df.loc[rows, cols]`` / ``df.iloc[rows, cols]`` restricts rows *and*
-    columns, so its column indexer decides the kind: a single label or position
-    extracts one column -> SERIES; a list, slice or mask keeps a frame -> FRAME.
+    For two-axis ``df.loc[rows, cols]`` / ``df.iloc[rows, cols]``, this rule uses
+    only the column indexer: a single label or position selects SERIES; a list,
+    slice or mask selects FRAME. Scalar row indexers are not yet accounted for.
     """
+    # TODO: Infer scalar results for single-element Series indexing and
+    # two-axis scalar indexing such as df.iloc[0, 0].
     container = op.inputs[0]
     if container.output_type is OutputType.SERIES:
         return OutputType.SERIES
@@ -282,12 +283,12 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
             # call, so the read has no operands at all.
             new_op = try_make_read_op(op)
 
-    # DataSource detection (read operation): the input is not frame-world data --
+    # DataSource detection (read operation): the input is not a dataframe or series --
     # a raw value (path / variable), or a numpy MATRIX left to the numeric path.
     elif not is_frame_like(op.inputs[0]):
         new_op = try_make_read_op(op)
 
-    # input is frame-world data (a frame or a series): this is a dataframe op
+    # A dataframe or series input selects the dataframe extraction path.
     else:
         if isinstance(op, CallOp):
             # Datetime conversion detection
@@ -304,7 +305,7 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
         elif isinstance(op, MethodCallOp):
             if isinstance(op.inputs[0], AttributeReadOp) and op.inputs[0].attr_name == ["str"]:
                 # `col.str.<method>(...)` -> fuse the .str accessor and the method
-                # call into a single StringMethodOp (a SERIES-typed projection). An
+                # call into a single StringMethodOp (currently typed as SERIES). An
                 # enclosing `df[...]` then sees a mask and folds the chain into a
                 # StrExpr predicate, matching the StringMethodOp directly.
                 new_op = make_string_method_op(op)
@@ -338,8 +339,8 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 elif drops_columns and op.inputs[0].output_type is OutputType.FRAME:
                     new_op = make_drop_op(op)
             elif op.method_name == "apply":
-                # apply on a column yields a column, on a frame yields a frame:
-                # keep the input's kind (MapOp defaults to FRAME).
+                # TODO: Infer apply's output kind from its arguments and function;
+                # DataFrame.apply can produce a Series, and Series.apply a frame.
                 new_op = substitute_op(op, ApplyUDFOp(args=op.args, kwargs=op.kwargs),
                                        keep_kind=True)
             elif op.method_name in ["assign"]:
@@ -359,11 +360,11 @@ def extract_dataframe_op(op: Op, root: Op, selection_op = True, map_op = True,
                 if inferred is not None:
                     op.output_type = inferred
 
-        # GetAttr Fusing and conversion to GetAttrDataframeOp
+        # Fuse attribute chains and extract supported dataframe metadata reads.
         elif isinstance(op, GetAttrOp):
             new_op = make_frame_get_attr(op)
 
-        # Projection: BinOp/UnaryOp over tabular data -> same tabular kind as its
+        # Elementwise BinOp/UnaryOp over tabular data -> same tabular kind as its
         # operand (e.g. `df["a"] > 7` is a SERIES, `df + 1` is a FRAME, `~mask` is
         # a SERIES).
         elif isinstance(op, (BinOp, UnaryOp)):

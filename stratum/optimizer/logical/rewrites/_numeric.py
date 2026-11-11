@@ -152,7 +152,7 @@ def fold_to_zero(op: Op, root: Op) -> Op:
     we drop the multiply and its now-dead operand edges and rewire downstream
     consumers to a :class:`ValueOp` holding ``0.0``. A ValueOp is a source node
     (no inputs) whose ``process`` returns the constant directly, so the whole
-    ``x`` subgraph is never computed.
+    ``x`` subgraph is pruned where no other consumers need it.
     """
     zero_op = ValueOp(0.0)
     replace_op_in_outputs(op, zero_op)
@@ -265,7 +265,7 @@ eliminate_pow_zero = rewrite_pass(
     fold_to_one,
 )
 
-# `x ** 1 -> x`. Matched as a first-class identity on `NumericOpType.POW`, reusing the
+# `x ** 1 -> x`. Matched as an identity on `NumericOpType.POW`, reusing the
 # same helper as `x * 1` / `x / 1`. `reversed=False` keeps `1 ** x` (which is 1, not x)
 # untouched.
 #
@@ -278,8 +278,7 @@ eliminate_pow_by_one = rewrite_pass(
     eliminate_single_op_chain_root_safe,
 )
 
-# TODO(dtype): unlike the other identity rewrites (`x*1`, `x+0`, `x-0`), dropping
-# `x / 1` is not dtype-preserving. `np.divide` always performs true division, so
+# TODO(dtype): dropping `x / 1` is not dtype-preserving. `np.divide` performs true division, so
 # `int_array / 1` yields float64 while the eliminated result keeps the original
 # integer dtype. The values are equal but the dtype changes.
 eliminate_div_by_one = rewrite_pass(
@@ -317,14 +316,12 @@ def make_replace_three_op_chain_root_safe(make_replacement):
 
 
 def _logsumexp(x):
-    """Numerically stable log(sum(exp(x))): ``c + log(sum(exp(x - c)))``, ``c = max(x)``.
+    """Compute log(sum(exp(x))) using a maximum shift for finite, nonempty inputs.
 
-    Note: this is a *stability* rewrite, not a speed one. There is no fused
-    kernel here -- the replacement still runs separate NumPy passes, and the
-    extra ``max`` / ``subtract`` make it marginally more work than the original
-    three-op chain. What it buys is that inputs large enough to overflow ``exp``
-    (e.g. ``x = 1000``) return a finite result instead of ``inf``. Collapsing
-    three IR nodes into one is a side effect, not the motivation.
+    Use ``c + log(sum(exp(x - c)))``, with ``c = max(x)``, to avoid overflow
+    for large finite inputs such as ``x = 1000``. The replacement runs separate
+    NumPy operations and adds maximum and subtraction passes; its purpose is
+    numerical stability.
     """
     c = np.max(x)
     return c + np.log(np.sum(np.exp(x - c)))

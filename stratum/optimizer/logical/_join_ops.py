@@ -8,9 +8,7 @@ from stratum.optimizer.logical import _schema
 
 
 class JoinOp(Op):
-    """Logical join that combines both sides. Pure config -- execution is
-    provided by the physical impls in ``physical/_join_execs.py``
-    (Pandas/PolarsJoinOp), selected at plan time.
+    """Logical join that combines both sides.
 
     The filtering joins (semi/anti) add no columns and so are a different
     operator: :class:`FilteringJoinOp`, in the same ``Join`` family.
@@ -53,8 +51,10 @@ class JoinOp(Op):
         return self.left_index or self.right_index
 
     def propagate_output_schema(self):
-        """Merge the two sides; `how` is part of the schema, since a null-padded
-        side loses its integer dtypes. See :func:`_schema.join_schema`."""
+        """Merge the schemas, accounting for dtypes that null padding may change.
+
+        See :func:`_schema.join_schema` for handling each join type.
+        """
         left = self.inputs[0].output_schema
         right = self.inputs[1].output_schema
         if not _schema.is_known(left) or not _schema.is_known(right):
@@ -77,7 +77,7 @@ class JoinOp(Op):
         frames' common columns, and those do collapse.
 
         Returns `None` when the keys can't be worked out statically, which makes
-        the whole schema unknown rather than a confidently wrong column set.
+        the whole schema unknown.
         """
         # A cross join matches every row pair and takes no keys, so nothing
         # collapses and every shared name is suffixed.
@@ -94,7 +94,7 @@ class JoinOp(Op):
 
         # Mixing one side's key column with the other side's index makes pandas
         # emit an extra key column (`left_on="k", right_index=True` on two frames
-        # that both hold `k` yields `k, k_x, k_y`). Not worth modelling.
+        # that both hold `k` yields `k, k_x, k_y`). This schema rule does not model it.
         if self.left_on is None or self.right_on is None:
             return None
         if self.left_index or self.right_index:

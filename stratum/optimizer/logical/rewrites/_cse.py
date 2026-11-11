@@ -4,10 +4,10 @@ Runs on the Op DAG produced by ``convert_to_ops`` (an earlier skrub-DataOp-IR CS
 that ran before conversion has been removed in favour of this pass).
 
 The Op DAG is an explicit, bidirectional graph (``Op.inputs`` / ``Op.outputs``)
-visited in topological order (inputs before outputs), which makes CSE a classic
-*value-numbering* pass: each op is identified by ``Op.structure_key()`` (equal
-iff two ops are the same computation), the first op with a given key is canonical,
-and later duplicates are merged into it.
+visited in topological order (inputs before outputs) using value numbering:
+``Op.structure_key()`` identifies computations eligible for merging.
+The first op with a given key becomes its canonical representative;
+later duplicates are merged into it when permitted.
 
 Equality/hashing of ops themselves stays identity-based (the graph layer keys ops
 by identity in many sets/dicts), so the structural key lives in ``structure_key``

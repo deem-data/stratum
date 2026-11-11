@@ -54,11 +54,11 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
     before `sqrt_square` for that reason: it turns `sqrt(x * x)` into
     `sqrt(square(x))`, which `sqrt_square` then folds to `abs(x)`.
 
-    A single order cannot satisfy every such dependency (the enables-relation over
-    the rewrites has cycles), so some reducible graphs survive -- e.g. `(x - 0) * x`
+    Rewrite dependencies have cycles, so a single pass can leave reducible graphs
+    -- e.g. `(x - 0) * x`
     stays a multiply because `identity_subtract` runs after `self_multiply`. See
-    #188 for running the whole set in a bounded loop, which removes the dependency
-    on ordering altogether.
+    #188 for repeated passes toward a fixed point. A bounded loop may still stop
+    before reaching that fixed point.
     """
     start = start_time()
     if config.identity_op:
@@ -94,8 +94,7 @@ def algebraic_rewrites(root: Op, config: AlgebraicRewritesConfig) -> Op:
     if config.any_mul_zero:
         root = eliminate_any_mul_zero(root)
     if config.log_sum_exp:
-        # Stability, not speed -- see _logsumexp. Enabled by default because the
-        # unstable form silently overflows to inf.
+        # Improve numerical stability for large finite inputs; see _logsumexp.
         root = eliminate_log_sum_exp(root)
     log_time("algebraic_rewrite", start)
     return root

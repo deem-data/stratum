@@ -1,14 +1,14 @@
 """Backend-agnostic column expression tree.
 
 Used by selections (boolean predicates), maps (computed columns) and
-aggregations (reductions). Expressions are immutable value types and compare
-structurally.
+aggregations (reductions). Expressions compare structurally and are treated as
+immutable after construction.
 
-The grammar is restricted to natively lazy, row-local computations (column
+The grammar combines row-wise computations (column
 references, literals, arithmetic and boolean operators, the ``.str``/``.dt``
-namespaces, datetime parsing, registered column methods, and one reduction at
-the root of an aggregation entry), so a whole tree compiles into a single
-backend kernel. Anything outside the grammar (fitted transformers, UDFs, data
+namespaces, datetime parsing, and registered column methods) with a reduction
+at the root of an aggregation entry. The physical layer compiles each tree into
+backend expressions. Anything outside the grammar (fitted transformers, UDFs, data
 from other frames) is referenced through an :class:`OperandLeaf`.
 
 The nodes are pure data. Running them is the physical layer's job
@@ -86,9 +86,9 @@ class ColumnExpr:
     def lineage(self):
         """This expression as plain values, for the reuse cache's lineage key.
 
-        The node's class and its slots; nested expressions name themselves the
-        same way, and the lineage encoder refuses any other slot value it does not
-        know. A node holding a callable overrides this to name it.
+        Return the expression class and slot values. Nested expressions are
+        encoded recursively; unsupported slot values raise Uncacheable.
+        Nodes holding callables override this method to encode them.
         """
         return (type(self).__name__,
                 *(getattr(self, name, None) for cls in type(self).__mro__
@@ -312,8 +312,7 @@ def _expand_agg_params(spec: dict) -> dict:
 
 # Parameters each reduction accepts. Ported from the signature survey in #192 and
 # re-verified against pandas 3.0.2. Only parameters that change the *result* live
-# here; *how* a reduction runs is the physical layer's concern, so execution hints
-# have no logical spelling at all.
+# here; execution hints are handled outside this expression representation.
 AGG_PARAMS = _expand_agg_params({
     ("sum", "prod", "min", "max", "first", "last"):
                                           ("numeric_only", "min_count", "skipna"),
@@ -352,8 +351,8 @@ class AggExpr(ColumnExpr):
             raise NotImplementedError(
                 f"unsupported parameters for {func!r}: {', '.join(unsupported)}")
         if child.has_aggregate():
-            # The grammar below an aggregate is row-wise; a nested reduction has
-            # no meaning and would break the one-kernel property.
+            # This grammar permits reductions only at the root of an entry;
+            # nested reductions require a separate aggregation operator.
             raise ValueError(f"nested aggregation in {func!r}")
         self.func = func
         self.child = child

@@ -11,9 +11,9 @@ Two kinds of map:
 
 * :class:`AssignMapOp` computes its columns from backend-agnostic
   :class:`~stratum.optimizer.logical._column_expr.ColumnExpr` trees. The grammar
-  is restricted to natively-lazy computations (arithmetic, boolean logic,
-  ``.str``/``.dt`` accessors, datetime parsing); on polars all entries compile
-  into one ``with_columns`` kernel. Anything outside the grammar stays in the
+  supports arithmetic, boolean logic, accessor calls, datetime parsing, and
+  registered column methods. On Polars, entries are evaluated in one
+  ``with_columns`` call. Anything outside the grammar stays in the
   graph and feeds the map through an ``OperandLeaf`` input.
 * Call-based maps (:class:`CallMapOp` and its subclasses) replay one recorded
   pandas call; :class:`StringMethodOp`, :class:`DatetimeFieldOp`,
@@ -105,11 +105,9 @@ class DatetimeConversionOp(MapOp):
     def propagate_output_schema(self):
         """Converting a column keeps its name and leaves the dtype Unknown.
 
-        The Unknown dtype is not just imprecision: the result is a Datetime whose
-        *unit* is the backend's (pandas gives ``datetime64[ns]``, polars
-        microseconds), the backend is only fixed during physical planning, and
-        ``pl.Schema`` rejects a unit-less ``pl.Datetime``, so "Datetime of unknown
-        unit" has no representation here.
+        The result's datetime unit can depend on the input and backend, which is
+        selected during physical planning. This schema does not represent a
+        datetime dtype with an unknown unit.
 
         Only a column operand is column-preserving. Given a *frame*,
         ``pd.to_datetime`` is the assembly form: it reads year/month/day columns
@@ -126,8 +124,8 @@ class StringMethodOp(MapOp):
     """A ``col.str.<method>(...)`` accessor call on a (string) column expression.
 
     Produced by fusing ``AttributeReadOp(["str"]) + MethodCallOp`` during frame
-    extraction (see :func:`make_string_method_op`), so the ``.str`` accessor never
-    survives as its own op. Making the str call a first-class map lets
+    extraction (see :func:`make_string_method_op`). The accessor is removed when
+    it has no remaining consumers. A dedicated string map lets
     selection folding match it directly -- lifting it into a
     :class:`~stratum.optimizer.logical._column_expr.StrExpr` predicate -- instead of
     re-discovering the accessor+call shape inside the mask folder.
@@ -217,8 +215,8 @@ class AttributeReadOp(Op):
     property that is not one value per datetime, ...
 
     ``attr_name`` is the chain of names read, e.g. ``["cat", "codes"]``. Opaque and
-    pandas-only: it reads pandas' attributes as recorded. Not a map, since most of
-    these change the shape (``.T``) or leave the frame world (``.values``).
+    pandas-only: it reads pandas' attributes as recorded. These can change shape
+    (``.T``) or produce non-tabular values (``.values``).
     """
     logical_family = "Attribute"
     fields = ["attr_name"]
@@ -234,8 +232,8 @@ class AttributeReadOp(Op):
 class AssignMapOp(MapOp):
     """``df.assign(...)`` with each assigned column folded to a ``ColumnExpr``.
 
-    ``entries`` maps a new column name to its series-valued expression; input
-    columns pass through unchanged.
+    ``entries`` maps assigned column names to expressions. Matching input columns
+    are overwritten; other input columns pass through unchanged.
     """
     fields = ["entries"]
     cacheable = True
@@ -284,7 +282,7 @@ def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp | None:
 
 
 def make_frame_get_attr(op: GetAttrOp) -> Op:
-    """Parse an attribute read off frame-world data.
+    """Parse an attribute read from a dataframe or series.
 
     ``.index`` reads the row labels, ``.shape`` and ``.columns`` the structure, and
     ``.dt.<field>`` a datetime field. Any other read becomes an opaque
@@ -299,7 +297,7 @@ def make_frame_get_attr(op: GetAttrOp) -> Op:
     attr_name = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
     if not isinstance(input_, AttributeReadOp):
         new_op = substitute_op(op, AttributeReadOp(attr_name=attr_name))
-        # An attribute read keeps the container's kind.
+        # Retain the source kind as an approximation for subsequent extraction.
         new_op.output_type = input_.output_type
         return new_op
 
@@ -342,7 +340,8 @@ def make_string_method_op(op: MethodCallOp) -> StringMethodOp | None:
     column = accessor.inputs[0]
     new_op = StringMethodOp(method=op.method_name, params=params,
                             inputs=[column, *op.inputs[1:]], outputs=list(op.outputs))
-    # `.str.<method>` keeps the column's tabular kind (a series stays a series).
+    # TODO: Infer output kind by method and arguments; methods such as
+    # str.get_dummies() return a frame, and str.cat() can return a scalar.
     new_op.output_type = accessor.output_type
 
     # Rewire every operand except the accessor: the args feed the new op, and the
@@ -361,8 +360,8 @@ def make_string_method_op(op: MethodCallOp) -> StringMethodOp | None:
 def _is_scalar_constant(value) -> bool:
     """Whether an assign kwarg constant can fold to a ``Const`` entry.
 
-    Scalars broadcast identically on every backend and fold; sequence-like
-    values (lists, arrays, series) keep the ``AssignOp`` fallback.
+    Scalar-like values are eligible for broadcasting; sequence-like values
+    (lists, arrays, series) keep the ``AssignOp`` fallback.
     """
     if isinstance(value, str):
         return True
@@ -398,7 +397,7 @@ def make_assign_map_op(op: MethodCallOp) -> AssignMapOp | None:
 
     folder = _Folder(src)
     exprs = folder.fold_many(roots, root_consumer=op)
-    # Preserve the kwargs' assignment order (later columns may overwrite earlier).
+    # Preserve assignment order so new columns retain the recorded output order.
     entries = {name: (const_entries[name] if name in const_entries
                       else exprs[ref_names.index(name)])
                for name in kwargs}

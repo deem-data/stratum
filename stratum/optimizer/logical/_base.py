@@ -7,12 +7,10 @@ hook. The logical layer subclasses it as :class:`~stratum.optimizer.logical._ops
 and the physical layer as
 :class:`~stratum.optimizer.physical._physical_ops.PhysicalOp`.
 
-Keeping this base free of any logical- or physical-specific concept (no CSE
-structure keys, no choice handling, no backend selection) is what lets the
-two layers stay genuinely separate hierarchies instead of one inheriting the
-other. Operand plumbing (:class:`OperandRef` and the resolve helpers) and the
-output-kind lattice (:class:`OutputType`) live here too, because both layers
-reference operands and carry an output kind.
+Logical and physical operators share this base while defining their own
+structure keys, choice handling, and backend selection. Operand references
+(:class:`OperandRef`), resolution helpers, and output categories
+(:class:`OutputType`) are shared by both layers.
 """
 from __future__ import annotations
 import copy
@@ -27,8 +25,8 @@ def rebuild_dict(original: dict, items) -> dict:
     """A dict with ``items`` and the same type as ``original``.
 
     The operand helpers rebuild nested containers to swap operands for values.
-    A dict subclass carries behaviour a plain dict loses (``defaultdict``'s
-    ``__missing__`` turns ``Series.map`` into a function), so keep its type.
+    Preserve subclass behaviour, such as ``defaultdict.__missing__`` supplying
+    defaults for absent keys in ``Series.map``.
     """
     if type(original) is dict:
         return dict(items)
@@ -42,21 +40,12 @@ def rebuild_dict(original: dict, items) -> dict:
 class OutputType(Enum):
     """The kind of value an :class:`IRNode` produces.
 
-    Replaces the old boolean ``is_dataframe_op`` flag with a small lattice so that
-    rewrites can distinguish a single column (``SERIES``) from a whole table
-    (``FRAME``). Telling the two apart is what lets selection detection recognise
-    ``df[mask]`` as a relational selection (the ``mask`` is a ``SERIES``).
-
-    Boolean-ness is *not* a separate output type: a boolean mask is just a
-    ``SERIES`` whose values happen to be booleans (a value-level property), so it
-    is tracked separately rather than as its own enum member.
-
-    ``UNKNOWN`` is the default (the op produces a non-tabular Python value, e.g. a
-    scalar or an arbitrary object) and corresponds to the old ``is_dataframe_op =
-    False``. ``MATRIX`` is ndarray-valued (e.g. ``np.load``) and is deliberately
-    *not* a frame type: numpy data is handled by the numeric extraction path, not
-    the dataframe path. (A ``VECTOR`` type will be added once we have an op that
-    produces one -- e.g. a GetItem/aggregation on a MATRIX.)
+    - ``FRAME`` and ``SERIES`` distinguish tables from columns, allowing
+      selection detection to recognize a Series-valued mask in ``df[mask]``.
+      Boolean dtype is tracked separately from the output category.
+    - ``SCALAR`` identifies scalar or aggregate metadata results.
+    - ``MATRIX`` identifies ndarray results handled by numeric extraction.
+    - ``UNKNOWN`` is the default when no more specific category is known.
     """
     UNKNOWN = auto()
     FRAME = auto()
@@ -95,7 +84,7 @@ def has_default_labels(data) -> bool:
     return isinstance(index, pd.RangeIndex) and index.start == 0 and index.step == 1
 
 
-# Output types that belong to the dataframe (pandas/polars) world. A frame and a
+# Output types handled by dataframe extraction (pandas/polars). A frame and a
 # series are both manipulated by the dataframe extraction path; a MATRIX (numpy)
 # is not. Used to decide whether an op consumes already-produced frame data (a
 # dataframe operation) or a leaf/raw value (a read/source).
@@ -103,7 +92,7 @@ FRAME_TYPES = frozenset({OutputType.FRAME, OutputType.SERIES})
 
 
 def is_frame_like(op) -> bool:
-    """True if ``op`` produces frame-world data (a frame or a series)."""
+    """True if ``op`` produces a dataframe or a series."""
     return op.output_type in FRAME_TYPES
 
 
@@ -185,9 +174,8 @@ def remap_operand_refs(value, mapping: dict):
 
 
 # --- Structure keys for common-subexpression elimination -------------------
-# `Op.structure_key()` returns a hashable value that is equal for two ops iff
-# they are the same computation. Sentinel keys carry a leading marker string so
-# they stay disjoint from real values. (CSE is a logical-layer concern, but the
+# `Op.structure_key()` identifies computations eligible for CSE. Sentinel keys
+# use marker strings to distinguish their roles. (CSE is a logical-layer concern, but the
 # helpers live here so both layers can share the value-keying primitives.)
 _ALL_SELECTOR_KEY = ("__all_selector__",)
 # A graph-fed estimator hyper-parameter: its binding is captured by an op's
@@ -215,6 +203,8 @@ def config_key(value):
     if isinstance(value, dict):
         # The type is part of the key: a defaultdict is not the same argument
         # as a plain dict with the same items.
+        # TODO: Preserve item order for configurations such as AssignMapOp.entries;
+        # different insertion orders can produce different output column orders.
         return ("__dict__", type(value),
                 frozenset((k, config_key(v)) for k, v in value.items()))
     if isinstance(value, (set, frozenset)):
@@ -263,7 +253,7 @@ class IRNode:
 
     Execution borrows inputs and fitted states read-only, including nested
     objects. An operator that needs to mutate them must copy them itself before
-    writing. Published outputs and states may be shared with other consumers and
+    writing. Produced outputs and states may be shared with other consumers and
     the reuse cache, so the operator must not mutate them after returning either.
     """
 
@@ -299,12 +289,12 @@ class IRNode:
         self.is_y = is_y
         self.output_type = OutputType.UNKNOWN
         # Derived output schema (a polars.Schema, or None for "unknown"), filled in
-        # by the schema-propagation pass. See ir/_schema.py and propagate_output_schema.
+        # by the schema-propagation pass. See logical/_schema.py.
         self.output_schema = None
         self.is_split_op = False
         self.was_cloned = False
         self.remove_after: list[IRNode] = []
-        #: Set by fit-pass planning: nothing the fitting pass runs needs this output.
+        #: Marked by dead code elimination; not executed during the fitting pass.
         self.dead_in_fit = False
         #: Set by reuse planning: admit this result under its lineage key.
         self.cache_key: str | None = None
@@ -317,8 +307,8 @@ class IRNode:
 
         Ops that can statically determine their columns override this; see
         :mod:`stratum.optimizer.logical._schema` for the algebra they use and for the
-        families that deliberately keep this default. Lives on ``IRNode`` so that
-        physical nodes answer to the pass too (a physical source op is a
+        families that deliberately keep this default. Defined on ``IRNode`` so that
+        physical nodes support the pass too (a physical source op is a
         ``PhysicalOp``, not an ``Op``).
         """
         self.output_schema = None
@@ -474,14 +464,12 @@ class IRNode:
         self.outputs = []
 
     def detach_and_prune(self, keep: "IRNode | None" = None) -> None:
-        """``detach`` this node, then every producer that leaves without a consumer.
+        """Detach this node and recursively prune producers with no consumers.
 
-        A producer nobody consumes is unreachable from the root, but it is still in
-        its own producers' outputs, and the topological walk rejects that edge. So the
-        dead cone goes with the node. Call it only once every surviving producer has
-        its new consumer: one whose last edge is momentarily gone would be pruned too.
-        ``keep`` is the exception, for a producer that survives without a consumer
-        because it becomes the new root.
+        Remove reverse edges from unreachable producers so topological traversal
+        sees only the remaining DAG. Reconnect surviving producers before calling
+        this method; a temporarily disconnected producer would otherwise be pruned.
+        ``keep`` preserves a producer that becomes the new root without a consumer.
         """
         producers = list(dict.fromkeys(self.inputs))
         self.detach()

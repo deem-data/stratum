@@ -1,12 +1,11 @@
 """Relational rewrites on the logical IR.
 
-The algebraic rewrites simplify *expressions*; these change the plan's operator
-*shape*, replacing one relational operator with another that means the same thing
-but that the cost model and join reordering can reason about.
+Replace relational operator patterns with equivalent operations, including
+semi/anti joins and projections moved above maps.
 
 They run after schema propagation, and each one keeps the schemas current: the
-subgraph a rewrite installs produces what the replaced one did, so only the ops it
-creates need a schema, which the rewrite propagates itself (inputs first). A later
+subgraph a rewrite installs produces what the replaced one did. Each rewrite
+updates schemas for operators it creates or changes, inputs first. A later
 rewrite in this stage can then read any op's ``output_schema``.
 """
 import operator
@@ -38,10 +37,9 @@ def _membership_predicate(predicate):
 def _left_key(op: MaskSelectionOp, child) -> str | None:
     """The left relation's key column for the membership test's subject.
 
-    Usually the column folded into a ``Col``. It stays an operand instead when
-    something else reads it too, which is exactly what the driving pipeline does:
-    the column being filtered is also the one that was counted. That is still a
-    column of the left relation, so the shape is promotable either way.
+    Usually the column is folded into a ``Col``. A shared column projection may
+    remain an operand, for example when the same column feeds an aggregation.
+    Both representations qualify if they read a column of the left relation.
     """
     if isinstance(child, Col):
         return child.name
@@ -58,12 +56,9 @@ def _left_key(op: MaskSelectionOp, child) -> str | None:
 def _match_isin_against_a_relation(op: Op):
     """Match ``frame[col.isin(<relation>)]``, the shape a filtering join replaces.
 
-    Deliberately unmatched: ``isin`` against a literal collection, which is a
-    predicate and nothing more, and a filtered *series*, which has no left
-    relation to join. Telling the first case apart is the whole reason this is a
-    rewrite rather than part of extraction: what separates a subquery from a
-    constant is a property of the operand's *producer*, and extraction is local
-    to one op by design.
+    Keep literal collections as predicates and leave filtered Series unchanged.
+    This rewrite inspects operand producers to recognize a relation; extraction
+    classifies only the individual operator.
     """
     if not isinstance(op, MaskSelectionOp):
         return None
@@ -78,8 +73,8 @@ def _match_isin_against_a_relation(op: Op):
     key = _left_key(op, child)
     if key is None:
         return None
-    # The predicate must read nothing beyond the key column and the build side;
-    # anything else is a condition a filtering join has no place for.
+    # This filtering-join representation supports only the key column and build
+    # side; additional predicate operands cannot be represented here.
     allowed = {values.ref.k}
     if isinstance(child, OperandLeaf):
         allowed.add(child.ref.k)
@@ -304,7 +299,7 @@ def _push_projection_through_map(op: AssignMapOp, projection: Op, kept: list[str
             consumer.replace_input(op, pushed)
     op.outputs = [pushed]
 
-    # Every surviving producer has its consumer now, so the dead ones can go.
+    # Reconnection is complete; prune producers with no remaining consumers.
     for old in dict.fromkeys(old_inputs):
         if not old.outputs:
             old.detach_and_prune()

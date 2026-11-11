@@ -1,9 +1,10 @@
 """Folding an op subgraph into a :class:`~stratum.optimizer.logical._column_expr.ColumnExpr`.
 
-Mask selections, assign maps and aggregations absorb the row-local ops feeding
-them into one expression tree, so the whole computation is one operator (and one
-kernel on a lazy backend). This module is the shared folder; each family's
-factory decides which roots to fold and installs the operator it builds.
+Mask selections, assign maps and aggregations absorb supported operations
+feeding them into column expression trees within a single operator, allowing
+a lazy backend to optimize the combined expressions. This module is the shared
+folder; each family's factory decides which roots to fold and installs the
+operator it builds.
 """
 from __future__ import annotations
 import datetime
@@ -40,7 +41,7 @@ class _Folder:
     materialises the tree (an :class:`OperandLeaf` for the rest). The new
     operator's inputs are ``[src, *leaf_ops]``; :meth:`install` wires it in.
 
-    ``fold_many`` folds several roots against one shared cone and memo, so a
+    ``fold_many`` folds several roots using one shared subgraph and memo, so a
     producer feeding two roots is absorbed once and both trees share the
     sub-expression.
     """
@@ -125,7 +126,7 @@ class _Folder:
             return [node.inputs[0]]
         if isinstance(node, ColumnMethodOp):
             # Every remaining input is referenced by a field. Returning all
-            # inputs lets expression-valued method arguments join the fold cone;
+            # inputs includes expression-valued method arguments in the subgraph;
             # non-foldable/external producers become OperandLeafs later.
             return list(node.inputs)
         return []

@@ -40,6 +40,7 @@ class RenameOp(MetadataOp):
     ``errors``: ``"raise"`` when a mapped label is absent, ``"ignore"`` to skip it.
     """
     fields = ["columns", "index", "errors"]
+    # TODO: Use IndexEffect.NEW when renaming the index; its labels can change.
     index_effect = IndexEffect.KEEP
 
     def __init__(self, columns=None, index=None, errors="ignore",
@@ -148,9 +149,8 @@ def _is_label_map(value) -> bool:
 def make_reset_index_op(op: MethodCallOp) -> ResetIndexOp | None:
     """Parse ``reset_index(drop=True)`` into a :class:`ResetIndexOp`.
 
-    Only the dropping form. ``drop=False`` promotes the index to a column and so
-    changes the schema, which we cannot describe until schema propagation exists,
-    and it is also pandas' default, so it is refused rather than guessed at.
+    Only ``drop=True`` is modeled. The default ``drop=False`` promotes index
+    levels to columns, whose names and types are not tracked by this operator.
     """
     kwargs = dict(op.kwargs or {})
     if op.args or kwargs.pop("drop", False) is not True or kwargs:

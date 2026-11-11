@@ -1,3 +1,15 @@
+"""Train/test split operators and their insertion into the plan.
+
+``add_splitting_op`` connects the marked features (``X``) and targets (``y``)
+to a shared ``SplitOp``. The scheduler supplies training or test row indices,
+which the operator applies to both inputs. ``SplitOutput`` nodes expose the
+resulting feature and target subsets separately to downstream operators.
+
+``BuildSplitterOp`` constructs a splitter declared through
+``mark_as_X(cv=..., split_kwargs=...)``. This keeps dependencies such as
+group labels in the plan so they are computed before splitting.
+"""
+
 from skrub._data_ops._estimator import _Splitter
 from sklearn.model_selection import check_cv
 from stratum.optimizer.logical._ops import OperandBinder, OperandRef, OutputType, Op, SplitXOp, _resolve_operand

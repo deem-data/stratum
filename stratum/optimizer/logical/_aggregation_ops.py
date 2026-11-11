@@ -25,9 +25,8 @@ class AggregateOp(Op):
     ``value_counts`` (group by the series' own values) and expression grouping
     (``groupby(df["d"].dt.year)``) share one representation.
 
-    The grouping options are the ones that change the *result*; how the
-    aggregation runs is the physical layer's business and has no field here.
-    Their defaults are pandas':
+    Grouping options describe result semantics. Execution strategy is chosen
+    by the physical layer. Defaults follow pandas:
 
     * ``sort_keys``: order the groups by key, or else by first appearance.
     * ``drop_null_keys``: drop the groups whose key is missing.
@@ -80,20 +79,17 @@ class AggregateOp(Op):
     def infer_output_type(self, src_type: OutputType | None = None) -> OutputType:
         """The kind of value this aggregation produces.
 
-        Deliberately coarse: what downstream extraction needs is whether the
-        result is frame-world data at all, plus FRAME vs SERIES for the two
-        rewrites that read it (``_getitem_output_type`` and
-        ``is_mask_selection``). A scalar is ``UNKNOWN``, which is what the lattice
-        already means by it; ``SCALAR`` has no readers, so nothing infers it.
+        Distinguish FRAME and SERIES for downstream extraction, including
+        ``_getitem_output_type`` and ``is_mask_selection``. Scalar reductions
+        currently use ``UNKNOWN``.
 
         ``src_type`` overrides the kind read off ``inputs[0]``. Absorbing a column
         selection needs it: in ``groupby(k)["v"].sum()`` the frame underneath is a
-        FRAME, but the selection already narrowed the aggregation to a series.
+        FRAME, but the column selection already narrowed the aggregation to a series.
 
-        Falls back to FRAME whenever the source kind isn't known yet, matching
-        ``SelectionOp``'s conservative default -- staying inside frame-world is
-        the safe direction, since dropping out of it silently reroutes every
-        downstream op to the read/source path.
+        Fall back to FRAME when the source kind is unknown, matching
+        ``SelectionOp``. This keeps downstream operators on the dataframe
+        extraction path rather than the source-read path.
         """
         src = src_type
         if src is None:
@@ -188,9 +184,8 @@ _AGG_FUNCS = {"agg", "aggregate"}
 # `.agg(spec)` also spells its spec as a keyword, and that keyword is the spec
 # itself rather than a parameter of the reduction, so it is read separately.
 _AGG_SPEC_KWARG = "func"
-# Options that only say *how* to run, never what the result is. The physical layer
-# picks its own strategy, so these are discarded on the way in rather than
-# refused: keeping them out of the logical IR must not cost us the rewrite.
+# Treat these options as execution hints and omit them from the logical IR;
+# the physical layer selects the execution strategy.
 _EXECUTION_HINTS = {"engine", "engine_kwargs"}
 
 
@@ -238,7 +233,7 @@ def _is_aggregation(op: MethodCallOp) -> bool:
     """True for a `groupby(...).<agg>()` pair that can fuse into an AggregateOp.
 
     Requires the aggregation to consume a `groupby` op, optionally through a
-    single column selection, and every op in that chain to have one consumer.
+    single column selection. The groupby and selection must have one consumer.
     """
     source = _grouped_source(op)
     if source is None:
@@ -378,9 +373,8 @@ def _aggregation_params(op: MethodCallOp) -> dict | None:
 
     Both spellings put the reduction's parameters in kwargs: a direct
     ``.std(ddof=0)`` takes them itself, and ``.agg(spec, **kwargs)`` forwards them
-    to the reduction. Execution hints are discarded rather than refused, since
-    they cannot change the result and refusing them would block an otherwise
-    optimizable pipeline.
+    to the reduction. Discard execution hints so the physical layer can select
+    the aggregation implementation.
     """
     if ((op.method_name in _AGG_FUNCS and len(op.args or ()) > 1)
             or (op.method_name not in _AGG_FUNCS and op.args)):
@@ -417,8 +411,8 @@ def _aggregation_entries(spec, params: dict, columns: tuple | None = None) -> tu
             return ((None, AggExpr(spec, AllCols(), params)),)
         if isinstance(spec, dict):
             if columns is not None:
-                # A dict spec after a column selection would have to agree with
-                # it; not worth modelling, so leave the chain alone.
+                # This parser does not validate dict keys against an earlier
+                # column selection, so leave that combination unfused.
                 return None
             entries = []
             for col, func in spec.items():
@@ -493,7 +487,7 @@ def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
         return None
 
     # Fold reduction and grouping roots together: shared column producers may
-    # be internal to both cones and must be accounted for in one discovery pass.
+    # belong to both subgraphs and must be counted in one discovery pass.
     expression_source = _expression_source(df) if columns is None else None
     computed = expression_source is not None and all(
         isinstance(agg.child, AllCols) for _, agg in entries)

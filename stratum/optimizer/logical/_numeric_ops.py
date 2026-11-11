@@ -1,3 +1,14 @@
+"""Numeric operators and extraction from arithmetic expressions and NumPy calls.
+
+Extraction replaces arithmetic ``BinOp`` nodes and recognized NumPy ``CallOp``
+nodes with ``NumericOp``. Expressions such as ``x + y`` and ``np.add(x, y)``
+share ``NumericOpType.ADD``, so algebraic rewrites can match both forms.
+
+Binary operands can be input references or constants; their order is preserved,
+including expressions such as ``2 - x``. Other extracted NumPy calls use
+``GENERIC`` and retain their callable and arguments for execution.
+"""
+
 import numbers
 import operator
 from enum import Enum
@@ -63,8 +74,7 @@ class NumericOp(Op):
     fields = ["func", "args", "kwargs", "type", "constant", "opt_operand", "reversed"]
     index_effect = IndexEffect.COMMON
     func = None
-    #: Keyed by its operation and operands; a GENERIC one holds a numpy function
-    #: stratum does not know, and is not.
+    #: Keyed by operation and operands. GENERIC numpy functions are uncacheable.
     cacheable = True
 
     def lineage_config(self):

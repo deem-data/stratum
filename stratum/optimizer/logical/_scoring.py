@@ -1,24 +1,15 @@
-"""Scoring a candidate from the values its plan produced.
+"""Score candidates from the responses already computed by their plans.
 
-A metric is a pure function of the labels and what a model produced for them:
-``sign * fn(y_true, values, **kwargs)``. scikit-learn wraps one in a *scorer*, a
-``scorer(estimator, X, y)`` callable that additionally decides which response method to
-call and how to read the result. That wrapper needs a fitted estimator object to
-interrogate: it asks what the estimator *is* (classifier or regressor, what its classes
-are) before it will use anything the estimator produced. A candidate is a sub-DAG of a
-merged plan, not an estimator, so honouring that signature means fabricating an object
-for scikit-learn to interrogate.
+- A :class:`Metric` calls ``sign * fn(y_true, values, **kwargs)``.
+- scikit-learn scorers additionally invoke an estimator response method and
+  inspect estimator metadata. Stratum selects a response method during planning
+  and passes its results directly to the metric through ``ScoreCandidatesOp``.
+- :data:`_NATIVE` contains Stratum's metric implementations. Other names resolve
+  through scikit-learn's registered scorers, extracting the function, sign,
+  response methods, and keyword arguments.
 
-Stratum takes scikit-learn's scoring API as a *vocabulary* instead. ``scoring="roc_auc"``
-resolves to a :class:`Metric` here, the plan's response mode already produces the values
-that metric reads (see ``ScoreCandidatesOp``), and scoring is one call against them.
-Nothing stands in for an estimator, because nothing has to.
-
-:data:`_NATIVE` holds the metrics Stratum computes itself. Every other name is resolved
-by decomposing scikit-learn's scorer into the same four fields, so a metric Stratum has
-not implemented still works and still means exactly what it means upstream. Moving a
-metric from the second group to the first is a local change with a test that pins the
-two against each other.
+Compatibility depends on both the metric function and response conversion;
+native implementations need equivalence tests against scikit-learn.
 """
 from __future__ import annotations
 
@@ -64,14 +55,15 @@ class Metric:
 
 
 def read_response(values, response_mode: str):
-    """The values as a metric reads them for ``response_mode``.
+    """Convert a two-column probability response to its second column.
 
-    A two-column probability matrix is one score to every binary metric. scikit-learn's
-    scorer narrows it the same way, to the column of the positive class, which is the
-    last one because an estimator's ``classes_`` is sorted.
+    This assumes the second column represents the metric's positive class.
+    Other response shapes and non-probability responses are returned unchanged.
     """
     if response_mode not in _PROBABILITY_RESPONSES:
         return values
+    # TODO: Select the probability column using the metric's pos_label and
+    # estimator classes; column 1 is incorrect when the first class is positive.
     array = np.asarray(values)
     return array[:, 1] if array.ndim == 2 and array.shape[1] == 2 else values
 
@@ -80,6 +72,8 @@ def read_response(values, response_mode: str):
 
 def _labels(y) -> np.ndarray:
     """Labels as a flat array, whatever frame library produced them."""
+    # TODO: Preserve target dimensions for multilabel and multioutput metrics;
+    # flattening changes subset accuracy and per-output R² aggregation.
     return np.asarray(y).ravel()
 
 
@@ -103,7 +97,7 @@ def r2_score(y_true, y_pred) -> float:
     true, pred = _labels(y_true), _labels(y_pred)
     residual = np.sum((true - pred) ** 2)
     total = np.sum((true - np.mean(true)) ** 2)
-    # scikit-learn's convention for a constant target: 0.0 when the fit is exact.
+    # For a constant target, return 1.0 for exact predictions and 0.0 otherwise.
     if total == 0:
         return 1.0 if residual == 0 else 0.0
     return float(1 - residual / total)
@@ -221,10 +215,9 @@ def _from_sklearn_name(name: str) -> Metric:
 def _decompose(scorer, name: str | None = None) -> Metric:
     """Reduce a scikit-learn scorer to the metric it wraps.
 
-    Stratum reads the four fields rather than calling the scorer, because calling it
-    would require an estimator object to interrogate. The fields are scikit-learn
-    internals, so a version bump can invalidate this; a scorer that does not carry them
-    is refused rather than guessed at.
+    Read the scorer's metric function, response methods, kwargs, and sign without
+    invoking an estimator. These are scikit-learn internals and may change between
+    versions. A missing metric function is rejected; the other fields have defaults.
     """
     fn = getattr(scorer, "_score_func", None)
     if fn is None:

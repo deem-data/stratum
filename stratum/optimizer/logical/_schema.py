@@ -7,11 +7,11 @@ unknown schema is unknown. A single-column op (``output_type`` ``SERIES``) still
 gets a one-entry schema keyed by the column name, so column tracking is uniform
 across frames and series.
 
-**The governing invariant:** column names are exact, and a dtype is present only
+Column names must be exact, and a dtype is present only
 when it is statically certain -- otherwise it is :data:`UNKNOWN_DTYPE`. Never
 widen the set of names to stay safe: return the unknown schema instead. Names are
 what the consuming rewrites (predicate pushdown, projection pushup) reason about,
-so a wrong name is a correctness bug in every consumer. Hence an operation that
+so incorrect names can invalidate those rewrites. An operation that
 can null-pad a column (an outer join, a ragged union) must drop that column's
 dtype: pandas widens ``int64`` to ``float64`` there.
 
@@ -27,10 +27,9 @@ rule reads as intent rather than an oversight:
   erroring, i.e. silently wrong. See the TODO on ``resolve_selector_columns``
   (``physical/_projection_execs.py``).
 * ``MapOp`` (the base) -- each kind opts in by overriding, as ``AssignMapOp`` does.
-* ``NumericOp`` -- the numpy/MATRIX world has no columns.
-* ``ChoiceOp`` -- a choice combines alternative pipelines and is the last
-  operation in the DAG, so no operator downstream needs its schema. Unifying the
-  outcomes' schemas would be work with no consumer.
+* ``NumericOp`` -- numeric extraction does not propagate named column schemas.
+* ``ChoiceOp`` -- alternatives can have different schemas. Choice unrolling
+  resolves internal alternatives before schema propagation.
 
 A rule covers an *operation*, not an operation family, wherever the family is not
 uniformly column preserving: see ``StringMethodOp.ONE_TO_ONE_METHODS``,
@@ -77,7 +76,7 @@ def elementwise_result_dtype(op, operand_dtypes) -> pl.DataType:
     boolean mask, and a logical operator yields a boolean only when *every*
     operand is already boolean (on integers it is bitwise, and yields an integer).
     Everything else depends on the operands in ways this doesn't model
-    (``int / int`` is float, ``int ** -1`` is float, mixed operands upcast).
+    (division and mixed operand dtypes can promote the result type).
     """
     if op in _COMPARISON_OPS:
         return pl.Boolean
@@ -179,9 +178,9 @@ def rename_columns(schema, mapping) -> pl.Schema | None:
 def schema_of_frame(frame) -> pl.Schema | None:
     """Schema of an already-materialised frame, or ``None`` if it can't be read.
 
-    A pandas ``object`` column has no column-level element type -- inferring one
-    means scanning values, which can be confidently wrong (ints in the early rows,
-    strings later) -- so it keeps its name with an ``UNKNOWN_DTYPE``. Anything
+    A pandas ``object`` column can contain mixed types, such as integers followed
+    by strings. Avoid scanning or sampling its values; preserve the name with an
+    ``UNKNOWN_DTYPE``. Anything
     that is not a pandas/polars frame (e.g. the ndarray behind an npy source) has
     no column schema at all.
     """
@@ -212,8 +211,8 @@ def concat_schemas(schemas, axis) -> pl.Schema | None:
     * ``axis=0`` is a bag union: a column absent from one operand is null-padded
       for that operand's rows, widening e.g. ``int64`` -> ``float64``. A dtype
       survives only for a column present in *every* operand with the *same* dtype.
-    * ``axis=1`` is an index-aligned join: any misalignment null-pads *every*
-      column, and the alignment isn't statically knowable, so no dtype survives. A
+    * ``axis=1`` aligns rows by index. Misalignment can introduce nulls, and the
+      alignment isn't statically known here, so all dtypes become unknown. A
       name shared by two operands is unknown outright -- pandas keeps both columns
       and a ``Schema`` cannot express a duplicate name.
 
@@ -248,7 +247,8 @@ def concat_schemas(schemas, axis) -> pl.Schema | None:
 # Join kinds that can leave a side unmatched, mapped to which side's non-key
 # columns become nullable. Measured against pandas: a `how="left"` merge widens
 # the *right* side's `int64` to `float64` for unmatched rows (and vice versa); an
-# outer join widens both. The collapsed join key never gains nulls.
+# outer join can widen both. A collapsed key uses values from the matching side
+# rather than introducing nulls for an unmatched side.
 _NULLABLE_JOIN_SIDES = {
     "left": ("right",),
     "right": ("left",),
@@ -282,8 +282,8 @@ def join_schema(left, right, keys, suffixes, how="inner") -> pl.Schema | None:
 
     def dtype_for(side, name, dt):
         if name in keys:
-            # A collapsed key never gains nulls, but it *is* the two sides' key
-            # columns merged into one, and pandas upcasts when they disagree
+            # A collapsed key combines the two sides' key values, and pandas may
+            # upcast when their dtypes disagree
             # (int32 + float64 -> float64). So the dtype only survives when both
             # sides already carry it.
             return dt if left.get(name) == right.get(name) else UNKNOWN_DTYPE

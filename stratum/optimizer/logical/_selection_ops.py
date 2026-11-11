@@ -1,8 +1,6 @@
 """Relational row selections (SelectionOp family).
 
-A selection restricts rows and keeps columns. Each variant is its own subclass
-with backend-neutral fields; the physical impls in
-``physical/_selection_execs.py`` translate those fields into each library's call.
+A selection restricts rows and keeps columns. Each variant has its own subclass.
 
 Extraction is the only place that reads the recorded pandas call: the factories
 below bind it against pandas' own signature and parse it into the variant's
@@ -22,7 +20,7 @@ from stratum.optimizer.logical._expr_folding import _Folder
 class SelectionOp(Op):
     """Abstract base of the selection family: restricts rows, keeps columns.
 
-    Never instantiated directly. Impls register on the concrete subclasses.
+    Never instantiated directly.
     """
     logical_family = "Selection"
     cacheable = True
@@ -34,7 +32,7 @@ class SelectionOp(Op):
         self.output_type = OutputType.FRAME
 
     def propagate_output_schema(self):
-        """Rows go, columns stay: the source schema passes through unchanged."""
+        """Preserve the input column schema when filtering rows."""
         # A selection with no source edge has nothing to pass through.
         self.output_schema = self.inputs[0].output_schema if self.inputs else None
 
@@ -140,8 +138,10 @@ class SampleSelectionOp(SelectionOp):
         self.ignore_index = ignore_index
 
     def lineage_config(self):
-        """The fields. ``sample`` draws different rows on every call unless it is
-        seeded, so an unseeded one has no key."""
+        """Return the sampling configuration.
+
+        Unseeded sampling is uncacheable because its output is nondeterministic.
+        """
         if self.seed is None:
             raise Uncacheable("sample() without a random_state")
         return super().lineage_config()
@@ -268,17 +268,14 @@ def make_selection_op(op: MethodCallOp) -> SelectionOp | None:
 def is_mask_selection(op: GetItemOp) -> bool:
     """Return whether ``op`` is ``container[series]`` (e.g. a boolean mask).
 
-    Boolean-ness isn't tracked in the type lattice, so any series-keyed indexing
-    of frame-world data counts. The container may itself be a series:
-    ``counts[counts >= 3]`` is as much a filter as ``df[df["a"] >= 3]``, and both
-    backends index a series by a mask the same way they index a frame.
+    OutputType does not distinguish boolean series, so this currently accepts
+    any series key on a dataframe or series. Examples of valid mask selections
+    are ``counts[counts >= 3]`` and ``df[df["a"] >= 3]``.
 
     TODO: this misfires on a non-boolean series key (positional/label indexing,
-    ``df[int_or_label_series]``), which is not a filter -- the polars fast path
-    then calls ``.filter()`` on a non-boolean series. Accepting a series
-    container widens the surface of that pre-existing hazard, since label
-    indexing by a series is more idiomatic on a series than on a frame. Gate on
-    boolean dtype once the type lattice tracks it.
+    ``df[int_or_label_series]``), causing the Polars implementation to call
+    ``.filter()`` on a non-boolean series. Check the key's boolean dtype before
+    classifying the operation as a mask selection.
     """
     if not isinstance(op.key, OperandRef):
         return False

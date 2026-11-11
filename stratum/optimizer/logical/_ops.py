@@ -34,9 +34,8 @@ def _operand_index_from_impl(skrub_impl) -> dict:
     """Map id(DataOp) -> operand index, in the canonical field-walk order.
 
     Uses the same walk as graph extraction (`_collect_child_data_ops` over
-    `impl._fields`), de-duplicating repeated DataOps to the same index. This is
-    the single source of truth shared with the converter so that an ImplOp's
-    `inputs` list and its operand indices always agree.
+    `impl._fields`), de-duplicating repeated DataOps to the same index so that
+    the map follows the converter's input ordering.
     """
     index: dict = {}
     for field_name in skrub_impl._fields:
@@ -47,13 +46,18 @@ def _operand_index_from_impl(skrub_impl) -> dict:
 
 
 class OperandBinder:
-    """Builds an op's de-duplicated ``inputs`` list and replaces DataOps in
-    structured fields with :class:`OperandRef`, all from a single ordered walk.
+    """Build an operator's ``inputs`` list and references to those inputs.
 
-    The order in which ``ref``/``bind_seq``/``bind_map`` are called defines the
-    canonical operand order (e.g. the implicit primary object is bound first, so
-    it becomes ``OperandRef(0)``). Repeated DataOps map to the same index, so the
-    same upstream op feeding two slots produces a single input edge.
+    ``ids_to_ops`` maps ``id(DataOp)`` to an already-converted ``Op``. Binding a
+    DataOp records that op in ``inputs`` and returns ``OperandRef(k)``, where
+    ``k`` is its input index. ``bind`` also handles DataOps nested in tuples,
+    lists, dictionary values, and slice bounds.
+
+    Inputs are ordered by their first binding. For ``df.join(other)``,
+    :func:`as_op` binds the method receiver (``df``) before its arguments, so
+    ``df`` gets ``OperandRef(0)`` and ``other`` gets ``OperandRef(1)``. Repeated
+    references to the same upstream op reuse its index: for ``x + x``, both
+    operands refer to the same input edge.
 
     With ``choice_ops`` (``id(choice) -> ChoiceOp``, shared by the whole
     conversion), a skrub choice found in a field is bound like a DataOp: to the
@@ -120,15 +124,15 @@ class Op(IRNode):
 
     Adds the two concerns specific to the logical layer on top of the shared
     :class:`~stratum.optimizer.logical._base.IRNode` structure: CSE structure keys
-    and choice detection. Physical operators (post-lowering) share the same
-    ``IRNode`` base but not this class.
+    and choice detection. Physical operator families also derive from
+    ``IRNode``; concrete implementations may additionally inherit a logical family.
     """
 
     def is_choice(self) -> bool:
         return isinstance(self, ChoiceOp)
 
     def structure_key(self):
-        """Hashable key for CSE: equal for two ops iff they are the same computation.
+        """Return a hashable structural key for computations eligible for CSE.
 
         Returns ``None`` for ops that must never be merged (opaque ops without a
         ``fields`` attribute, e.g. ImplOp). The key combines the op
@@ -210,8 +214,8 @@ class ImplOp(Op):
 
     def process(self, mode: str, inputs: list):
         if hasattr(self.skrub_impl, "eval"):
-            # DataOp with eval method have a fused implementation of the generator and the compute method
-            # we need to iterate over the generator and replace the requested fields with correct inputs.
+            # An eval method combines dependency requests with computation.
+            # Resume its generator with the corresponding computed inputs.
             # Indices are assigned in yield order (de-duplicating repeated DataOps), matching the
             # order in which inputs are consumed.
             index = {}
@@ -302,10 +306,9 @@ class BaseEstimatorOp(Op):
 
     @classmethod
     def callable_kwargs_keys(cls, estimator) -> frozenset:
-        """The `.skb.apply()` kwargs groups this op can actually splat for `estimator`.
+        """Return the `.skb.apply()` kwargs groups this operator can pass to methods.
 
-        A response group is live only if the estimator serves that response; a
-        `predict_proba_kwargs` on a regressor is as dead here as it is in skrub.
+        Include a response group only if the estimator exposes that method.
         """
         return frozenset({cls.fit_kwargs_key, cls.call_kwargs_key}) | {
             m for m in cls.response_modes if hasattr(estimator, m)}
@@ -334,20 +337,19 @@ class BaseEstimatorOp(Op):
         self.kwargs = kwargs
         self.param_refs = param_refs if param_refs is not None else {}
         # Whether another `.skb.apply()` consumes this op's output. Such an op is not
-        # the last estimator, so like skrub it never answers a response pass itself.
+        # the last estimator, so it uses its fallback method in response passes.
         self.feeds_estimator = feeds_estimator
-        # Which responses this op can serve, settled here rather than by a `hasattr` in
-        # the execution path. A parameter fed by the graph is still unresolved at this
-        # point, so the estimator is taken at its word, as it is in skrub.
+        # Resolve response methods once during planning. Graph-fed parameters
+        # are still unresolved, so availability is checked on the prototype.
         self.supported_modes = frozenset(m for m in self.response_modes
                                          if hasattr(self.estimator, m))
-        self.parallelism = os.cpu_count() # TODO:this will should be set during physical planning phase
+        self.parallelism = os.cpu_count() # TODO: Set this during physical planning.
 
     #: Keyed when the estimator is known and deterministic for its configuration.
     cacheable = True
 
     def lineage_config(self):
-        """Name the unfitted prototype, which every fitting pass clones."""
+        """Encode the unfitted prototype cloned by each fitting pass."""
         from stratum.optimizer._estimator_lineage import estimator_lineage, selector_lineage
 
         config = {name: getattr(self, name) for name in type(self).fields}
@@ -403,10 +405,10 @@ class BaseEstimatorOp(Op):
         return new_op
 
     def extract_args_from_inputs(self, mode: str, inputs: list):
-        """
-        Extract all necessary data from an EstimatorOp to make it picklable for multiprocessing.
+        """Resolve estimator arguments into a tuple for the execution task.
 
-        Returns a tuple of picklable data that can be sent to worker processes.
+        Worker-process execution requires the estimator and argument values
+        themselves to support serialization.
         """
         mode = self.effective_mode(mode)
         fitting = mode == FITTING_MODE
@@ -429,8 +431,8 @@ class BaseEstimatorOp(Op):
         # A response pass never fits, so (like skrub) the fit group is left unevaluated.
         # Note the difference from skrub: skrub also never *computes* what that group
         # references, while our plan is eager, so a sub-DAG feeding only fit kwargs
-        # still runs in predict mode and has to tolerate it (a transformer carving an
-        # eval set out of the training fold must return placeholders in predict mode).
+        # still runs in predict mode and must support it (a transformer extracting
+        # an eval set from training data can return placeholders in predict mode).
         fit_kwargs = self.method_kwargs(self.fit_kwargs_key, inputs) if fitting else {}
         # The call group belongs to the method about to run, so a `predict_proba` pass
         # gets the `predict_proba` group. The fitting pass makes this kind's own call.
@@ -484,7 +486,7 @@ class TransformerOp(BaseEstimatorOp):
         return process_transformer_task
 
 class DummyConfigManager:
-    """A no-op context manager that does nothing."""
+    """A context manager that leaves parallel execution settings unchanged."""
     def __enter__(self):
         return self
 
@@ -540,7 +542,7 @@ def check_estm_inputs(estimator, mode, x, y):
     return converted, x, y
 
 def process_estimator_task(task_data):
-    """ Process a predictor (EstimatorOp) task in a worker process. """
+    """Execute a PredictorOp task, locally or in a worker process."""
     (estimator, x, y, cols, exclude_cols, no_wrap, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
     fit_kwargs, call_kwargs = kwargs
     _, x, y = check_estm_inputs(estimator, mode, x, y)
@@ -560,7 +562,7 @@ def process_estimator_task(task_data):
         raise ValueError(f"Mode {mode} not supported for PredictorOp.")
 
 def process_transformer_task(task_data):
-    """ Process a transformer (TransformerOp) task in a worker process. """
+    """Execute a TransformerOp task, locally or in a worker process."""
     (estimator, x, y, cols, exclude_cols, no_wrap, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
     fit_transform_kwargs, transform_kwargs = kwargs
     converted, x, y = check_estm_inputs(estimator, mode, x, y)
@@ -618,7 +620,7 @@ class ChoiceOp(Op):
         return new_op
 
     def structure_key(self):
-        # A choice models alternatives; merging two choices is never valid.
+        # Keep distinct choice objects as separate dimensions of the search grid.
         return None
 
     def consumes_inputs_positionally(self) -> bool:
@@ -632,8 +634,7 @@ class ChoiceOp(Op):
 
 class ValueOp(Op):
     fields = ["value"]
-    # Plain constants can be keyed; the encoder rejects frames, arrays and other
-    # values whose contents cannot be named exactly and cheaply.
+    # The encoder supports plain constants and rejects dataframe and array payloads.
     cacheable = True
 
     @property
@@ -772,12 +773,9 @@ class GetItemOp(Op):
         if isinstance(self.key, slice):
             self.output_schema = schema  # row slice keeps all columns
         elif isinstance(self.key, OperandRef):
-            # A graph-fed key has no static value, so classify by the producing
-            # op's kind: SERIES means a boolean row mask (`df[df["x"] > 0]`) and
-            # keeps the schema, anything else is an unresolvable column selector.
-            # HEURISTIC: a SERIES of column *labels* is column projection too, and
-            # is misclassified here, but that idiom doesn't occur in supported
-            # pipelines.
+            # Approximate a SERIES key as a row mask (`df[df["x"] > 0]`).
+            # TODO: Check boolean dtype; a Series of column labels selects columns
+            # and must not preserve the entire input schema.
             key_op = self.inputs[self.key.k]
             self.output_schema = schema if key_op.output_type is OutputType.SERIES else None
         else:
@@ -815,8 +813,9 @@ _COMPARISONS = {operator.lt, operator.le, operator.gt, operator.ge, operator.eq}
 def apply_binary(op, left, right):
     """``op(left, right)``, with pandas' result for a missing operand on polars.
 
-    pandas compares a missing value (NaN) as False -- True for ``!=`` -- while
-    polars propagates null, which a materialized mask or a later ``~`` then sees.
+    Match pandas' NaN comparison convention: False except for ``!=``. Polars
+    propagates null, so replace those null results before later mask operations.
+    This does not model pandas nullable dtypes, which can preserve missingness.
     """
     result = op(left, right)
     if isinstance(result, (pl.Series, pl.Expr)):
@@ -853,8 +852,7 @@ def _bind_or_value(binder: OperandBinder, value):
     graph extraction already reported every DataOp it finds -- including ones
     nested in a tuple, such as the row/column pair of ``df.loc[mask, cols]`` --
     as a child of this node, so a DataOp left unbound here stays in the DAG with
-    no consumer and the topological walk then trips over a node it has no
-    in-degree entry for.
+    no consumer. Topological traversal rejects that dangling output edge.
     """
     return binder.bind(value)
 
@@ -884,8 +882,8 @@ def _getitem_key_name(key) -> str:
 # group belongs to depends on the estimator kind (see BaseEstimatorOp subclasses).
 _EXECUTABLE_KWARGS_KEYS = frozenset({"fit", "fit_transform", "transform"}) | RESPONSE_MODES
 # Groups skrub routes to a method stratum never calls. Ignoring them would change
-# results with no trace, so they are rejected instead. `score` is one Stratum will not
-# gain: a search names its metric (ADR 0004).
+# results, so they are rejected. Searches use an explicit metric rather than
+# calling the estimator's `score` method.
 _UNSUPPORTED_KWARGS_KEYS = frozenset({"score"})
 
 
@@ -901,8 +899,8 @@ def _bind_apply_kwargs(binder: OperandBinder, estimator_class, estimator,
     call (a transformer is fitted through ``fit_transform``, so its ``fit`` group
     is dead in skrub too). Graph extraction already reported the DataOps inside
     each group as children of the Apply node, so a group left unbound leaves those
-    ops in the DAG with no consumer, and the topological walk then trips over a
-    node it has no in-degree entry for.
+    ops in the DAG with no consumer. Topological traversal rejects those
+    dangling output edges.
     """
     bound = {}
     for method, group in (kwargs or {}).items():
@@ -920,9 +918,8 @@ def _bind_apply_kwargs(binder: OperandBinder, estimator_class, estimator,
                 f"stratum never calls `{method}()`, so the arguments would be "
                 f"silently dropped.")
         if method not in estimator_class.callable_kwargs_keys(estimator):
-            # Dead for this estimator kind in skrub as well, so it is bound (to keep
-            # the DAG consistent) but never splatted. Mirroring skrub here rather
-            # than raising keeps a pipeline skrub accepts working.
+            # This estimator kind ignores the group in skrub too. Bind its graph
+            # dependencies for consistency, but do not pass the group to a method.
             logger.warning(
                 f"`{method}_kwargs` is ignored for a {estimator_class.logical_family.lower()}: "
                 f"it is fitted through `{estimator_class.fit_kwargs_key}()` and applied "
@@ -944,7 +941,7 @@ def _iter_nested(value):
 
 def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimator: bool = False,
                         choice_ops: dict | None = None) -> Op:
-    """Build the TransformerOp/EstimatorOp for one concrete estimator of an Apply impl.
+    """Build a TransformerOp or PredictorOp for one concrete Apply estimator.
 
     ``estimator`` is ``impl.estimator`` itself, or one outcome of it when the
     Apply's estimator is a ``Choice``. Each call uses its own binder so every op
@@ -952,7 +949,7 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimato
 
     ``feeds_estimator`` says another Apply consumes this one's output. skrub then
     fit_transforms and transforms any estimator that can, a predictor included (a
-    KMeans feeds on its distances, not its labels), so such an estimator becomes a
+    KMeans supplies distances to the next estimator), so such an estimator becomes a
     TransformerOp here.
 
     ``choice_ops`` is :func:`as_op`'s: a choice in the Apply's other fields (``y``,

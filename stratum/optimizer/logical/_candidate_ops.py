@@ -1,19 +1,12 @@
-"""The operator a plan ends in when it evaluates candidates.
+"""Operators for collecting and scoring candidate results.
 
-Choice unrolling replaces a plan's branch points with one sub-DAG per candidate, so by
-the time the plan is executable there is nothing left to choose: every candidate is
-computed. What terminates such a plan is a fan-in that labels each candidate's output
-and, for a search, scores it.
+- Choice unrolling creates one sub-DAG per candidate. The final operator
+  combines their outputs and associates each with its candidate name.
+- Search plans also score those outputs against the test labels.
+- Explicit input edges preserve candidate ordering and expose test-label
+  dependencies to buffer-lifetime planning.
 
-Leaving that fan-in as a ``ChoiceOp`` cost the runtime the one thing the planner already
-knew. The scheduler had to recover which operator produced which candidate by
-pattern-matching the last node of the linearized plan and zipping it positionally against
-the labels, and it reached the fold's labels by pinning a buffer the plan's own removal
-planning could not see. Both are input edges here, so the mapping cannot drift and the
-lifetime is declared.
-
-Scoring itself is a call against those values and the fold's labels; see
-``_scoring.py`` for why no estimator is involved.
+Scoring uses the computed responses and test labels directly; see ``_scoring.py``.
 """
 from __future__ import annotations
 
@@ -81,7 +74,7 @@ class CandidateSetOp(Op):
         return True
 
     def structure_key(self):
-        # A plan has one candidate set; merging it with anything is never valid.
+        # Keep the terminal candidate set out of common-subexpression elimination.
         return None
 
     def clone(self):
@@ -128,13 +121,10 @@ class ScoreCandidatesOp(CandidateSetOp):
         self.kwargs_refs = kwargs_refs
 
     def propagate_output_schema(self):
-        """The scored table is built column by column in ``process``: one row per
-        candidate, holding its name and the metric's value, plus the raw values
-        when ``emit_predictions``.
+        """Describe scoring results: candidate name, score, and optional predictions.
 
-        This describes the scoring pass. The fitting pass produces nothing at all
-        (``process`` returns ``None`` there, since a fold is scored on the fold it
-        was not fitted on), so there is no second schema to reconcile.
+        There is one row per candidate. During fitting, ``process`` returns
+        ``None`` because scoring uses held-out test data.
         """
         # candidate_names are strings and Metric returns a float; the values are
         # whatever the candidate produced (array / frame / series), so untyped.
@@ -153,8 +143,7 @@ class ScoreCandidatesOp(CandidateSetOp):
 
     def process(self, mode: str, inputs: list):
         if mode == FITTING_MODE:
-            # A fold is scored on the fold it was not fitted on, so there is nothing to
-            # score during the fitting pass and nothing downstream to consume it.
+            # Score held-out test data only; the fitting pass has no score output.
             return None
         y_true = inputs[self.y_ref.k]
         ids, scores, values = [], [], []
