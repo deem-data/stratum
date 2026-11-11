@@ -15,7 +15,7 @@ from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._ops import PredictorOp
 from stratum.optimizer.physical._predictor_execs import (
     StratumHistogramRandomForestClassifier,
-    SklearnRandomForestClassifier,
+    SklearnRandomForest,
 )
 from stratum.optimizer.physical._source_execs import PolarsInMemoryFrame
 
@@ -71,7 +71,7 @@ def test_default_keeps_sklearn_and_greedy_binds_histogram():
     default, _ = _predictor_for("default")
     hist, greedy_ops = _predictor_for("greedy")
 
-    assert type(default) is SklearnRandomForestClassifier
+    assert type(default) is SklearnRandomForest
     assert type(hist) is StratumHistogramRandomForestClassifier
     assert hist.original_estimator._stratum_forest_binding[0] == "histogram"
     assert hist.original_estimator._stratum_forest_fit_args == (128,)
@@ -82,7 +82,7 @@ def test_default_keeps_sklearn_and_greedy_binds_histogram():
 def test_unsupported_random_forest_parameters_keep_sklearn():
     predictor, _ = _predictor_for("greedy", criterion="entropy")
 
-    assert type(predictor) is SklearnRandomForestClassifier
+    assert type(predictor) is SklearnRandomForest
 
 
 def _score_pipeline(selector, capfd):

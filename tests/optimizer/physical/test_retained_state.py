@@ -18,7 +18,7 @@ from stratum.optimizer.physical._predictor_execs import (
     SklearnDecisionTree,
     SklearnExtraTrees,
     SklearnKNeighbors,
-    SklearnRandomForestClassifier,
+    SklearnRandomForest,
     StratumExactRandomForestClassifier,
     StratumHistogramRandomForestClassifier,
 )
@@ -78,7 +78,7 @@ def test_size_is_refreshed_only_when_fitting(data, transformer, no_wrap):
 
 @pytest.mark.parametrize("impl, estimator", [
     (SklearnDecisionTree, DecisionTreeClassifier(random_state=0)),
-    (SklearnRandomForestClassifier, RandomForestClassifier(n_estimators=3, random_state=0)),
+    (SklearnRandomForest, RandomForestClassifier(n_estimators=3, random_state=0)),
     (SklearnExtraTrees, ExtraTreesClassifier(n_estimators=3, random_state=0)),
 ])
 def test_sklearn_tree_storage_is_included(data, impl, estimator, no_generic_sizing):

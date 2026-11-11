@@ -61,7 +61,7 @@ from stratum.optimizer.physical._predictor_execs import (
     SklearnLasso,
     SklearnLinearRegression,
     SklearnLogisticRegression,
-    SklearnRandomForestClassifier,
+    SklearnRandomForest,
     StratumExactRandomForestClassifier,
     StratumHistogramRandomForestClassifier,
     SklearnRidge,
@@ -91,8 +91,8 @@ def _estimator(module, name, **params):
 
 # (module, class, abstract op, reference impl)
 FAMILIES = [
-    ("sklearn.ensemble", "RandomForestClassifier", RandomForestOp, SklearnRandomForestClassifier),
-    ("sklearn.ensemble", "RandomForestRegressor", RandomForestOp, SklearnRandomForestClassifier),
+    ("sklearn.ensemble", "RandomForestClassifier", RandomForestOp, SklearnRandomForest),
+    ("sklearn.ensemble", "RandomForestRegressor", RandomForestOp, SklearnRandomForest),
     ("sklearn.ensemble", "ExtraTreesClassifier", ExtraTreesOp, SklearnExtraTrees),
     ("sklearn.ensemble", "ExtraTreesRegressor", ExtraTreesOp, SklearnExtraTrees),
     ("sklearn.tree", "DecisionTreeClassifier", DecisionTreeOp, SklearnDecisionTree),
@@ -206,7 +206,7 @@ def test_every_selector_binds_the_reference_impl(module, name, family, impl, sel
 
     assert type(op) is expected_impl
     assert isinstance(op, family) and not op.is_abstract
-    if expected_impl is SklearnRandomForestClassifier or name != "RandomForestClassifier":
+    if expected_impl is SklearnRandomForest or name != "RandomForestClassifier":
         # Reference implementations run the user's estimator as given.
         assert type(op.estimator) is type(estimator)
         assert type(op.original_estimator) is type(estimator)
@@ -246,11 +246,11 @@ def test_alternative_impl_registers_against_the_family_op():
     assert bound(_estimator("sklearn.ensemble", "RandomForestClassifier"),
                  greedy) is ClassifierOnlyForest
     assert bound(_estimator("sklearn.ensemble", "RandomForestRegressor"),
-                 greedy) is SklearnRandomForestClassifier
+                 greedy) is SklearnRandomForest
     # The generic default policy keeps sklearn when no family preference names
     # either candidate.
     assert bound(_estimator("sklearn.ensemble", "RandomForestClassifier"),
-                 DefaultImplementationSelector()) is SklearnRandomForestClassifier
+                 DefaultImplementationSelector()) is SklearnRandomForest
 
 
 def _bound_forest(selector, estimator=None, **op_kwargs):
@@ -265,7 +265,7 @@ def test_random_forest_policy_keeps_default_on_sklearn_and_greedy_on_histogram()
     default = _bound_forest(DefaultImplementationSelector())
     hist = _bound_forest(GreedyImplementationSelector())
 
-    assert type(default) is SklearnRandomForestClassifier
+    assert type(default) is SklearnRandomForest
     assert type(hist) is StratumHistogramRandomForestClassifier
     assert isinstance(hist.original_estimator, RustRandomForestClassifier)
     assert hist.original_estimator._stratum_forest_binding[0] == "histogram"
@@ -310,7 +310,7 @@ def test_unsupported_native_forest_configuration_retains_sklearn(
         GreedyImplementationSelector(), estimator=estimator, **op_kwargs
     )
 
-    assert type(op) is SklearnRandomForestClassifier
+    assert type(op) is SklearnRandomForest
 
 
 def test_lowering_does_not_import_optional_libraries():
@@ -379,9 +379,9 @@ def _frame(task):
 # (task, module, class, params, reference impl)
 END_TO_END = [
     ("regression", "sklearn.ensemble", "RandomForestRegressor",
-     {"n_estimators": 5, "random_state": 0}, SklearnRandomForestClassifier),
+     {"n_estimators": 5, "random_state": 0}, SklearnRandomForest),
     ("classification", "sklearn.ensemble", "RandomForestClassifier",
-     {"n_estimators": 5, "random_state": 0}, SklearnRandomForestClassifier),
+     {"n_estimators": 5, "random_state": 0}, SklearnRandomForest),
     ("regression", "sklearn.ensemble", "ExtraTreesRegressor",
      {"n_estimators": 5, "random_state": 0}, SklearnExtraTrees),
     ("classification", "sklearn.ensemble", "ExtraTreesClassifier",
