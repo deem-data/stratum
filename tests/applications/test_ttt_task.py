@@ -1,11 +1,14 @@
+import io
 import math
+from sys import implementation
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import stratum as skrub
 import torch
 import torch.nn as nn
@@ -41,14 +44,50 @@ TOP_K = 10
 TRACKER_COLS = [f"tracker_{i}" for i in range(NUM_TRACKERS)]
 
 TOP_TLDS = [
-    "com", "ru", "org", "net", "de", "uk", "jp", "fr", "it", "pl",
-    "br", "cn", "in", "nl", "es", "cz", "eu", "ua", "ca", "au",
-    "ch", "se", "ro", "gr", "at", "tv", "io", "me", "co", "info",
+    "com",
+    "ru",
+    "org",
+    "net",
+    "de",
+    "uk",
+    "jp",
+    "fr",
+    "it",
+    "pl",
+    "br",
+    "cn",
+    "in",
+    "nl",
+    "es",
+    "cz",
+    "eu",
+    "ua",
+    "ca",
+    "au",
+    "ch",
+    "se",
+    "ro",
+    "gr",
+    "at",
+    "tv",
+    "io",
+    "me",
+    "co",
+    "info",
 ]
 
 KEYWORDS = {
     "kw_ecommerce": ["shop", "store", "cart", "buy", "market", "mall", "deal", "pay"],
-    "kw_media": ["news", "press", "media", "times", "post", "daily", "gazette", "journal"],
+    "kw_media": [
+        "news",
+        "press",
+        "media",
+        "times",
+        "post",
+        "daily",
+        "gazette",
+        "journal",
+    ],
     "kw_video": ["video", "tv", "movie", "film", "tube", "stream"],
     "kw_adult": ["adult", "sex", "porn", "xxx"],
     "kw_tech": ["tech", "dev", "code", "cloud", "soft", "app", "web"],
@@ -56,43 +95,136 @@ KEYWORDS = {
 }
 
 TWO_LEVEL_TLDS = {
-    "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "ac.uk", "gov.uk",
-    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
-    "co.jp", "ne.jp", "or.jp", "ac.jp", "ed.jp", "go.jp", "gr.jp", "lg.jp",
-    "com.br", "net.br", "org.br", "gov.br", "edu.br",
-    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
-    "com.ru", "net.ru", "org.ru", "pp.ru",
-    "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in",
-    "com.mx", "net.mx", "org.mx", "edu.mx", "gob.mx",
-    "com.tr", "net.tr", "org.tr", "edu.tr", "gov.tr",
-    "com.pl", "net.pl", "org.pl", "info.pl",
-    "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
-    "co.za", "net.za", "org.za", "web.za",
-    "co.kr", "ne.kr", "or.kr", "re.kr",
-    "com.ar", "net.ar", "org.ar",
-    "com.tw", "org.tw", "idv.tw",
-    "com.ua", "net.ua", "org.ua", "kiev.ua",
-    "co.il", "org.il", "net.il",
-    "com.sg", "org.sg", "net.sg",
-    "com.hk", "org.hk", "net.hk",
+    "co.uk",
+    "org.uk",
+    "me.uk",
+    "ltd.uk",
+    "plc.uk",
+    "net.uk",
+    "sch.uk",
+    "ac.uk",
+    "gov.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "edu.au",
+    "gov.au",
+    "asn.au",
+    "id.au",
+    "co.jp",
+    "ne.jp",
+    "or.jp",
+    "ac.jp",
+    "ed.jp",
+    "go.jp",
+    "gr.jp",
+    "lg.jp",
+    "com.br",
+    "net.br",
+    "org.br",
+    "gov.br",
+    "edu.br",
+    "com.cn",
+    "net.cn",
+    "org.cn",
+    "gov.cn",
+    "edu.cn",
+    "com.ru",
+    "net.ru",
+    "org.ru",
+    "pp.ru",
+    "co.in",
+    "net.in",
+    "org.in",
+    "gen.in",
+    "firm.in",
+    "ind.in",
+    "com.mx",
+    "net.mx",
+    "org.mx",
+    "edu.mx",
+    "gob.mx",
+    "com.tr",
+    "net.tr",
+    "org.tr",
+    "edu.tr",
+    "gov.tr",
+    "com.pl",
+    "net.pl",
+    "org.pl",
+    "info.pl",
+    "co.nz",
+    "net.nz",
+    "org.nz",
+    "govt.nz",
+    "ac.nz",
+    "co.za",
+    "net.za",
+    "org.za",
+    "web.za",
+    "co.kr",
+    "ne.kr",
+    "or.kr",
+    "re.kr",
+    "com.ar",
+    "net.ar",
+    "org.ar",
+    "com.tw",
+    "org.tw",
+    "idv.tw",
+    "com.ua",
+    "net.ua",
+    "org.ua",
+    "kiev.ua",
+    "co.il",
+    "org.il",
+    "net.il",
+    "com.sg",
+    "org.sg",
+    "net.sg",
+    "com.hk",
+    "org.hk",
+    "net.hk",
 }
 
 # The lexical block in the original's column order: X_lexical = column_stack([
 #   d_lens, num_dots, num_hyphens, num_digits, num_digits / d_lens, has_www,
 #   has_multi_sub, press_scores, has_press, is_auth, tld_onehot, kw_*, kw_total])
 LEXICAL_COLS = (
-        ["dom_len", "num_dots", "num_hyphens", "num_digits", "digit_ratio",
-         "has_www", "has_multi_sub", "press_score", "has_press", "is_auth"]
-        + [f"tld_{t}" for t in TOP_TLDS]
-        + ["tld_other"]
-        + list(KEYWORDS)
-        + ["kw_total"]
+    [
+        "dom_len",
+        "num_dots",
+        "num_hyphens",
+        "num_digits",
+        "digit_ratio",
+        "has_www",
+        "has_multi_sub",
+        "press_score",
+        "has_press",
+        "is_auth",
+    ]
+    + [f"tld_{t}" for t in TOP_TLDS]
+    + ["tld_other"]
+    + list(KEYWORDS)
+    + ["kw_total"]
 )
 
 URL_CATEGORIES = [
-    "Arts", "Business", "Computers", "Games", "Health", "Home", "Kids_and_Teens",
-    "News", "Recreation", "Reference", "Regional", "Science", "Shopping",
-    "Society", "Sports",
+    "Arts",
+    "Business",
+    "Computers",
+    "Games",
+    "Health",
+    "Home",
+    "Kids_and_Teens",
+    "News",
+    "Recreation",
+    "Reference",
+    "Regional",
+    "Science",
+    "Shopping",
+    "Society",
+    "Sports",
 ]
 URL_CAT_COLS = [f"url_cat_{c}" for c in URL_CATEGORIES] + ["url_cat_has"]
 
@@ -101,8 +233,11 @@ URL_CAT_COLS = [f"url_cat_{c}" for c in URL_CATEGORIES] + ["url_cat_has"]
 ROOT_PRIOR_COLS = [f"root_prior_{i}" for i in range(NUM_TRACKERS)]
 TLD_PRIOR_COLS = [f"tld_prior_{i}" for i in range(NUM_TRACKERS)]
 PRIOR_SCALAR_COLS = [
-    "has_root_match", "root_match_count", "root_match_count_log",
-    "root_prior_entropy", "root_prior_max",
+    "has_root_match",
+    "root_match_count",
+    "root_match_count_log",
+    "root_prior_entropy",
+    "root_prior_max",
 ]
 
 # Clamp on the empirical tracker rates before they are turned into logits, so a
@@ -122,14 +257,25 @@ DIRECT_COLS = [f"direct_{i}" for i in range(NUM_TRACKERS)]
 OUT_NBR_COLS = [f"out_nbr_{i}" for i in range(NUM_TRACKERS)]
 IN_NBR_COLS = [f"in_nbr_{i}" for i in range(NUM_TRACKERS)]
 GRAPH_DYNAMIC_COLS = [
-    "nbr_out_deg", "nbr_out_deg_log", "nbr_in_deg", "nbr_in_deg_log",
-    "nbr_tot_deg", "nbr_tot_deg_log",
+    "nbr_out_deg",
+    "nbr_out_deg_log",
+    "nbr_in_deg",
+    "nbr_in_deg_log",
+    "nbr_tot_deg",
+    "nbr_tot_deg_log",
 ]
 
 # The label-free half of the original's X_graph block, in its column_stack order.
 GRAPH_STATIC_COLS = [
-    "deg_out", "deg_out_log", "deg_in", "deg_in_log", "deg_total",
-    "deg_in_out_ratio", "deg_is_isolated", "tracker_links", "tracker_links_log",
+    "deg_out",
+    "deg_out_log",
+    "deg_in",
+    "deg_in_log",
+    "deg_total",
+    "deg_in_out_ratio",
+    "deg_is_isolated",
+    "tracker_links",
+    "tracker_links_log",
     "tracker_links_per_out",
 ]
 
@@ -139,16 +285,16 @@ META_COLS = ["domain_id", "root", "tld"]
 # network slices its prior channels off the tail, so the last five
 # NUM_TRACKERS-wide blocks have to stay last and in this sequence.
 FEATURE_COLS = (
-        LEXICAL_COLS
-        + URL_CAT_COLS
-        + GRAPH_STATIC_COLS
-        + GRAPH_DYNAMIC_COLS
-        + PRIOR_SCALAR_COLS
-        + DIRECT_COLS
-        + OUT_NBR_COLS
-        + IN_NBR_COLS
-        + ROOT_PRIOR_COLS
-        + TLD_PRIOR_COLS
+    LEXICAL_COLS
+    + URL_CAT_COLS
+    + GRAPH_STATIC_COLS
+    + GRAPH_DYNAMIC_COLS
+    + PRIOR_SCALAR_COLS
+    + DIRECT_COLS
+    + OUT_NBR_COLS
+    + IN_NBR_COLS
+    + ROOT_PRIOR_COLS
+    + TLD_PRIOR_COLS
 )
 
 # =========================================================================
@@ -163,14 +309,48 @@ FEATURE_COLS = (
 # through the www fallback, self-links, and link targets that are not domains.
 
 _STEMS = [
-    "shop", "store", "market", "news", "press", "daily", "video", "tube",
-    "stream", "tech", "cloud", "dev", "bank", "crypto", "invest", "blue",
-    "north", "green", "atlas", "river", "stone", "orbit", "delta", "prime",
+    "shop",
+    "store",
+    "market",
+    "news",
+    "press",
+    "daily",
+    "video",
+    "tube",
+    "stream",
+    "tech",
+    "cloud",
+    "dev",
+    "bank",
+    "crypto",
+    "invest",
+    "blue",
+    "north",
+    "green",
+    "atlas",
+    "river",
+    "stone",
+    "orbit",
+    "delta",
+    "prime",
 ]
 _SUFFIXES = ["hub", "line", "works", "group", "media", "labs", "zone", "24"]
 # In TOP_TLDS, in TWO_LEVEL_TLDS, and in neither (-> tld_other).
-_GEN_TLDS = ["com", "de", "ru", "org", "net", "uk", "jp", "io",
-             "co.uk", "com.au", "co.jp", "xyz", "berlin"]
+_GEN_TLDS = [
+    "com",
+    "de",
+    "ru",
+    "org",
+    "net",
+    "uk",
+    "jp",
+    "io",
+    "co.uk",
+    "com.au",
+    "co.jp",
+    "xyz",
+    "berlin",
+]
 
 
 def _make_domain_names(rng, n):
@@ -199,33 +379,41 @@ def make_input_data(directory, n_domains=2000, n_link_edges=12000, seed=0):
     root = Path(directory)
 
     names = _make_domain_names(rng, n_domains)
-    domain_ids = np.sort(rng.choice(
-        np.arange(100, 100 + 50 * n_domains), size=n_domains, replace=False))
-    tracking_domain_ids = np.sort(rng.choice(
-        np.arange(10_000_000, 10_050_000), size=NUM_TRACKERS, replace=False))
+    domain_ids = np.sort(
+        rng.choice(np.arange(100, 100 + 50 * n_domains), size=n_domains, replace=False)
+    )
+    tracking_domain_ids = np.sort(
+        rng.choice(np.arange(10_000_000, 10_050_000), size=NUM_TRACKERS, replace=False)
+    )
 
     # --- trackers.tsv ----------------------------------------------------
-    pd.DataFrame({
-        "domain": [f"tracker-{i:02d}.net" for i in range(NUM_TRACKERS)],
-        "tracking_domain_id": tracking_domain_ids,
-        "tracker_id": np.arange(NUM_TRACKERS),
-        "company": [f"Company {i % 7}" for i in range(NUM_TRACKERS)],
-        "country": [["US", "DE", "RU"][i % 3] for i in range(NUM_TRACKERS)],
-        "category": [["Analytics", "Advertising", "Social"][i % 3]
-                     for i in range(NUM_TRACKERS)],
-        "brand": [f"Brand {i % 5}" for i in range(NUM_TRACKERS)],
-    }).to_csv(root / "trackers.tsv", sep="\t", index=False)
+    pd.DataFrame(
+        {
+            "domain": [f"tracker-{i:02d}.net" for i in range(NUM_TRACKERS)],
+            "tracking_domain_id": tracking_domain_ids,
+            "tracker_id": np.arange(NUM_TRACKERS),
+            "company": [f"Company {i % 7}" for i in range(NUM_TRACKERS)],
+            "country": [["US", "DE", "RU"][i % 3] for i in range(NUM_TRACKERS)],
+            "category": [
+                ["Analytics", "Advertising", "Social"][i % 3]
+                for i in range(NUM_TRACKERS)
+            ],
+            "brand": [f"Brand {i % 5}" for i in range(NUM_TRACKERS)],
+        }
+    ).to_csv(root / "trackers.tsv", sep="\t", index=False)
 
     # --- domains.parquet -------------------------------------------------
     # A few candidates are absent, so the pipeline's fillna("") -> "unknown"
     # root/TLD branch is reached; a few ids appear twice, which it resolves
     # with drop_duplicates(keep="last").
     known = rng.random(n_domains) > 0.03
-    domains = pd.DataFrame({"domain": np.asarray(names)[known],
-                            "domain_id": domain_ids[known]})
+    domains = pd.DataFrame(
+        {"domain": np.asarray(names)[known], "domain_id": domain_ids[known]}
+    )
     shadow = domains.head(5).assign(domain=domains["domain"].head(5) + ".dup")
     pd.concat([shadow, domains], ignore_index=True).to_parquet(
-        root / "domains.parquet", index=False)
+        root / "domains.parquet", index=False
+    )
 
     # --- tracking_graph_train.parquet ------------------------------------
     # Tracker adoption clusters by TLD, which is what gives the Bayesian
@@ -238,55 +426,79 @@ def make_input_data(directory, n_domains=2000, n_link_edges=12000, seed=0):
     rows = []
     for row, dom_id in enumerate(domain_ids):
         weights = popularity * np.where(slots == tld_index[row] % 4, 4.0, 1.0)
-        picked = rng.choice(NUM_TRACKERS, size=rng.integers(1, 6),
-                            replace=False, p=weights / weights.sum())
+        picked = rng.choice(
+            NUM_TRACKERS,
+            size=rng.integers(1, 6),
+            replace=False,
+            p=weights / weights.sum(),
+        )
         rows.extend((dom_id, tracking_domain_ids[t], t) for t in picked)
-    tracking = pd.DataFrame(rows, columns=["domain_id", "tracking_domain_id",
-                                           "tracker_id"])
-    tracking = tracking.astype({"domain_id": "int64",
-                                "tracking_domain_id": "int64",
-                                "tracker_id": "int32"})
+    tracking = pd.DataFrame(
+        rows, columns=["domain_id", "tracking_domain_id", "tracker_id"]
+    )
+    tracking = tracking.astype(
+        {"domain_id": "int64", "tracking_domain_id": "int64", "tracker_id": "int32"}
+    )
     tracking.to_parquet(root / "tracking_graph_train.parquet", index=False)
 
     # --- target.tsv ------------------------------------------------------
     # The prediction set. These ids also carry tracking rows, so the pipeline's
     # `~graph_train["domain_id"].isin(target["domain_id"])` really drops rows.
-    target_ids = np.sort(rng.choice(domain_ids, size=max(1, n_domains // 12),
-                                    replace=False))
+    target_ids = np.sort(
+        rng.choice(domain_ids, size=max(1, n_domains // 12), replace=False)
+    )
     pd.DataFrame({"domain_id": target_ids}).to_csv(
-        root / "target.tsv", sep="\t", index=False)
+        root / "target.tsv", sep="\t", index=False
+    )
 
     # --- link-graph.parquet ----------------------------------------------
     # Domain-to-domain edges (the neighbour aggregations), domain-to-tracker
     # edges subsampled from the tracking graph (the direct_* block and
     # tracker_links), self-links, and edges into ids that are not domains.
-    to_tracker = tracking.loc[rng.random(len(tracking)) < 0.7,
-                              ["domain_id", "tracking_domain_id"]].to_numpy()
+    to_tracker = tracking.loc[
+        rng.random(len(tracking)) < 0.7, ["domain_id", "tracking_domain_id"]
+    ].to_numpy()
     self_links = rng.choice(domain_ids, size=20)
-    sources = np.concatenate([
-        rng.choice(domain_ids, size=n_link_edges), to_tracker[:, 0],
-        self_links, rng.choice(domain_ids, size=30)])
-    targets = np.concatenate([
-        rng.choice(domain_ids, size=n_link_edges), to_tracker[:, 1],
-        self_links, rng.integers(90_000_000, 90_001_000, size=30)])
-    pd.DataFrame({"source_domain_id": sources.astype("int32"),
-                  "target_domain_id": targets.astype("int32")}).to_parquet(
-        root / "link-graph.parquet", index=False)
+    sources = np.concatenate(
+        [
+            rng.choice(domain_ids, size=n_link_edges),
+            to_tracker[:, 0],
+            self_links,
+            rng.choice(domain_ids, size=30),
+        ]
+    )
+    targets = np.concatenate(
+        [
+            rng.choice(domain_ids, size=n_link_edges),
+            to_tracker[:, 1],
+            self_links,
+            rng.integers(90_000_000, 90_001_000, size=30),
+        ]
+    )
+    pd.DataFrame(
+        {
+            "source_domain_id": sources.astype("int32"),
+            "target_domain_id": targets.astype("int32"),
+        }
+    ).to_parquet(root / "link-graph.parquet", index=False)
 
     # --- freedom-of-the-press.csv (tab separated) ------------------------
     # Three TLDs are left uncovered, so has_press carries both values and the
     # median fill-in is exercised; the 5..95 range straddles the is_auth cut.
     covered = sorted(set(_GEN_TLDS))[:-3]
-    pd.DataFrame({
-        "tld": covered,
-        "country": [f"Country {i}" for i in range(len(covered))],
-        "freedom_of_the_press": rng.integers(5, 95, size=len(covered)),
-    }).to_csv(root / "freedom-of-the-press.csv", sep="\t", index=False)
+    pd.DataFrame(
+        {
+            "tld": covered,
+            "country": [f"Country {i}" for i in range(len(covered))],
+            "freedom_of_the_press": rng.integers(5, 95, size=len(covered)),
+        }
+    ).to_csv(root / "freedom-of-the-press.csv", sep="\t", index=False)
 
     # --- url-classification.csv ------------------------------------------
     urls, categories = [], []
-    for j, row in enumerate(rng.choice(n_domains, size=n_domains * 3 // 5,
-                                       replace=False)):
+    for j, row in enumerate(
+        rng.choice(n_domains, size=n_domains * 3 // 5, replace=False)
+    ):
         host = names[row]
         if j % 3 == 0 and not host.startswith("www."):
             # Matched through the pipeline's www fallback, not directly.
@@ -296,9 +508,9 @@ def make_input_data(directory, n_domains=2000, n_link_edges=12000, seed=0):
     # A filtered-out category, a host no domain matches, and a port to strip.
     urls += ["http://unmatched.example/", "http://other.example:8080/a"]
     categories += ["Adult", "Arts"]
-    pd.DataFrame({"index": np.arange(len(urls)), "url": urls,
-                  "category": categories}).to_csv(
-        root / "url-classification.csv", index=False)
+    pd.DataFrame(
+        {"index": np.arange(len(urls)), "url": urls, "category": categories}
+    ).to_csv(root / "url-classification.csv", index=False)
 
     return root
 
@@ -320,6 +532,7 @@ def recall_at_k(y_true, y_score, k=TOP_K):
     true_counts = targets.sum(axis=1)
     recalls = np.where(true_counts > 0, hits / np.maximum(true_counts, 1), 0.0)
     return float(np.mean(recalls))
+
 
 # =========================================================================
 # Cross-validation: the original's single random hold-out, as a splitter
@@ -350,11 +563,11 @@ class CandidateDomainHoldout(BaseCrossValidator):
         n_val = min(self.max_val, int(n_samples * self.val_fraction))
         yield indices[n_val:], indices[:n_val]
 
+
 # =========================================================================
 # The network, verbatim from the original
 # =========================================================================
 class ResidualTabularBlock(nn.Module):
-
     def __init__(self, in_dim: int, out_dim: int, dropout_rate: float = 0.2):
         super().__init__()
         self.fc1 = nn.Linear(in_dim, out_dim)
@@ -378,8 +591,8 @@ class ResidualTabularBlock(nn.Module):
         out = self.norm2(out)
         return self.act2(out + res)
 
-class TrackerRankNet(nn.Module):
 
+class TrackerRankNet(nn.Module):
     def __init__(
         self,
         in_dim: int,
@@ -427,9 +640,11 @@ class TrackerRankNet(nn.Module):
                 nn.init.zeros_(self.film_prior.weight)
                 nn.init.zeros_(self.film_prior.bias)
 
-            init_weights = torch.tensor(
-                [1.5, 1.0, 1.0, 1.5, 0.8], dtype=torch.float32
-            ).unsqueeze(0).repeat(num_classes, 1)
+            init_weights = (
+                torch.tensor([1.5, 1.0, 1.0, 1.5, 0.8], dtype=torch.float32)
+                .unsqueeze(0)
+                .repeat(num_classes, 1)
+            )
             self.tracker_prior_weights = nn.Parameter(init_weights)
             self.tracker_prior_bias = nn.Parameter(torch.zeros(num_classes))
             self.tracker_res_net = nn.Sequential(
@@ -490,9 +705,9 @@ class TrackerRankNet(nn.Module):
         base_logits = alpha * direct_logits + (1.0 - alpha) * proto_logits
 
         if self.has_tracker_priors:
-            prior_signals = x[
-                :, -self.num_prior_channels * self.num_classes :
-            ].reshape(-1, self.num_prior_channels, self.num_classes)
+            prior_signals = x[:, -self.num_prior_channels * self.num_classes :].reshape(
+                -1, self.num_prior_channels, self.num_classes
+            )
             prior_perm = prior_signals.permute(0, 2, 1)
 
             # Context-conditioned FiLM modulation: gamma(h) and beta(h) modulate prior channels
@@ -521,7 +736,6 @@ class TrackerRankNet(nn.Module):
 
 
 class AsymmetricFocalRecallLoss(nn.Module):
-
     def __init__(
         self,
         gamma_pos: float = 0.0,
@@ -555,7 +769,6 @@ class AsymmetricFocalRecallLoss(nn.Module):
 
 
 class HybridTopKRankingLoss(nn.Module):
-
     def __init__(
         self,
         gamma_pos: float = 0.0,
@@ -716,11 +929,13 @@ class BayesianTrackerPriors(TransformerMixin, BaseEstimator):
         tld_tracker_counts = (grouper @ targets_csr).toarray()
         self.tld_keys_ = pd.Index(tld_keys)
         # One extra row holding the global prior, used for unseen TLDs.
-        self.tld_table_ = np.vstack([
-            (tld_tracker_counts + self.alpha_tld * self.global_priors_)
-            / (tld_counts[:, None] + self.alpha_tld),
-            self.global_priors_[None, :],
-        ]).astype(np.float32)
+        self.tld_table_ = np.vstack(
+            [
+                (tld_tracker_counts + self.alpha_tld * self.global_priors_)
+                / (tld_counts[:, None] + self.alpha_tld),
+                self.global_priors_[None, :],
+            ]
+        ).astype(np.float32)
 
         root_keys, root_inv = np.unique(roots, return_inverse=True)
         self.root_counts_ = np.bincount(root_inv, minlength=len(root_keys))
@@ -867,7 +1082,9 @@ class TrackerRankNetEstimator(RegressorMixin, BaseEstimator):
         chunks = []
         with torch.no_grad():
             for start in range(0, len(X_matrix), 4096):
-                batch = torch.from_numpy(X_matrix[start : start + 4096]).to(self.device_)
+                batch = torch.from_numpy(X_matrix[start : start + 4096]).to(
+                    self.device_
+                )
                 chunks.append(self.model_(batch).cpu().numpy())
         return np.vstack(chunks)
 
@@ -890,10 +1107,14 @@ class TrackerRankNetEstimator(RegressorMixin, BaseEstimator):
         hold_idx, fit_idx = shuffled[:n_hold], shuffled[n_hold:]
 
         self.device_ = torch.device(
-            self.device if self.device is not None else
-            "cuda" if torch.cuda.is_available() else
-            "mps" if torch.backends.mps.is_available() else
-            "cpu")
+            self.device
+            if self.device is not None
+            else "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
         self.model_ = TrackerRankNet(
             in_dim=X_matrix.shape[1],
             num_classes=self.num_trackers,
@@ -1005,6 +1226,7 @@ class TrackerRankNetEstimator(RegressorMixin, BaseEstimator):
     def predict(self, X):
         return self._predict_logits(self._matrix(X))
 
+
 def define_pipeline(input_dir):
     with skrub.config_context(eager_data_ops=False):
         # =====================================================================
@@ -1097,7 +1319,7 @@ def define_pipeline(input_dir):
         # A two-level suffix only counts when something precedes it, mirroring the
         # original's `len(parts) >= 3` guard -- otherwise "co.uk" would be its own root.
         is_two_level = last_two.isin(TWO_LEVEL_TLDS) & (n_parts >= 3)
-        is_unknown = name == ""              # the original's `not domain_name` branch
+        is_unknown = name == ""  # the original's `not domain_name` branch
 
         X = X.assign(
             root=(
@@ -1145,13 +1367,10 @@ def define_pipeline(input_dir):
         )
 
         # --- press freedom, joined by TLD ---
-        press_scores = (
-            press.assign(
-                tld=press["tld"].astype(str).str.strip().str.lower().str.lstrip("."),
-                press_score=press["freedom_of_the_press"].astype("float64"),
-            )[["tld", "press_score"]]
-            .drop_duplicates(subset="tld", keep="last")
-        )
+        press_scores = press.assign(
+            tld=press["tld"].astype(str).str.strip().str.lower().str.lstrip("."),
+            press_score=press["freedom_of_the_press"].astype("float64"),
+        )[["tld", "press_score"]].drop_duplicates(subset="tld", keep="last")
         median_press_score = press_scores["press_score"].median()
 
         X = X.merge(press_scores, on="tld", how="left")
@@ -1168,7 +1387,9 @@ def define_pipeline(input_dir):
 
         # Content-category mix per domain, matched by hostname with the original's
         # "www." fallback.
-        url_rows = url_classification[url_classification["category"].isin(URL_CATEGORIES)]
+        url_rows = url_classification[
+            url_classification["category"].isin(URL_CATEGORIES)
+        ]
         url_hosts = (
             url_rows["url"]
             .astype(str)
@@ -1181,14 +1402,18 @@ def define_pipeline(input_dir):
             .str.strip()
             .str.lower()
         )
-        url_rows = url_rows.assign(host=url_hosts, host_no_www=url_hosts.str.removeprefix("www."))
+        url_rows = url_rows.assign(
+            host=url_hosts, host_no_www=url_hosts.str.removeprefix("www.")
+        )
         name_lookup = domains[
             domains["domain_id"].isin(candidate_ids["domain_id"])
         ].drop_duplicates(subset="domain", keep="last")
         url_rows = url_rows.merge(
             name_lookup, left_on="host", right_on="domain", how="left"
         ).merge(
-            name_lookup.rename(columns={"domain": "domain_www", "domain_id": "domain_id_www"}),
+            name_lookup.rename(
+                columns={"domain": "domain_www", "domain_id": "domain_id_www"}
+            ),
             left_on="host_no_www",
             right_on="domain_www",
             how="left",
@@ -1214,7 +1439,9 @@ def define_pipeline(input_dir):
         )
 
         X = X.merge(category_table, on="domain_id", how="left")
-        X = X.assign(**{col: X[col].fillna(0.0).astype("float32") for col in URL_CAT_COLS})
+        X = X.assign(
+            **{col: X[col].fillna(0.0).astype("float32") for col in URL_CAT_COLS}
+        )
 
         # --- link-graph degrees. Derived from the hyperlink graph alone, never from
         #     a label, so they are ordinary recorded features rather than something
@@ -1235,7 +1462,9 @@ def define_pipeline(input_dir):
             .rename(columns={"target_domain_id": "domain_id"})
         )
         tracker_link_counts = (
-            link_graph[link_graph["target_domain_id"].isin(trackers["tracking_domain_id"])]
+            link_graph[
+                link_graph["target_domain_id"].isin(trackers["tracking_domain_id"])
+            ]
             .groupby("source_domain_id")
             .size()
             .rename("tracker_links")
@@ -1436,20 +1665,36 @@ def define_pipeline(input_dir):
         )
         return pred
 
+
 class TestTrackTheTrackersPipeline(unittest.TestCase):
+    @pytest.fixture(autouse=True)
+    def _capture_output(self, capfd):
+        self.capfd = capfd
 
     def test_pipeline(self):
-        recall = make_scorer(recall_at_k, greater_is_better=True,
-                             response_method="predict")
+        recall = make_scorer(
+            recall_at_k, greater_is_better=True, response_method="predict"
+        )
         with ttt_input_dir() as input_dir:
             pipe = define_pipeline(input_dir)
-            with skrub.config(scheduler=True, stats=True, stats_top_k=25):
-                search = pipe.skb.make_grid_search(
-                    n_jobs=1,
-                    fitted=True,
-                    refit=False,
-                    scoring=recall,
-                )
+            with skrub.config(
+                scheduler=True,
+                stats=True,
+                stats_top_k=25,
+                explain=False,
+            ):  # Set True to print the physical plan.
+                captured_output = io.StringIO()
+                with redirect_stdout(captured_output):
+                    search = pipe.skb.make_grid_search(
+                        n_jobs=1,
+                        fitted=True,
+                        refit=False,
+                        scoring=recall,
+                    )
+        output_str = captured_output.getvalue()
+        if output_str:
+            with self.capfd.disabled():
+                print(output_str)
         # stratum returns a polars frame with one row per candidate -- columns
         # `id` and `scores`, already sorted best-first -- where skrub returns a
         # pandas frame with `mean_test_score`.
