@@ -106,12 +106,12 @@ class DefaultImplementationSelector(PreferenceSelector):
 
 
 class GreedyImplementationSelector(PreferenceSelector):
-    """Choose implementations using an efficient-backend-first preference.
+    """Apply operator-specific preferences, then prefer Rust, Stratum and Polars.
 
-    It does not call :meth:`PhysicalImpl.cost` (still a placeholder) and does
-    not look at neighboring operators, formats, conversion costs, or plan-wide
-    costs. This is a baseline. The stratum backend contains hybrid
-    implementations (python + rust).
+    Backend preferences apply when no operator-specific preference matches.
+    Selection uses fixed preferences rather than cost estimates. It does not
+    consider neighboring operators or conversion costs. The Stratum backend
+    combines Python orchestration with Rust kernels.
     """
 
     _PREFERRED_BACKENDS = (
@@ -129,11 +129,7 @@ _IMPLEMENTATION_SELECTOR_FACTORIES: dict[str, type[ImplementationSelector]] = {
 
 
 def get_implementation_selector(mode: str) -> ImplementationSelector:
-    """Get the configured implementation-selection policy.
-
-    Keeping construction in one place makes adding a future selector a small,
-    explicit change while preserving selector injection for focused tests.
-    """
+    """Construct the implementation-selection policy registered under ``mode``."""
     try:
         selector_type = _IMPLEMENTATION_SELECTOR_FACTORIES[mode]
     except KeyError as exc:
@@ -411,9 +407,8 @@ def _assert_no_abstract_ops(root: IRNode,
                             selector: ImplementationSelector) -> None:
     """Guard: no abstract physical op may reach the scheduler.
 
-    A surviving abstract op means lowering produced it but the selector chose
-    nothing for it -- its ``process`` would raise at run time. Fail loudly at
-    plan time instead.
+    A surviving abstract operator has no selected implementation. Reject the
+    plan before its ``process`` method can raise during execution.
     """
     for op in topological_iterator(root):
         if isinstance(op, PhysicalOp) and getattr(op, "is_abstract", False):

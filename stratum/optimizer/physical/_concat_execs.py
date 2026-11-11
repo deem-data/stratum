@@ -1,12 +1,9 @@
 """Physical implementations of the concat family.
 
-``ConcatOp`` is a same-shape backend-variant family: the logical op is a pure
-backend refinement of itself, so the concrete impls subclass it (``PandasConcatOp
-(ConcatOp, PhysicalOp)``) rather than being a separate hierarchy. Implementation
-selection swaps a logical ``ConcatOp`` to one of these in place; ``isinstance(op,
-ConcatOp)`` therefore still identifies a concat anywhere in the plan.
-
-``ArrayConcatOp`` has a single, backend-agnostic numpy impl.
+Concrete frame implementations subclass ``ConcatOp`` and ``PhysicalOp``.
+Selection changes the node's class in place, preserving its identity and
+``isinstance(op, ConcatOp)`` checks. ``ArrayConcatOp`` uses a single NumPy
+implementation, independent of the dataframe backend.
 """
 from __future__ import annotations
 

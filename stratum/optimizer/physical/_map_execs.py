@@ -1,13 +1,13 @@
-"""Physical implementations of the map operators.
+"""Physical implementations of map operators.
 
-Each logical map op is a same-shape backend-variant family: the concrete
-``Pandas*`` / ``Polars*`` impls subclass the logical op (+ :class:`PhysicalOp`)
-and carry only the backend-specific kernel. Selection swaps the logical op to
-the matching impl in place, so ``isinstance(op, StringMethodOp)`` etc. still
-holds across the plan. For ``AssignMapOp`` every folded entry runs in one
-``with_columns`` call on polars and goes through ``assign`` on pandas (see
-``_expressions``). The call-based maps replay their recorded pandas call on
-pandas and translate it on polars (see ``_polars_translate``).
+The pandas and Polars implementations subclass their logical operator and
+``PhysicalOp``. Selection changes the node's class in place, preserving its
+identity and ``isinstance`` checks against the logical class.
+
+- ``AssignMapOp`` evaluates folded entries through pandas ``assign`` or one
+  Polars ``with_columns`` call (see ``_expressions``).
+- Call-based maps replay the recorded pandas call or translate it for Polars
+  (see ``_polars_translate``).
 """
 from __future__ import annotations
 
@@ -305,8 +305,8 @@ class PolarsDatetimeFieldOp(DatetimeFieldOp, PhysicalOp):
 
 
 # --- AttributeReadOp (df.loc, df.T, col.cat.codes, ...) -----------------------
-# pandas-only: polars has no index labels to `.loc`, no `.T` and no namespaces
-# but its own, so a polars plan reads these on pandas.
+# These accesses use pandas APIs such as .loc, .T and .cat.codes. Convert
+# inputs to pandas before resolving the recorded attribute path.
 
 @physical_impl(of=AttributeReadOp, backend="pandas")
 class PandasAttributeReadOp(AttributeReadOp, PhysicalOp):

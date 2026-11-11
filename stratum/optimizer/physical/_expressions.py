@@ -35,9 +35,9 @@ from stratum.optimizer.physical._polars_translate import (
 class EvalContext:
     """Everything a column expression needs at evaluation time.
 
-    ``frame`` is evaluated against (the op's primary operand); ``inputs`` are the
-    op's resolved input values (read by :class:`OperandLeaf`); ``mode`` is
-    ``fit_transform`` or ``predict`` (unused by the current stateless grammar).
+    ``frame`` is the operator's primary operand; ``inputs`` are its resolved
+    input values (read by :class:`OperandLeaf`). ``mode`` is the execution mode,
+    such as ``fit_transform`` or ``predict``; the stateless grammar does not use it.
     """
     __slots__ = ("frame", "inputs", "mode")
 
@@ -121,8 +121,8 @@ def _(expr: AggExpr, ctx):
     # The whole-object reduction; a grouped pandas aggregation reads func/params
     # off the node instead (see PandasAggregateOp).
     obj = to_pandas(expr.child, ctx)
-    # `numeric_only` picks columns out of a frame; the child is a single
-    # column by construction, so it never applies here.
+    # TODO: retain numeric_only for frame-valued children such as AllCols.
+    # Dropping numeric_only=True can include nonnumeric columns in reductions.
     params = {k: v for k, v in expr.params.items() if k != "numeric_only"}
     if expr.func == "size":
         return obj.size
@@ -137,7 +137,7 @@ def method_fields(expr: ColumnMethodExpr) -> dict:
     return {name: getattr(expr, name) for name in type(expr).__slots__[1:]}
 
 
-#: Column method fields named apart from their pandas parameter.
+#: Expression field names that differ from the corresponding pandas parameters.
 _PANDAS_PARAMETERS = {"mapping": "func"}
 
 
@@ -262,8 +262,8 @@ def _(expr: DatetimeExpr, ctx):
                               obj_dtype=_polars_expr_dtype(expr.operand, ctx))
 
 
-# Reduction -> polars ``Expr`` method. `sem` is deliberately absent (polars has no
-# equivalent) and `nunique` is handled separately, because polars' ``n_unique``
+# Reduction -> polars ``Expr`` method. `sem` has no translation here, and
+# `nunique` is handled separately because polars' ``n_unique``
 # counts null as a distinct value while pandas' default drops it.
 #
 # idxmin/idxmax require original index labels, including inside each group, so
@@ -329,11 +329,10 @@ def _(expr: AggExpr, ctx):
 
 
 def _polars_expr_dtype(expr, ctx):
-    # FIXME(#216): this resolves only the two shapes it pattern-matches and returns
-    # None for every other operand, which is what makes the NaN handling in
-    # _polars_fillna / _polars_notna quietly backend-dependent. Asking polars
-    # for the expression's own output dtype (a schema-only resolve, e.g.
-    # ctx.frame.lazy().select(expr).collect_schema()) would answer for any expr.
+    # FIXME(#216): resolve dtypes for derived expressions as well as Col/AstypeExpr.
+    # Returning None makes _polars_fillna/_polars_notna skip NaN handling.
+    # Consider compiling the expression and resolving its output schema through
+    # ctx.frame.lazy().select(...).collect_schema(), without executing the plan.
     if isinstance(expr, Col) and isinstance(ctx.frame, pl.DataFrame):
         return ctx.frame.schema.get(expr.name)
     if isinstance(expr, AstypeExpr) and not isinstance(expr.dtype, ColumnExpr):

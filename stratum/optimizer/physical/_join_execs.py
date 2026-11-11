@@ -1,9 +1,8 @@
-"""Physical implementations of the join family (pandas merge / polars join).
+"""Physical implementations of joins (pandas merge and Polars join).
 
-Same-shape backend-variant families: the concrete impls subclass the logical
-``JoinOp`` or ``FilteringJoinOp`` (plus :class:`PhysicalOp`), so ``isinstance``
-on the logical class still identifies the op anywhere in the plan. Selection
-swaps a logical op to one of these per the plan context.
+Implementations subclass ``JoinOp`` or ``FilteringJoinOp`` and ``PhysicalOp``.
+Selection changes the node's class in place, preserving its identity and
+``isinstance`` checks against the logical class.
 """
 from __future__ import annotations
 
@@ -67,7 +66,7 @@ class PolarsJoinOp(JoinOp, PhysicalOp):
             left_on=left_on,
             right_on=right_on,
             suffix=self.suffixes[1],
-            coalesce=self.left_on == self.right_on,  # keep distinct key-rows, drop identical ones
+            coalesce=self.left_on == self.right_on,  # coalesce columns with matching join-key names
         )
         if no_defined_join_columns:
             return result

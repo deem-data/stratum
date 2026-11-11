@@ -1,17 +1,13 @@
-"""Logical -> physical lowering pass.
+"""Replace logical operators with physical operators in topological order.
 
-Walks the logical DAG in topological order and replaces each logical op for
-which a lowering rule is registered with its physical equivalent, splicing the
-new node into the graph in place (the same mutate-in-place style as the frame
-extraction pass). A logical op with no registered rule is left untouched -- it
-passes through and still executes via its own ``process``. This is what lets op
-families migrate to the physical layer one at a time without a flag day: an
-un-lowered family simply keeps running as it does today.
+- Apply registered lowering rules and install their replacements in the DAG.
+- Preserve operators without rules for subsequent implementation selection or
+  execution through their existing ``process`` method.
+- Copy edges and X/y/type/schema metadata to replacement nodes through
+  ``install_lowered``, which also rewires neighboring nodes.
+- Allow a rule to change a node's class in place and return the same node.
 
-A rule maps ``logical op -> physical op`` and may be 1:1 or (later) 1:N. It
-returns the *sink* physical node; :func:`install_lowered` copies the logical
-op's edges and X/y/type metadata onto it and rewires the neighbours. The
-returned node keeps the logical op's place in the DAG.
+The current replacement mechanism installs one physical node per logical node.
 """
 from __future__ import annotations
 
@@ -49,10 +45,9 @@ def install_lowered(old: Op, new: PhysicalOp, root: IRNode) -> IRNode:
     neighbour, so the physical node occupies exactly the logical node's position.
     Returns the new root when ``old`` was the root, else ``root`` unchanged.
 
-    Carrying ``output_schema`` matters only for the families a lowering rule
-    rebuilds from scratch (today: the source and transformer ops). Everything else
-    goes through implementation selection, which rebinds ``op.__class__`` in place
-    and so keeps the ``__dict__``, schema included.
+    Preserve ``output_schema`` when a lowering rule constructs a replacement,
+    as predictor and transformer rules do. In-place class changes retain the
+    existing instance attributes, including the schema.
     """
     new.inputs = old.inputs
     new.outputs = old.outputs

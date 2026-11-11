@@ -54,11 +54,12 @@ class RustPhysicalImpl(PhysicalImpl):
     Extends the shared schema with the Rust scheduling capabilities. ``@rust_impl``
     reads these off the op class
     (:class:`~stratum.optimizer.physical._physical_ops.RustPhysicalOp`) rather than
-    setting them independently, so the entry the planner reasons over and the
-    operator that runs cannot disagree. No selector consumes them yet (the cost
-    model is pending); they exist for the parallelization planner."""
+    setting them independently. The entry snapshots the operator's declared
+    capabilities at registration time. No selector currently consumes these
+    hints; they are intended for a future parallelization planner.
+    """
 
-    #: GIL released while the kernel runs; safe to run concurrently with others.
+    #: Kernel releases the GIL; state synchronization is a separate requirement.
     releases_gil: bool = False
     #: Kernel parallelizes internally; the planner should not also fan it out.
     data_parallel: bool = False
@@ -137,8 +138,8 @@ def physical_impl(of: type[IRNode], backend: BackendName,
 
     This builds a base :class:`PhysicalImpl`. Backends that carry extra scheduling
     metadata have their own decorator (:func:`rust_impl`) that builds the matching
-    :class:`PhysicalImpl` subclass; the plain per-backend decorators below only fix
-    ``backend`` until their backend grows its own schema.
+    :class:`PhysicalImpl` subclass. The per-backend decorators below set
+    ``backend`` and use the base descriptor.
     """
     def deco(cls):
         if "frame_lib" not in vars(cls):
@@ -188,9 +189,9 @@ def rust_impl(of: type[IRNode], input_format: str = "frame",
     return deco
 
 
-# Plain per-backend decorators: fix ``backend`` and build a base PhysicalImpl. They
-# exist so call sites read as one backend each; a backend grows its own decorator
-# + PhysicalImpl subclass (as Rust has) once it needs backend-specific fields.
+# Per-backend decorators set ``backend`` and build a base PhysicalImpl.
+# Backends needing extra metadata can define a descriptor subclass and decorator,
+# as the Rust backend does.
 def _backend_impl(backend: BackendName):
     def decorator(of: type[IRNode], input_format: str = "frame",
                   output_format: str = "frame",
@@ -217,8 +218,7 @@ EXEC_MODULES = (
 
 
 def import_exec_modules() -> None:
-    """Import every exec module, running its ``@physical_impl``/``@rust_impl``
-    registrations and its lowering rules.
+    """Import execution modules to register physical implementations and lowering rules.
 
     Imported on demand: the exec modules import back into this module (the
     decorator / PhysicalImpl), so pulling them in at module level would cycle.

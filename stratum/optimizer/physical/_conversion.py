@@ -1,9 +1,9 @@
 """Explicit frame-library conversions on plan edges (#227).
 
-pandas -> polars is always admitted (polars has no index). polars -> pandas
-yields a RangeIndex, so it is admitted only where the pandas plan also has a
-default index (:func:`has_default_index`); otherwise the producer
-runs on pandas. Strings convert to pandas' ``str`` dtype.
+Index checks allow pandas -> Polars conversions, which discard pandas labels.
+Polars -> pandas yields a RangeIndex, so it is allowed only where the pandas
+plan also has a default index (:func:`has_default_index`); otherwise the
+producer must run on pandas. Strings convert to pandas' ``str`` dtype.
 """
 from __future__ import annotations
 

@@ -1,14 +1,12 @@
 """Physical implementations of ``AggregateOp`` (grouped and whole-object).
 
-Same-shape backend-variant family: the concrete impls subclass the logical
-``AggregateOp``.
+The implementations subclass the logical ``AggregateOp``:
 
-The two backends split the work differently, which is the point of keeping the
-logical op expression-based. Polars consumes an ``AggExpr`` directly -- one
-expression list handed to ``group_by(...).agg(...)`` or ``select(...)``, so a
-computed aggregation like ``SUM(a * b)`` stays a single kernel. Pandas has no
-expression language, so the grouped path materialises each entry's row-wise child
-into a working frame first and then reduces it per column.
+- Polars translates ``AggExpr`` nodes into expressions passed to
+  ``group_by(...).agg(...)`` or ``select(...)``. A computed aggregation such as
+  ``SUM(a * b)`` remains one expression tree.
+- The pandas grouped path materializes each aggregation's row-wise child in a
+  working frame, then reduces it by column.
 """
 from __future__ import annotations
 
@@ -100,12 +98,11 @@ class PolarsAggregateOp(AggregateOp, PhysicalOp):
 
     @classmethod
     def supports(cls, op: AggregateOp, ctx) -> bool:
-        """Refuse a series source: polars has no expression context for one.
+        """Require a frame source and result for expression-based aggregation.
 
-        Both paths below start from ``select``/``group_by`` on the source, and a
-        ``pl.Series`` has neither. Reducing it directly would return a Python
-        value rather than an expression, so the aggregation would silently stop
-        being one kernel. Refusing here turns that into a plan-time decision.
+        These paths call ``select`` or ``group_by`` on the source, neither of
+        which is available on ``pl.Series``. Unsupported shapes use another
+        implementation selected during planning.
         """
         if op.output_type is not OutputType.FRAME:
             return False

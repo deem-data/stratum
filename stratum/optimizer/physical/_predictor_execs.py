@@ -104,6 +104,7 @@ class RandomForestOp(_PredictorExecution):
     is_abstract = True
 
 
+# TODO: rename to SklearnRandomForest; this implementation also runs regressors.
 @sklearn_skrub_impl(of=RandomForestOp, implementation_name="sklearn_rf")
 class SklearnRandomForestClassifier(_SklearnForestState, RandomForestOp):
     """Reference impl: runs the scikit-learn forest as-is."""

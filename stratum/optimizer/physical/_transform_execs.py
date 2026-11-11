@@ -96,7 +96,7 @@ class StratumTableVectorizer(TableVectorizerOp):
 
     @classmethod
     def supports(cls, op: TableVectorizerOp, ctx: Any) -> bool:
-        """Select this for mixed/partially supported configs"""
+        """Require a supported Rust encoder when fused orchestration is unavailable."""
         estimator = op.original_estimator
         if not isinstance(estimator, _SkrubTableVectorizer):
             return False
@@ -148,7 +148,7 @@ class StratumFusedTableVectorizer(TableVectorizerOp):
 
     @classmethod
     def supports(cls, op: TableVectorizerOp, ctx: Any) -> bool:
-        """Select for fully supported (all Rust) configs"""
+        """Require supported fused orchestration and at least one eligible Rust encoder."""
         return _StratumFusedTableVectorizer.supports(
             op.original_estimator,
             ctx,

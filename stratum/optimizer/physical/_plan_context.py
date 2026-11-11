@@ -1,24 +1,13 @@
-"""Plan-time snapshot of the configuration that drives operator selection.
+"""Snapshot configuration used by lowering and implementation selection.
 
-The whole point of the logical/physical split is that no operator-selection
-decision happens during execution. To honour that, every setting that used to be
-read inside an op's ``process`` (``pandas_query``, ``rechunk``, ...) is read
-**once**, here, when the physical plan is built. The resulting
-:class:`PlanContext` is threaded through lowering and implementation selection;
-concrete ops fold whatever they need out of it into their own state.
+- Read process-wide settings from ``FLAGS`` and plan-specific settings from
+  ``OptConfig`` when constructing ``PlanContext``.
+- Pass the immutable context through lowering and implementation selection.
+- Store required settings on concrete operators for use during execution.
 
-It draws on two sources, because the settings have two lifetimes: process-global
-runtime toggles come from :data:`~stratum._config.FLAGS`, while settings that
-belong to one plan come from that plan's ``OptConfig``.
-
-The dataframe backend is deliberately *not* here. Which backend an op runs on is
-the outcome of implementation selection, so it belongs to the
-:class:`~stratum.optimizer.physical._impl_selection.ImplementationSelector` that
-makes the choice -- a backend field beside it could only ever disagree with the
-impls actually bound, which is what a global ``force_polars`` flag used to do.
-
-Today this is a straight snapshot of :data:`~stratum._config.FLAGS`. Later this
-is where memory estimates, available backends and cost models feed the selector.
+The implementation selector determines each operator's backend. ``PlanContext``
+records the selection policy and its settings, rather than imposing a single
+backend on the entire plan.
 """
 from __future__ import annotations
 
@@ -42,10 +31,9 @@ class PlanContext:
     parallelism:
         Degree of parallelism to hand to estimator/transformer ops.
     rust_backend:
-        Prefer registered Rust kernel implementations where they support the op.
+        Enable the legacy Rust preference used by ``FlagBasedSelector``.
     allow_patch:
-        Legacy soft kill-switch for non-sklearn backends; gates Rust selection
-        together with ``rust_backend`` to preserve the pre-registry semantics
+        Combine with ``rust_backend`` to enable the legacy Rust preference
         (``allow_patch and rust_backend``).
     implementation_selector:
         Name of the implementation-selection policy to use during physical

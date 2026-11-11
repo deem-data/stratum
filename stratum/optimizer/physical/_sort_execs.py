@@ -1,12 +1,9 @@
 """Physical implementations of ``SortOp`` (row ordering).
 
-Same-shape backend-variant family: the concrete impls subclass the logical
-``SortOp``.
-
-Both impls pin a *stable* sort. That is not a tuning choice: with an unstable
-sort the two backends are free to order tied keys differently, so a plan would
-stop being reproducible across backends. Stability is how the result is pinned,
-which is why it lives here and not as a field on the logical op.
+Concrete implementations subclass the logical ``SortOp``. Stable sorting
+preserves input order among equal keys so pandas and Polars results can agree
+on tie ordering. Stability is enforced by the implementations rather than
+exposed as a logical-operator option.
 """
 from __future__ import annotations
 

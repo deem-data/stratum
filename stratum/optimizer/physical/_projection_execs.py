@@ -1,11 +1,9 @@
-"""Physical implementations of the projection operators.
+"""Physical implementations of projection operators.
 
-Each logical projection op (``DropOp``, ``ColumnSelectorOp``,
-``ColumnProjectionOp``) is a same-shape backend-variant family: the concrete
-``Pandas*`` / ``Polars*`` impls subclass the logical op (+ :class:`PhysicalOp`)
-and carry only the backend-specific ``process``. Selection swaps the logical op
-to the matching impl in place, so ``isinstance(op, DropOp)`` etc. still holds
-across the plan.
+The pandas and Polars implementations subclass their logical operator and
+``PhysicalOp``. Selection changes the node's class in place, preserving its
+identity and ``isinstance`` checks against ``DropOp``, ``ColumnSelectorOp`` or
+``ColumnProjectionOp``.
 """
 from __future__ import annotations
 
@@ -49,12 +47,12 @@ class PolarsDropOp(DropOp, PhysicalOp):
 def resolve_selector_columns(frame, selector) -> list[str]:
     """Resolve a skrub selector (or column name / list of names) against ``frame``.
 
-    Returns the concrete column-name list. Selectors are *deferred*: which columns
-    match (e.g. ``numeric()``) depends on the data, so resolution can only happen
-    once a frame with a schema is available. skrub's dispatch handles both pandas
-    and polars frames.
+    Return the matching column names. Selectors can depend on column names,
+    dtypes or values, so resolution is deferred until a frame is available.
+    skrub's dispatch handles both pandas and Polars frames.
 
-    # TODO with schema propagation we can resolute the column name list at compile time
+    TODO: resolve selectors during planning when column names and dtypes suffice
+    and the required schema is known.
     """
     return make_selector(selector).expand(frame)
 
@@ -65,7 +63,7 @@ class ColumnSelectorExec(ColumnSelectorOp, PhysicalOp):
     indexing differs per backend."""
 
     def on_impl_selected(self, ctx) -> None:
-        # Resolved by the fitting pass; nothing is known at plan time.
+        # Initialize the column list for resolution during fitting.
         self.selected_columns = None
 
     def _resolved_columns(self, frame, mode: str):

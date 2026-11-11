@@ -3,8 +3,8 @@
 Implementation selection swaps a logical source op (``ReadCSVOp``,
 ``ReadParquetOp``, ``LoadNumpyOp``, ``InMemoryFrameOp``) to one of the concrete
 classes registered below via ``@physical_impl`` (``PandasReadCSV`` /
-``PolarsReadCSV`` / ...). The concrete ``process`` methods contain no backend or
-``rechunk`` branch -- both decisions were fixed at plan time.
+``PolarsReadCSV`` / ...). Backend selection occurs during planning; in-memory
+Polars sources also store the plan's rechunk setting for execution.
 """
 from __future__ import annotations
 
@@ -58,11 +58,10 @@ def _translate_storage_options(value):
     """pandas ``storage_options`` (fsspec) -> polars ``storage_options`` (object store).
 
     pandas hands these to fsspec (s3fs, gcsfs); polars reads cloud paths with
-    its own object store, whose keys differ. An untranslated fsspec key is not an
-    error there: it is ignored, the request goes out unauthenticated, and the
-    read fails later with a 401. The common credential spellings are mapped;
-    every other key is passed on unchanged, so options already written in
-    object-store spelling keep working.
+    its own object store, whose keys differ. Passing an untranslated credential
+    option can leave a read unauthenticated. Map supported fsspec credential
+    keys and pass other options through for callers already using object-store
+    option names.
     """
     if value is None:
         return "storage_options", None
@@ -106,8 +105,8 @@ def _translate_header(value):
 
     pandas takes a row *index* (0 = the first row is the header, ``None`` = no
     header); polars takes a bool. Only the two spellings that mean "first row"
-    and "no header" carry over -- ``header=2`` (skip two rows, then read a
-    header) has no polars equivalent.
+    and "no header" are translated here. ``header=2`` (skip two rows, then read a
+    header) cannot be represented by ``has_header`` alone.
     """
     if value is None:
         return "has_header", False
@@ -121,8 +120,8 @@ def _translate_header(value):
 def _translate_encoding(value):
     """pandas ``encoding`` -> polars ``encoding``.
 
-    Same option name, much narrower domain: polars reads ``utf8`` or
-    ``utf8-lossy`` only, so every other codec pandas accepts is a rejection.
+    This translator accepts only ``utf8`` and ``utf8-lossy``. Other codecs
+    are rejected during implementation selection.
     """
     if value is None or str(value).lower().replace("-", "") in ("utf8",):
         return "encoding", "utf8"
@@ -250,7 +249,7 @@ def _translate_comment(value):
 
 
 def _translate_low_memory(value):
-    # Neither library's low_memory changes the values polars reads.
+    # Forward the low_memory setting to the Polars reader.
     return "low_memory", value
 
 
@@ -285,9 +284,9 @@ def _translate_filters(value):
     pyarrow accepts a list of ``(column, op, value)`` tuples, ANDed, or a list of
     such lists, ORed -- told apart the way pyarrow does, by whether the first
     element's first item is a column name. The predicate filters rows just like
-    pyarrow does; :class:`PolarsReadParquet` applies it to a ``scan_parquet``,
-    so hive partitions and row groups it excludes are never read. A
-    ``pyarrow.compute.Expression`` filter has no polars spelling and is rejected.
+    pyarrow does; :class:`PolarsReadParquet` applies it to ``scan_parquet`` so
+    Polars can prune Hive partitions and row groups where metadata permits.
+    ``pyarrow.compute.Expression`` filters are not translated.
     """
     if value is None:
         return "filters", None
@@ -399,8 +398,9 @@ def _csv_width(op: ReadCSVOp) -> int | None:
 
 def _read_csv_in_file_order(file_path, kwargs: dict):
     """``pl.read_csv`` with a ``columns`` projection kept in the file's column order,
-    as pandas keeps ``usecols``. The header reaches ``with_column_names`` during
-    the same read, so a remote file is fetched once."""
+    as pandas keeps ``usecols``. Capture the header through ``with_column_names``
+    during the scan, avoiding a separate header read.
+    """
     header = []
 
     def keep_header(names):
@@ -474,7 +474,7 @@ class PolarsReadParquet(ReadParquetOp, PhysicalOp):
 
 @physical_impl(of=LoadNumpyOp, backend="numpy", input_format="value", output_format="matrix")
 class NumpyLoad(LoadNumpyOp, PhysicalOp):
-    """``np.load`` yields an ndarray, so one impl serves both frame backends."""
+    """Load NumPy data independently of the dataframe backend."""
 
     def process(self, mode: str, inputs: list):
         return np.load(_resolve_operand(self.file_path, inputs),

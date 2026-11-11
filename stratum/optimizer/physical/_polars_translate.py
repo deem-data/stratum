@@ -1,4 +1,4 @@
-"""pandas-spelled calls translated to polars.
+"""Translate pandas method names and arguments into Polars calls.
 
 The logical ops and expressions keep pandas' names for string methods, datetime
 fields and column methods (extraction reads pandas code). This module is where
@@ -20,14 +20,14 @@ from stratum.optimizer.logical._column_methods import normalize_dtype
 
 # --- .str ---------------------------------------------------------------------
 #
-# Each pandas ``.str`` method polars can run exactly has a translator: it takes
-# the call's params (pandas' parameter names) and returns the function that runs
-# the call on a polars Series or expression, or raises ``_NoTranslation`` with the
-# reason. A method without one has no exact translation, even where polars has a
-# method of that name: ``find`` misses to -1 in pandas but to null in polars,
-# ``join`` joins each row's list in pandas but every row in polars, ``extract``
-# fans out into columns, and ``encode``/``decode`` take other encodings. Shared
-# by the ``StringMethodOp`` impl and the expression compiler's ``StrExpr``.
+# Translators accept pandas parameter names and return a function operating on a
+# Polars Series or expression, or raise _NoTranslation with a reason. They are
+# shared by StringMethodOp and the expression compiler's StrExpr.
+# Matching method names do not guarantee matching semantics:
+# - find returns -1 for missing matches in pandas and null in Polars.
+# - join joins each row's list in pandas and concatenates rows in Polars.
+# - extract can produce multiple columns in pandas.
+# - encode/decode support different encodings.
 
 
 class _NoTranslation(Exception):
@@ -44,8 +44,9 @@ def _only(params: dict, *names: str) -> None:
     _require(not extra, f"options {extra} are not translated")
 
 
-# A regex construct the Rust regex engine lacks (lookaround, inline groups and
-# flags) or that means something else there (a numbered backreference).
+# Conservatively reject all (?...) constructs and numbered backreferences.
+# This includes unsupported lookarounds and backreferences as well as constructs
+# that would need separate compatibility checks, such as inline flags.
 _UNPORTABLE_REGEX = re.compile(r"\(\?|\\[1-9]")
 
 
@@ -120,7 +121,7 @@ def _translate_slice(params):
     offset = 0 if start is None else start
     if stop is None:
         return lambda obj: obj.str.slice(offset)
-    # With a negative bound the length depends on each string's.
+    # A negative bound makes the slice length depend on each input string's length.
     _require(offset >= 0 and stop >= 0, "a negative bound next to a stop is not translated")
     return lambda obj: obj.str.slice(offset, max(stop - offset, 0))
 
@@ -154,7 +155,7 @@ def polars_str_replace_unsupported(pat, repl=None, n=-1, case=None, flags=0,
                                    regex=False) -> str | None:
     """Why a pandas ``str.replace`` call has no exact polars translation, or None.
 
-    Only literal string patterns and replacements translate. Refused:
+    Only string-valued patterns and replacements are supported. Refused:
     compiled patterns and callable replacements (pandas-only), ``case``/``flags``,
     an empty pattern, lookarounds and backreferences (unsupported by Rust regex),
     and a regex replacement containing ``\\`` or ``$`` (the two engines spell
@@ -162,8 +163,9 @@ def polars_str_replace_unsupported(pat, repl=None, n=-1, case=None, flags=0,
 
     Accepted divergence: on an *object*-dtype column, Python's ``$`` also
     matches before a trailing newline, Rust's does not. pandas 3's default
-    ``str`` dtype already uses pyarrow's RE2, whose ``$`` is end-of-text like
-    Rust's, so a pipeline reading strings from files sees no difference.
+    ``str`` dtype with PyArrow storage uses RE2, whose ``$`` has the same
+    end-of-text semantics as Rust's. This exception depends on the string
+    storage backend, not on whether the strings were read from a file.
     """
     if not isinstance(pat, str) or not isinstance(repl, str):
         return "only string patterns and replacements translate"
@@ -303,7 +305,7 @@ def polars_to_datetime(obj, format=None, exact=None, cache=True, errors="raise",
         raise ValueError(f"errors must be 'raise' or 'coerce', got {errors!r}")
     dtype = getattr(obj, "dtype", None) or obj_dtype
     if isinstance(dtype, pl.Datetime):
-        # pandas returns datetimes as they are, whatever the options.
+        # The supported parsing options leave datetime inputs unchanged in pandas.
         return obj
     kwargs = {"format": format, "cache": cache, "strict": errors == "raise"}
     if exact is not None:
@@ -340,7 +342,7 @@ def _polars_fillna(obj, value, *, obj_dtype=None):
 
 
 def _fill_value_fits(value, dtype) -> bool:
-    """Whether filling ``value`` keeps the column's kind, as pandas does then."""
+    """Whether the fill value is compatible with the column's type category."""
     if isinstance(value, bool):
         return dtype == pl.Boolean
     if isinstance(value, (int, float, np.number)):
@@ -376,8 +378,8 @@ def _polars_frame_fillna(frame, values: dict):
             continue
         dtype = frame.schema[name]
         if not _fill_value_fits(value, dtype):
-            # FIXME(#227): reached only when the schema did not know this
-            # column's dtype at plan time; fall back to pandas instead of failing.
+            # FIXME(#227): the dtype or fill value was unavailable during planning.
+            # Fall back to pandas for incompatible values instead of failing.
             raise NotImplementedError(
                 f"fillna({{{name!r}: {value!r}}}) on a {dtype} column has no exact "
                 f"polars translation: pandas would mix types in an object column.")
@@ -392,12 +394,11 @@ def _polars_clip(obj, lower, upper, *, obj_dtype=None):
 def _polars_where(obj, cond, other, *, obj_dtype=None):
     if isinstance(obj, pl.Series):
         if not isinstance(other, pl.Series):
-            # FIXME(#216): two problems on this line. Pinning `other` to the column
-            # dtype raises where pandas promotes to a supertype, so an int
-            # column's .where(cond, 1.5) fails here and returns floats in
-            # pandas; and the list comprehension materialises one Python object
-            # per row, where pl.repeat(other, len(obj), eager=True) would not.
-            # The pl.Expr branch below has neither problem.
+            # FIXME(#216): preserve pandas type promotion: an integer column's
+            # .where(cond, 1.5) needs floating-point output, but forcing obj.dtype
+            # rejects the replacement. Also avoid allocating a Python list with
+            # one reference per row; consider pl.repeat(..., eager=True).
+            # The expression branch below leaves type inference to Polars.
             other = pl.Series([other] * len(obj), dtype=obj.dtype)
         return obj.zip_with(cond, other)
     return pl.when(cond).then(obj).otherwise(other)
