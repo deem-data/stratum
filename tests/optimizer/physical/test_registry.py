@@ -1,3 +1,5 @@
+import pytest
+
 from stratum.optimizer.logical._dataframe_ops import ConcatOp
 from stratum.optimizer.logical._numeric_ops import NumericOp
 from stratum.optimizer.logical._ops import PredictorOp, Op, TransformerOp
@@ -6,6 +8,7 @@ from stratum.optimizer.physical import (
     PhysicalOp,
     PhysicalRegistry,
     RustPhysicalImpl,
+    _registry,
     build_default_physical_registry,
 )
 from stratum.optimizer.logical._source_ops import (
@@ -108,9 +111,7 @@ def test_rust_kernels_are_class_based_impls():
 
 
 def test_rust_impl_is_its_own_dataclass_with_capability_hints():
-    # Rust has a dedicated PhysicalImpl subclass carrying scheduling capabilities,
-    # read off the op class (RustPhysicalOp). Other backends stay on the base
-    # PhysicalImpl, which has no such fields -- the schema is not shared.
+    # Rust scheduling capabilities belong to the registry entry.
     registry = build_default_physical_registry()
 
     (rust,) = registry.candidates_for(StringEncoderOp, backend_name="rust")
@@ -119,12 +120,31 @@ def test_rust_impl_is_its_own_dataclass_with_capability_hints():
     assert isinstance(rust, RustPhysicalImpl)
     assert rust.impl_class is RustStringEncoder
     assert rust.releases_gil and rust.data_parallel
-    # Hints are sourced from the op class, so the entry and the operator agree.
-    assert RustStringEncoder.releases_gil and RustStringEncoder.data_parallel
+    assert not hasattr(RustStringEncoder, "releases_gil")
+    assert not hasattr(RustStringEncoder, "data_parallel")
 
     assert type(skrub) is PhysicalImpl
     assert skrub.impl_class is SkrubStringEncoder
     assert not hasattr(skrub, "releases_gil")
+
+
+@pytest.mark.parametrize("releases_gil, data_parallel", [(False, True), (True, False)])
+def test_rust_impl_accepts_capability_overrides(monkeypatch, releases_gil, data_parallel):
+    monkeypatch.setattr(_registry, "_DECORATED_IMPLS", [])
+
+    class CustomOp(PhysicalOp):
+        pass
+
+    @_registry.rust_impl(of=CustomOp, releases_gil=releases_gil, data_parallel=data_parallel)
+    class CustomRustOp(CustomOp):
+        pass
+
+    registry = PhysicalRegistry(_registry._DECORATED_IMPLS)
+    (impl,) = registry.candidates_for(CustomOp, backend_name="rust")
+
+    assert impl.impl_class is CustomRustOp
+    assert impl.releases_gil is releases_gil
+    assert impl.data_parallel is data_parallel
 
 
 def test_implementation_name_defaults_to_concrete_class_name():

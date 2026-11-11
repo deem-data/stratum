@@ -45,7 +45,6 @@ from stratum.optimizer.logical._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import (
     PhysicalOp,
-    RustPhysicalOp,
     EstimatorExecution,
 )
 from stratum.optimizer.physical._registry import (
@@ -190,10 +189,9 @@ class SkrubStringEncoder(StringEncoderOp):
 
 
 @rust_impl(of=StringEncoderOp)
-class RustStringEncoder(StringEncoderOp, RustPhysicalOp):
+class RustStringEncoder(StringEncoderOp):
     """Native Rust impl: swaps in the ``RustyStringEncoder`` adapter at plan time,
-    so ``process`` runs the Rust kernel with no run-time decision left. Its Rust
-    capability hints come from ``RustPhysicalOp`` (Rayon: GIL-free, data-parallel)."""
+    so ``process`` runs the Rust kernel with no run-time decision left."""
 
     is_abstract = False
 
@@ -222,7 +220,7 @@ def _as_rusty_string_encoder(estimator) -> RustyStringEncoder:
 # on the generic pass-through transformer. Selection swaps a supported op to
 # this class and its on_impl_selected swaps in the Rust adapter.
 @rust_impl(of=PassthroughTransformer, output_format="matrix")
-class RustOneHotEncoder(_TransformerExecution, TransformerOp, RustPhysicalOp):
+class RustOneHotEncoder(_TransformerExecution, TransformerOp, PhysicalOp):
     """Native Rust one-hot encoder: swaps in ``RustyOneHotEncoder`` at plan time."""
 
     @classmethod
@@ -289,7 +287,7 @@ class NumpyStandardScalerExec(StandardScalerOp):
 
 
 @rust_impl(of=StandardScalerOp)
-class RustStandardScaler(StandardScalerOp, RustPhysicalOp):
+class RustStandardScaler(StandardScalerOp):
     """Rust kernels for standardization."""
 
     is_abstract = False
@@ -326,7 +324,7 @@ class SklearnCountVectorizer(CountVectorizerOp):
 
 
 @rust_impl(of=CountVectorizerOp, output_format="matrix")
-class RustCountVectorizer(CountVectorizerOp, RustPhysicalOp):
+class RustCountVectorizer(CountVectorizerOp):
     """Parallel native counting with conservative sklearn fallbacks."""
 
     is_abstract = False

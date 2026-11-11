@@ -51,12 +51,9 @@ class PhysicalImpl:
 class RustPhysicalImpl(PhysicalImpl):
     """Registry entry for a native Rust implementation.
 
-    Extends the shared schema with the Rust scheduling capabilities. ``@rust_impl``
-    reads these off the op class
-    (:class:`~stratum.optimizer.physical._physical_ops.RustPhysicalOp`) rather than
-    setting them independently. The entry snapshots the operator's declared
-    capabilities at registration time. No selector currently consumes these
-    hints; they are intended for a future parallelization planner.
+    Scheduling capabilities are supplied by ``@rust_impl`` at registration time.
+    No selector currently consumes these hints; they are intended for a future
+    parallelization planner.
     """
 
     #: Kernel releases the GIL; state synchronization is a separate requirement.
@@ -162,14 +159,13 @@ def physical_impl(of: type[IRNode], backend: BackendName,
 
 def rust_impl(of: type[IRNode], input_format: str = "frame",
               output_format: str = "frame",
-              implementation_name: str | None = None):
+              implementation_name: str | None = None, *,
+              releases_gil: bool = True, data_parallel: bool = True):
     """Register a native Rust ``PhysicalOp`` as a :class:`RustPhysicalImpl`.
 
-    Like :func:`physical_impl`, but builds the Rust-specific registry entry and
-    reads the Rust capability hints (``releases_gil`` / ``data_parallel``) off the
-    op class -- which should derive from
-    :class:`~stratum.optimizer.physical._physical_ops.RustPhysicalOp` -- so the
-    registry entry and the operator carry the same values.
+    Like :func:`physical_impl`, but stores scheduling capabilities on the registry
+    entry. Defaults describe kernels that release the GIL and parallelize
+    internally; override either keyword for kernels with different capabilities.
     """
     def deco(cls):
         _DECORATED_IMPLS.append(RustPhysicalImpl(
@@ -182,8 +178,8 @@ def rust_impl(of: type[IRNode], input_format: str = "frame",
             exec_mem=cls.exec_mem,
             impl_class=cls,
             implementation_name=implementation_name,
-            releases_gil=cls.releases_gil,
-            data_parallel=cls.data_parallel,
+            releases_gil=releases_gil,
+            data_parallel=data_parallel,
         ))
         return cls
     return deco

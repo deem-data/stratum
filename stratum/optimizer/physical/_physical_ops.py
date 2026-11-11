@@ -120,27 +120,6 @@ class PhysicalOp(IRNode):
             f"cloning happens in the logical phase, before lowering.")
 
 
-# TODO: reassess whether Rust capability defaults need a separate operator base class.
-class RustPhysicalOp(PhysicalOp):
-    """Base for native Rust physical ops.
-
-    Rust kernels run outside the GIL and parallelize internally (Rayon), so those
-    are the defaults below; a specific kernel may override either as a class
-    attribute. ``@rust_impl`` reads these off the op class into the
-    :class:`~stratum.optimizer.physical._registry.RustPhysicalImpl` registry entry
-    -- the same way ``supports``/``cost``/``exec_mem`` are captured from the class
-    -- so the registry entry and the bound operator agree on the backend's
-    scheduling capabilities and either can reason about them.
-    """
-
-    __slots__ = ()
-
-    #: Kernel releases the GIL while running; this does not imply thread-safe state.
-    releases_gil = True
-    #: Kernel already parallelizes internally, so the planner should not also fan
-    #: it out (avoids oversubscription).
-    data_parallel = True
-
 class EstimatorExecution:
     """Shared execution and fit-time memory accounting for physical estimators.
     Store a retained-state estimate once per successful fitting pass.

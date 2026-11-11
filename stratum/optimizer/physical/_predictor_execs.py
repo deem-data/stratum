@@ -13,7 +13,7 @@ with ``supports`` and swaps the estimator at plan time, the same way
 :class:`~stratum.optimizer.physical._transform_execs.RustStringEncoder` does::
 
     @rust_impl(of=RandomForestOp)
-    class RustRandomForest(RandomForestOp, RustPhysicalOp):
+    class RustRandomForest(RandomForestOp):
         is_abstract = False
 
         @classmethod
@@ -58,7 +58,7 @@ from stratum.adapters.tree_classifier import (
 )
 from stratum.optimizer.logical._ops import PredictorOp
 from stratum.optimizer.physical._lowering import lowering_rule
-from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp, EstimatorExecution
+from stratum.optimizer.physical._physical_ops import PhysicalOp, EstimatorExecution
 from stratum.optimizer.physical._registry import rust_impl, sklearn_skrub_impl
 
 
@@ -129,7 +129,7 @@ def _as_rust_random_forest(estimator, ctx: Any, *, histogram: bool):
     return bound._bind_exact_backend()
 
 
-class _RustRandomForestPhysicalOp(RandomForestOp, RustPhysicalOp):
+class _RustRandomForestPhysicalOp(RandomForestOp):
     """Shared physical binding for the exact and histogram algorithm variants."""
     is_abstract = True
     histogram_backend = False
