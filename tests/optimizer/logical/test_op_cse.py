@@ -6,7 +6,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 import stratum as st
 from stratum.optimizer import apply_op_cse
-from stratum.optimizer._optimize import convert_to_ops
+from stratum.frontend._conversion import convert_to_ops
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
 from stratum.optimizer.logical._ops import (
     BinOp, ChoiceOp, GetItemOp, Op, OperandRef, OutputType)

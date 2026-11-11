@@ -17,6 +17,7 @@ import pandas as pd
 import polars as pl
 
 import stratum as st
+from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import AggExpr, BinOpExpr, Col, Const
@@ -156,7 +157,7 @@ def test_q1_matches_reference():
     """The skrubified query returns what the upstream query returns."""
     df = make_lineitem()
     expected = q1_reference(df)
-    result = st._api.evaluate(build_q1(df))
+    result = _api.evaluate(build_q1(df))
 
     assert list(expected.columns) == list(result.columns)
     pd.testing.assert_frame_equal(
@@ -174,7 +175,7 @@ def test_q1_prefix_runs_on_polars():
                           (1.0 - expected.l_discount) * (1.0 + expected.l_tax))
     expected["l_shipdate"] = pd.to_datetime(expected["l_shipdate"])
     with st.config(implementation_selector="greedy"):
-        result = st._api.evaluate(build_q1_prefix(df))
+        result = _api.evaluate(build_q1_prefix(df))
     assert isinstance(result, pl.DataFrame)
     pd.testing.assert_frame_equal(expected.reset_index(drop=True),
                                   result.to_pandas().reset_index(drop=True),
@@ -244,7 +245,7 @@ def test_q1_folds_the_named_aggregation(polars):
     if polars:
         assert isinstance(agg, PolarsAggregateOp)
 
-    result = st._api.evaluate(build_q1(df))
+    result = _api.evaluate(build_q1(df))
     result = result.to_pandas() if isinstance(result, pl.DataFrame) else result
     pd.testing.assert_frame_equal(q1_reference(df).reset_index(drop=True),
                                   result.reset_index(drop=True), check_dtype=False)

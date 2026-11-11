@@ -13,6 +13,7 @@ from sklearn.dummy import DummyRegressor
 from sklearn.model_selection import KFold
 
 import stratum as st
+from stratum.frontend import _api
 from stratum.optimizer._optimize import SearchConfig, optimize
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
 from stratum.optimizer.logical._ops import BaseEstimatorOp
@@ -101,7 +102,7 @@ class FitDeadCodeEliminationTest(unittest.TestCase):
     def test_post_processing_runs_once_per_fold_not_twice(self):
         """The tail's output is read only when the fold is scored, so the fitting pass
         does not run it. It used to run in both passes and be dropped unread in one."""
-        st._api.grid_search(self._pipeline(lambda p: p.skb.apply_func(_spy_tail)),
+        _api.grid_search(self._pipeline(lambda p: p.skb.apply_func(_spy_tail)),
                             scoring=SCORING)
         self.assertEqual(len(TAIL_CALLS), N_SPLITS)
 
@@ -117,7 +118,7 @@ class FitDeadCodeEliminationTest(unittest.TestCase):
         for op in tails:
             self.assertFalse(op.dead_in_fit, f"{op} would go unfitted")
 
-        st._api.grid_search(self._pipeline(
+        _api.grid_search(self._pipeline(
             lambda p: p.skb.apply(RecordingTail(), no_wrap=True)), scoring=SCORING)
         self.assertEqual(len(RecordingTail.FITS), N_SPLITS)
 

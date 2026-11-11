@@ -31,7 +31,7 @@ JOB = textwrap.dedent("""
     import sys, pathlib
     import numpy as np, pandas as pd
     import stratum as st
-    from stratum._api import evaluate
+    from stratum.frontend._api import evaluate
     from stratum.runtime._reuse_cache import active_reuse_cache
     from sklearn.linear_model import Ridge
     import helper
@@ -193,7 +193,7 @@ def test_a_call_travels_by_name_for_libraries_and_by_value_for_user_code(sales_c
     blob = dump_call(dag, {"cv": 3})
     assert b"pricing" in blob and b"read_csv" in blob
     # A process without the helper module loads it, and computes what this one does.
-    code = ("import pickle, sys; from stratum._api import grid_search;"
+    code = ("import pickle, sys; from stratum.frontend._api import grid_search;"
             "call = pickle.loads(sys.stdin.buffer.read());"
             "print(grid_search(call['dag'], scoring='r2', **call['kwargs']).results_"
             ".sort('id')['scores'].to_list())")

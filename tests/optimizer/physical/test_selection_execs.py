@@ -9,6 +9,7 @@ from pandas.testing import assert_frame_equal as assert_pandas_frame_equal
 from polars.testing import assert_frame_equal as assert_polars_frame_equal
 
 import stratum as st
+from stratum.frontend import _api
 from stratum._config import config
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._ops import OperandRef, OutputType
@@ -132,7 +133,7 @@ def test_series_selection_executes_in_greedy_plan(method):
 
     with config(implementation_selector="greedy"):
         ops, *_ = optimize(dag)
-        result = st._api.evaluate(dag)
+        result = _api.evaluate(dag)
 
     assert isinstance(result, pl.Series)
     expected_impl = (PolarsSeriesDropMissingSelectionOp if method == "dropna"
@@ -150,7 +151,7 @@ def test_series_drop_duplicates_keep_in_greedy_plan(keep):
     dag = data["x"].drop_duplicates(keep=keep)
 
     with config(implementation_selector="greedy"):
-        result = st._api.evaluate(dag)
+        result = _api.evaluate(dag)
 
     expected = frame["x"].drop_duplicates(keep=keep).reset_index(drop=True)
     pd.testing.assert_series_equal(result.to_pandas().reset_index(drop=True), expected,

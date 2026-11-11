@@ -18,6 +18,7 @@ from sklearn.metrics import accuracy_score, fbeta_score, make_scorer
 from sklearn.model_selection import KFold, StratifiedKFold
 
 import stratum as st
+from stratum.frontend import _api
 
 
 def _classification_frame(n=150):
@@ -71,7 +72,7 @@ class ScoringTest(unittest.TestCase):
 
     def assert_matches_skrub(self, make_pipeline, scoring):
         """The same plan, scored the same way, must report the same numbers as skrub."""
-        ours = st._api.grid_search(make_pipeline(), scoring=scoring)
+        ours = _api.grid_search(make_pipeline(), scoring=scoring)
         theirs = make_pipeline().skb.make_grid_search(fitted=True, scoring=scoring)
         np.testing.assert_allclose(theirs.results_["mean_test_score"],
                                    ours.results_["scores"], rtol=1e-9)
@@ -82,14 +83,14 @@ class ScoringTest(unittest.TestCase):
 
     def test_user_metric_is_called(self):
         """A callable is a metric, `f(y_true, y_pred)`, and gets the plan's values."""
-        ours = st._api.grid_search(self._classification_pipeline(), scoring=_my_accuracy)
-        theirs = st._api.grid_search(self._classification_pipeline(), scoring="accuracy")
+        ours = _api.grid_search(self._classification_pipeline(), scoring=_my_accuracy)
+        theirs = _api.grid_search(self._classification_pipeline(), scoring="accuracy")
         np.testing.assert_allclose(ours.results_["scores"], theirs.results_["scores"])
 
     def test_sklearn_style_scorer_is_refused(self):
         """`f(estimator, X, y)` needs a fitted estimator; a candidate is a sub-DAG."""
         with self.assertRaisesRegex(ValueError, "no estimator to pass one"):
-            st._api.grid_search(self._classification_pipeline(),
+            _api.grid_search(self._classification_pipeline(),
                                 scoring=_sklearn_style_scorer)
 
     def test_scorer_kwargs_are_applied(self):
@@ -97,7 +98,7 @@ class ScoringTest(unittest.TestCase):
         the metric's defaults."""
         beta2 = self.assert_matches_skrub(self._classification_pipeline,
                                           make_scorer(fbeta_score, beta=2))
-        beta1 = st._api.grid_search(self._classification_pipeline(),
+        beta1 = _api.grid_search(self._classification_pipeline(),
                                     scoring=make_scorer(fbeta_score, beta=1))
         self.assertNotAlmostEqual(beta2[0], beta1.results_["scores"][0], places=6)
 
@@ -112,7 +113,7 @@ class ScoringTest(unittest.TestCase):
         so a batch mixing estimator kinds would rank an accuracy against an R²."""
         for make in (self._regression_pipeline, self._mixed_kind_pipeline):
             with self.assertRaisesRegex(ValueError, "requires scoring="):
-                st._api.grid_search(make(), scoring=None)
+                _api.grid_search(make(), scoring=None)
 
     def test_make_grid_search_without_scoring_falls_back_to_skrub(self):
         """ADR 0002: a call real skrub accepts must not start failing under Stratum."""
@@ -140,19 +141,19 @@ class ScoringTest(unittest.TestCase):
     def test_multimetric_scoring_is_rejected(self):
         """One score per candidate is all the results table holds; say so."""
         with self.assertRaisesRegex(ValueError, "several metrics"):
-            st._api.grid_search(self._classification_pipeline(),
+            _api.grid_search(self._classification_pipeline(),
                                 scoring=["accuracy", "roc_auc"])
 
     def test_unknown_scorer_raises(self):
         with self.assertRaises(Exception) as caught:
-            st._api.grid_search(self._classification_pipeline(), scoring="not_a_metric")
+            _api.grid_search(self._classification_pipeline(), scoring="not_a_metric")
         self.assertIn("not_a_metric", str(caught.exception))
 
     def test_bare_metric_function_is_accepted(self):
         """`accuracy_score(y_true, y_pred)` is exactly what Stratum scores with. sklearn
         rejects it as "not a scorer"; here it is the plain case."""
-        ours = st._api.grid_search(self._classification_pipeline(), scoring=accuracy_score)
-        theirs = st._api.grid_search(self._classification_pipeline(), scoring="accuracy")
+        ours = _api.grid_search(self._classification_pipeline(), scoring=accuracy_score)
+        theirs = _api.grid_search(self._classification_pipeline(), scoring="accuracy")
         np.testing.assert_allclose(ours.results_["scores"], theirs.results_["scores"])
 
     def test_probability_metric_reaches_a_post_processed_plan(self):
@@ -166,7 +167,7 @@ class ScoringTest(unittest.TestCase):
         """A probability metric over a regressor is refused when the plan is built, not
         after a fold has been fitted."""
         with self.assertRaisesRegex(ValueError, "no single response provides"):
-            st._api.grid_search(self._regression_pipeline(), scoring="neg_log_loss")
+            _api.grid_search(self._regression_pipeline(), scoring="neg_log_loss")
 
     def test_native_metrics_match_sklearn(self):
         """Equivalence for every metric Stratum computes itself. Moving a metric into
@@ -179,9 +180,9 @@ class ScoringTest(unittest.TestCase):
                 theirs = _decompose(get_scorer(name), name=name)
                 pipeline = (self._classification_pipeline if name == "accuracy"
                             else self._regression_pipeline)
-                a = st._api.grid_search(pipeline(), scoring=name)
+                a = _api.grid_search(pipeline(), scoring=name)
                 self.assertEqual(mine.source, "stratum")
-                b = st._api.grid_search(pipeline(), scoring=theirs.fn)
+                b = _api.grid_search(pipeline(), scoring=theirs.fn)
                 np.testing.assert_allclose(a.results_["scores"],
                                            [theirs.sign * v for v in b.results_["scores"]],
                                            rtol=1e-12)
@@ -189,7 +190,7 @@ class ScoringTest(unittest.TestCase):
     def test_return_predictions_refuses_a_non_predict_metric(self):
         """The values a `roc_auc` pass produces are probabilities, not predictions."""
         with self.assertRaisesRegex(ValueError, "responses, not predictions"):
-            st._api.grid_search(self._classification_pipeline(), scoring="roc_auc",
+            _api.grid_search(self._classification_pipeline(), scoring="roc_auc",
                                 return_predictions=True)
 
     def test_score_is_taken_after_post_processing(self):
@@ -199,8 +200,8 @@ class ScoringTest(unittest.TestCase):
         scoring at the wrong point in the plan is visible in the number.
         """
         flipped = self._classification_pipeline().skb.apply_func(lambda p: 1 - np.asarray(p))
-        at_model = st._api.grid_search(self._classification_pipeline(), scoring="accuracy")
-        after_tail = st._api.grid_search(flipped, scoring="accuracy")
+        at_model = _api.grid_search(self._classification_pipeline(), scoring="accuracy")
+        after_tail = _api.grid_search(flipped, scoring="accuracy")
         self.assertAlmostEqual(after_tail.results_["scores"][0],
                                1 - at_model.results_["scores"][0], places=9)
 
@@ -244,7 +245,7 @@ class ScoringTest(unittest.TestCase):
         return pred.skb.with_scoring(scoring, kwargs=kwargs)
 
     def assert_declared_matches_skrub(self, make_pipeline):
-        ours = st._api.grid_search(make_pipeline())
+        ours = _api.grid_search(make_pipeline())
         theirs = make_pipeline().skb.make_grid_search(fitted=True)
         np.testing.assert_allclose(theirs.results_["mean_test_score"],
                                    ours.results_["scores"], rtol=1e-9)
@@ -308,7 +309,7 @@ class ScoringTest(unittest.TestCase):
                 def make():
                     dag = self._declared_pipeline("accuracy", lambda X, y: X["a"].abs())
                     return dag.skb.apply_func(np.asarray) if postprocess else dag
-                ours = st._api.grid_search(make(), scoring="roc_auc")
+                ours = _api.grid_search(make(), scoring="roc_auc")
                 theirs = make().skb.make_grid_search(fitted=True, scoring="roc_auc")
                 np.testing.assert_allclose(theirs.results_["mean_test_score"],
                                            ours.results_["scores"], rtol=1e-9)
@@ -321,7 +322,7 @@ class ScoringTest(unittest.TestCase):
         }
         for message, dag in cases.items():
             with self.subTest(message), self.assertRaisesRegex(ValueError, message):
-                st._api.grid_search(dag)
+                _api.grid_search(dag)
 
     def test_make_grid_search_uses_the_declared_metric(self):
         for postprocess in (False, True):
@@ -346,8 +347,8 @@ class ScoringTest(unittest.TestCase):
                 if postprocess:
                     plain = plain.skb.apply_func(np.asarray)
                     declared = declared.skb.apply_func(np.asarray)
-                np.testing.assert_array_equal(np.asarray(st._api.evaluate(plain)),
-                                              np.asarray(st._api.evaluate(declared)))
+                np.testing.assert_array_equal(np.asarray(_api.evaluate(plain)),
+                                              np.asarray(_api.evaluate(declared)))
 
 
 if __name__ == "__main__":

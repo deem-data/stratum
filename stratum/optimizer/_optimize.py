@@ -1,7 +1,4 @@
 from skrub._data_ops import DataOp
-from skrub._data_ops._data_ops import Apply
-from skrub._data_ops._subsampling import SubsamplePreviews
-from collections import deque
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -12,7 +9,7 @@ from .logical.rewrites._schema_propagation import propagate_output_schema
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .logical.rewrites._literal_inlining import literal_inlining
 from .logical._numeric_ops import extract_numeric_op
-from .logical._ops import Op, as_op, check_choices_not_shared
+from .logical._ops import Op
 from ._op_utils import show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
 from .logical.rewrites._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
@@ -24,33 +21,13 @@ from .physical.rewrites._reuse_planning import apply_reuse_cache
 from .physical._plan_context import PlanContext
 from .physical._lowering import lower_to_physical
 from .physical._impl_selection import (ImplementationSelector, get_implementation_selector, select_implementations)
-from stratum.frontend._skrub_graph import build_graph
+from stratum.frontend._conversion import convert_to_ops
 from stratum._config import FLAGS
 from stratum._profiler._diagnostics import capture_plan, diagnostics_enabled
 from stratum.utils._utils import start_time, log_time
 
 if TYPE_CHECKING:
     from stratum.runtime._reuse_cache import ReuseCache
-
-
-def topological_traverse(nodes, parents, children):
-    """ Compute a topological order of the DAG in skrub IR. """
-    # Compute in-degree (number of children for each node)
-    indegree = {n: len(children.get(n, [])) for n in nodes}
-
-    # Initialize queue with nodes having no children
-    queue = deque([n for n, deg in indegree.items() if deg == 0])
-    topo_order = []
-
-    while queue:
-        node = queue.popleft()
-        topo_order.append(node)
-        for parent in parents.get(node, []):
-            indegree[parent] -= 1
-            if indegree[parent] == 0:
-                queue.append(parent)
-
-    return topo_order
 
 
 @dataclass(frozen=True)
@@ -195,6 +172,7 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 
     # Convert to logical operator DAG
     root = convert_to_ops(dag_root, env)
+    _debug_show_graph(root, "conversion")
     if config.literal_inlining:
         root = literal_inlining(root)
 
@@ -315,70 +293,3 @@ def extract_numeric_operators(root):
     log_time("to_numeric took", start)
     _debug_show_graph(root, "numeric_rewrite")
     return root
-
-
-def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
-    """Convert a Skrub DataOp DAG to stratum's logical IR (Op DAG).
-
-    Single fused topological pass: ``as_op`` builds each op together with its
-    de-duplicated ``inputs`` list, operand references, and output edges. Inputs
-    are resolved through ``ids_to_ops`` (keyed by ``id(DataOp)``), which is
-    guaranteed populated because we walk in topological, inputs-first order.
-    """
-    start = start_time()
-    children, nodes, parents = get_dataops_graph(dag)
-    check_choices_not_shared(nodes.values())
-    order = topological_traverse(nodes, parents, children)
-    root_id = order[-1]
-    feeds_estimator = _apply_fed_nodes(nodes, parents, order)
-
-    # id(DataOp) -> Op. Keyed by DataOp identity (not the graph's node keys) so
-    # as_op's operand binder can resolve inputs found in the impl fields directly.
-    ids_to_ops = {}
-    # id(choice) -> ChoiceOp: one op per choice object, shared by all its uses.
-    choice_ops = {}
-    for node_key in order:
-        skrub_op = nodes[node_key]
-        impl = skrub_op._skrub_impl
-        if isinstance(impl, SubsamplePreviews):
-            # Drop the preview node: route its single input straight to consumers.
-            # Consumers reference this node's DataOp in their fields, so mapping it
-            # to the input op makes them wire to the input op directly.
-            input_key = children.get(node_key, [])[0]
-            ids_to_ops[id(skrub_op)] = ids_to_ops[id(nodes[input_key])]
-            continue
-        ids_to_ops[id(skrub_op)] = as_op(skrub_op, ids_to_ops, env,
-                                         feeds_estimator=node_key in feeds_estimator,
-                                         choice_ops=choice_ops)
-
-    root = ids_to_ops[id(nodes[root_id])]
-    log_time("conversion took", start)
-    _debug_show_graph(root, "conversion")
-    return root
-
-
-def _apply_fed_nodes(nodes: dict, parents: dict, order: list) -> set:
-    """Return node keys with a downstream `.skb.apply()` consumer.
-
-    An Apply feeding another Apply must transform or predict for that consumer
-    during response passes. Determine this dependency from all graph edges,
-    including estimator parameters. Unlike skrub's evaluation-time check, this
-    rule does not depend on traversal order when Apply and non-Apply paths share
-    a node.
-    """
-    fed = set()
-    for key in reversed(order):
-        if any(isinstance(nodes[p]._skrub_impl, Apply) or p in fed
-               for p in parents.get(key, ())):
-            fed.add(key)
-    return fed
-
-
-def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
-    start = start_time()
-    g = build_graph(dag)
-    nodes = g["nodes"]
-    parents = g["parents"]
-    children = g["children"]
-    log_time("Conversion dag took", start)
-    return children, nodes, parents

@@ -10,8 +10,9 @@ from sklearn.dummy import DummyRegressor
 from sklearn.preprocessing import StandardScaler
 from skrub._data_ops._data_ops import DataOp
 
+from stratum.frontend._conversion import OperandBinder, convert_to_ops
 from stratum.optimizer.logical._ops import (
-    OperandRef, OperandBinder, OutputType, BinOp, CallOp, ChoiceOp, DummyConfigManager,
+    OperandRef, OutputType, BinOp, CallOp, ChoiceOp, DummyConfigManager,
     GetAttrOp, GetItemOp, ImplOp, MethodCallOp, Op, ValueOp,
     VariableOp, check_estm_inputs, estimator_parallel_config,
     estm_supports_polars, process_estimator_task, process_transformer_task,
@@ -21,7 +22,7 @@ from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.logical._column_expr import BinOpExpr, Col, OperandLeaf
 from stratum.optimizer._op_utils import topological_iterator, validate_dag
-from stratum.optimizer._optimize import convert_to_ops, optimize as optimize_
+from stratum.optimizer._optimize import optimize as optimize_
 from stratum.optimizer.logical._map_ops import ApplyUDFOp, AssignOp
 from stratum.optimizer.physical._impl_selection import bind_op
 from stratum.optimizer.physical._plan_context import PlanContext

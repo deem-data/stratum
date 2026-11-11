@@ -242,7 +242,7 @@ class StratumClient:
     def grid_search(self, dag, cv=None, scoring=None, return_predictions=False, *,
                     config: dict | None = None, cwd: str | os.PathLike | None = None,
                     stdout=None, stderr=None):
-        """Grid-search ``dag`` on the server, as :func:`stratum._api.grid_search` would
+        """Grid-search ``dag`` on the server, as :func:`stratum.frontend._api.grid_search` would
         here. Returns its results table, and with ``return_predictions`` the
         predictions too.
 
@@ -257,7 +257,7 @@ class StratumClient:
 
     def evaluate(self, dag, seed: int = 42, test_size=0.2, *, config: dict | None = None,
                  cwd: str | os.PathLike | None = None, stdout=None, stderr=None):
-        """Evaluate ``dag`` on the server, as :func:`stratum._api.evaluate` would here:
+        """Evaluate ``dag`` on the server, as :func:`stratum.frontend._api.evaluate` would here:
         what a DAG without X and y computes (a query's table), else the predictions on
         a held-out split. ``config``, ``cwd``, ``stdout`` and ``stderr`` are as for
         :meth:`grid_search`."""

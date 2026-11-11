@@ -4,6 +4,7 @@ import unittest
 import pandas as pd
 import polars as pl
 import stratum as st
+from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, _aggregation_entries, _aggregation_params,
@@ -248,7 +249,7 @@ class TestGroupedSize(unittest.TestCase):
             for selector in ("default", "greedy"):
                 with self.subTest(name, selector=selector), \
                         config(implementation_selector=selector):
-                    got = st._api.evaluate(build(st.as_data_op(self.df)))
+                    got = _api.evaluate(build(st.as_data_op(self.df)))
                 if isinstance(expected, pd.Series):
                     pd.testing.assert_series_equal(got, expected)
                     continue

@@ -16,6 +16,7 @@ import pandas as pd
 import polars as pl
 
 import stratum as st
+from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import AggExpr, BinOpExpr, Col, Const
@@ -218,7 +219,7 @@ def test_q5_matches_reference(polars):
     """The skrubified query returns what the upstream query returns."""
     tables = make_q5_tables()
     expected = q5_reference(**tables)
-    result = st._api.evaluate(build_q5(**tables))
+    result = _api.evaluate(build_q5(**tables))
     if polars:
         assert isinstance(result, pl.DataFrame)
         result = result.to_pandas()
@@ -250,7 +251,7 @@ def test_q5_prefix_runs_on_polars():
     for column in ["o_orderdate", "l_shipdate"]:
         expected[column] = pd.to_datetime(expected[column])
     with st.config(implementation_selector="greedy"):
-        result = st._api.evaluate(build_q5_prefix(**tables))
+        result = _api.evaluate(build_q5_prefix(**tables))
     assert isinstance(result, pl.DataFrame)
     # Polars joins may reorder rows; this comparison checks contents, not pandas row order.
     pd.testing.assert_frame_equal(
@@ -314,7 +315,7 @@ def test_q5_folds_the_grouped_aggregation(polars):
     if polars:
         assert isinstance(agg, PolarsAggregateOp)
 
-    result = st._api.evaluate(build_q5(**tables))
+    result = _api.evaluate(build_q5(**tables))
     result = result.to_pandas() if isinstance(result, pl.DataFrame) else result
     pd.testing.assert_frame_equal(q5_reference(**tables).reset_index(drop=True),
                                   result.reset_index(drop=True), check_dtype=False)

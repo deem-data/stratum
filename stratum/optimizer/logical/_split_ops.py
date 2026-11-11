@@ -12,7 +12,8 @@ group labels in the plan so they are computed before splitting.
 
 from skrub._data_ops._estimator import _Splitter
 from sklearn.model_selection import check_cv
-from stratum.optimizer.logical._ops import OperandBinder, OperandRef, OutputType, Op, SplitXOp, _resolve_operand
+from stratum.frontend._conversion import OperandBinder
+from stratum.optimizer.logical._ops import OperandRef, OutputType, Op, SplitXOp, _resolve_operand
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.utils._utils import start_time, log_time
 import pandas as pd

@@ -8,9 +8,9 @@ from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 from skrub import ApplyToCols
 from stratum.frontend._api import evaluate
 from stratum.optimizer._op_utils import topological_iterator
-from stratum.optimizer._optimize import convert_to_ops
+from stratum.frontend._conversion import convert_to_ops, _iter_choices
 from stratum.optimizer.logical.rewrites._choice_unrolling import choice_unrolling
-from stratum.optimizer.logical._ops import ChoiceOp, GetItemOp, OperandRef, PredictorOp, TransformerOp, _iter_choices
+from stratum.optimizer.logical._ops import ChoiceOp, GetItemOp, OperandRef, PredictorOp, TransformerOp
 import numpy as np
 import pandas as pd
 import stratum as st

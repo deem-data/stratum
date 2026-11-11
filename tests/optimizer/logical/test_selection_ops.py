@@ -6,6 +6,7 @@ import pandas as pd
 import polars as pl
 
 import stratum as st
+from stratum.frontend import _api
 from stratum.optimizer.logical._ops import remap_operand_refs
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._dataframe_ops import (
@@ -673,7 +674,7 @@ def polars(request):
 def test_mask_pipeline_evaluates(df, polars):
         pred = st.as_data_op(df)
         pred = pred[pred["x"] > 2]
-        result = st._api.evaluate(pred)
+        result = _api.evaluate(pred)
         assert all(result["x"] > 2)
 
 def test_string_filter_pipeline_evaluates(df, polars):
@@ -681,7 +682,7 @@ def test_string_filter_pipeline_evaluates(df, polars):
     data = data.assign(s=["a1", "bb", "c2", "", "d1"])
     col_s_transformed = data["s"].apply(lambda s: "row_" + s)
     out = data[col_s_transformed.str.count("1") > 0]
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert len(result["x"]) == 2
 
 def test_complex_filter(df, polars):
@@ -691,7 +692,7 @@ def test_complex_filter(df, polars):
         col_s_transformed = data["s"].apply(lambda s: "row_" + s)
         predicate = (col_s_transformed.str.count("1") > 0) | ((data["x"] > 2) & (data["x"] <= 4)) | (data["y"] == 50)
         out = data[predicate]
-        result = st._api.evaluate(out)
+        result = _api.evaluate(out)
         assert len(result["x"]) == 4
 
 if __name__ == "__main__":

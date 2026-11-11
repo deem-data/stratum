@@ -74,7 +74,7 @@ def match_self_operation(op_cls, op_type):
     Counterpart to :func:`match_identity_operation` for the var-var case: instead
     of a constant operand it requires the optional operand to be an
     :class:`OperandRef` pointing back at input 0. ``x <op> x`` binds a single
-    de-duplicated input edge (see :class:`~stratum.optimizer.logical._ops.OperandBinder`),
+    de-duplicated input edge (see :class:`~stratum.frontend._conversion.OperandBinder`),
     so both operands resolving to ``inputs[0]`` is exactly the self-operation case.
     ``reversed`` is irrelevant here -- both sides are the same node.
     """

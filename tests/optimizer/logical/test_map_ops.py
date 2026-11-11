@@ -8,6 +8,7 @@ import polars as pl
 import skrub
 
 import stratum as st
+from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._map_ops import (
     ApplyUDFOp, AssignMapOp, AssignOp, AttributeReadOp, CallMapOp,
@@ -305,7 +306,7 @@ class TestMapStructureKey(unittest.TestCase):
             [data.assign(y=data["x"] * st.as_data_op(1.0))], axis=0)
         ops = optimize(root, OptConfig(dataframe_ops=True))
         self.assertEqual(2, len([o for o in ops if isinstance(o, AssignMapOp)]))
-        result = st._api.evaluate(root)
+        result = _api.evaluate(root)
         self.assertEqual([1.0, 2.0, 1.0, 2.0], list(result["y"]))
 
 
@@ -395,7 +396,7 @@ def test_assign_pipeline_evaluates(polars):
     src = st.as_data_op(df)
     date_col = src["c2"].skb.apply_func(pd.to_datetime)
     out = src.assign(c3=src["c1"] + 123, c4=date_col.dt.day, c5=date_col.dt.day)
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert [124, 125] == list(result["c3"])
     assert [1, 3] == list(result["c4"])
     assert [1, 3] == list(result["c5"])
@@ -408,7 +409,7 @@ def test_scalar_comparison_methods_fold_and_evaluate(polars):
     maps = [op for op in optimize(out) if isinstance(op, AssignMapOp)]
     assert len(maps) == 1
     assert all(isinstance(expr, BinOpExpr) for expr in maps[0].entries.values())
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert list(result["recent"]) == [True, True, False]
     assert list(result["category"]) == [True, False, True]
 
@@ -433,7 +434,7 @@ def test_chained_assign_maps_evaluate(polars):
     ops = optimize(d3, OptConfig(dataframe_ops=True))
     assert 3 == len([o for o in ops if isinstance(o, AssignMapOp)])
     assert 4 == len(ops)  # source + three maps
-    result = st._api.evaluate(d3)
+    result = _api.evaluate(d3)
     assert [2, 4, 6] == list(result["x2"])
     assert [4, 8, 12] == list(result["x4"])
     assert [8, 16, 24] == list(result["x8"])
@@ -445,7 +446,7 @@ def test_assign_overwrite_and_read_original_column(polars):
     df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
     src = st.as_data_op(df)
     out = src.assign(a=src["a"] * 10, doubled=src["a"] * 2)
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert [10.0, 20.0, 30.0] == list(result["a"])
     assert [2.0, 4.0, 6.0] == list(result["doubled"])
 
@@ -458,7 +459,7 @@ def test_deep_arithmetic_expression_evaluates(polars):
     out = src.assign(y=-((a + b) ** 2) / 3 + (a * b) % 5 + b // a)
     ops = optimize(out, OptConfig(dataframe_ops=True))
     assert 2 == len(ops)  # everything private folds: source + map
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     expected = -((df["a"] + df["b"]) ** 2) / 3 + (df["a"] * df["b"]) % 5 + df["b"] // df["a"]
     np.testing.assert_allclose(expected.to_numpy(),
                                np.asarray(list(result["y"]), dtype=float), rtol=1e-9)
@@ -468,7 +469,7 @@ def test_boolean_logic_expression_evaluates(polars):
     df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [3.0, 4.0, 5.0]})
     src = st.as_data_op(df)
     out = src.assign(flag=~((src["a"] > 2) | (src["b"] < 4)))
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert [False, True, False] == list(result["flag"])
 
 
@@ -481,7 +482,7 @@ def test_chained_string_methods_evaluate(polars):
                      n=src["s"].str.strip().str.len() * 10)
     ops = optimize(out, OptConfig(dataframe_ops=True))
     assert 2 == len(ops)
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert ["AB", "C", "DEF"] == list(result["up"])
     assert [20, 10, 30] == list(result["n"])
 
@@ -495,7 +496,7 @@ def test_datetime_feature_engineering_evaluates(polars):
                      day=date.dt.day)
     ops = optimize(out, OptConfig(dataframe_ops=True))
     assert 2 == len(ops)
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert [15, 47, 1] == list(result["months_since_2020"])
     assert [5, 20, 31] == list(result["day"])
 
@@ -515,7 +516,7 @@ def test_datetime_unsupported_kwargs_preserved(polars, values, kwargs, expected)
     df = pd.DataFrame({"ts": values})
     src = st.as_data_op(df)
     parsed = src["ts"].skb.apply_func(pd.to_datetime, **kwargs)
-    result = st._api.evaluate(src.assign(parsed=parsed))
+    result = _api.evaluate(src.assign(parsed=parsed))
     assert expected == [pd.Timestamp(value) for value in result["parsed"]]
 
 
@@ -528,7 +529,7 @@ def test_datetime_conversion_existing_datetime_polars():
     src = st.as_data_op(df)
     parsed = src["ts"].skb.apply_func(pd.to_datetime)
     with force_polars():
-        st._api.evaluate(src.assign(parsed=parsed))
+        _api.evaluate(src.assign(parsed=parsed))
 
 
 def test_weird_column_names_evaluate(polars):
@@ -537,7 +538,7 @@ def test_weird_column_names_evaluate(polars):
     src = st.as_data_op(df)
     out = src.assign(**{"new col": src["col with space"] * 2,
                         "größe²": src["größe"] ** 2})
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert [2, 4] == list(result["new col"])
     assert [9, 16] == list(result["größe²"])
 
@@ -546,7 +547,7 @@ def test_nan_propagation_evaluates(polars):
     # NaN flows through a folded arithmetic entry (polars may surface it as null).
     df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
     src = st.as_data_op(df)
-    result = st._api.evaluate(src.assign(y=src["a"] * 2 + 1))
+    result = _api.evaluate(src.assign(y=src["a"] * 2 + 1))
     values = list(result["y"])
     assert 3.0 == values[0] and 7.0 == values[2]
     assert values[1] is None or np.isnan(values[1])
@@ -563,7 +564,7 @@ def test_external_scalar_data_op_operand_folds_to_const(polars):
                   AssignMapOp)
     assert 1 == len(map_op.inputs)  # [src]
     assert BinOpExpr(operator.mul, Col("x"), Const(3)) == map_op.entries["scaled"]
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     assert [3, 6, 9] == list(result["scaled"])
 
 
@@ -579,7 +580,7 @@ def test_external_container_data_op_operand_stays_leaf(polars):
                   AssignMapOp)
     assert 2 == len(map_op.inputs)  # [src, factor]
     with st.config(implementation_selector="greedy" if polars else "default"):
-        result = st._api.evaluate(out)
+        result = _api.evaluate(out)
     assert [3, 6, 9] == list(result["scaled"])
 
 
@@ -587,7 +588,7 @@ def test_direct_external_scalar_operand_evaluates(polars):
     df = pd.DataFrame({"x": [1, 2, 3]})
     src = st.as_data_op(df)
     marker = st.as_data_op(7)
-    result = st._api.evaluate(src.assign(marker=marker))
+    result = _api.evaluate(src.assign(marker=marker))
     assert [7, 7, 7] == list(result["marker"])
 
 
@@ -611,7 +612,7 @@ def test_filter_then_assign_pipeline_evaluates(polars):
     for cls in (SelectionOp, AssignMapOp):
         assert 1 == len([o for o in ops if isinstance(o, cls)]), cls.__name__
 
-    result = st._api.evaluate(feat)
+    result = _api.evaluate(feat)
     assert [10.0, 90.0, 160.0] == list(result["total"])
     assert [1, 3, 4] == list(result["month"])
     assert ["a1", "c1", "d1"] == list(result["tag"])
@@ -626,7 +627,7 @@ def test_wide_assign_evaluates(polars):
     out = src.assign(**kwargs)
     ops = optimize(out, OptConfig(dataframe_ops=True))
     assert 2 == len(ops)
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     for i in range(8):
         assert [1 * i + 3, 2 * i + 4] == list(result[f"c{i}"]), f"c{i}"
     assert [-1, -1] == list(result["marker"])
@@ -657,7 +658,7 @@ def test_fillna_astype_pipeline_evaluates(polars):
     ops = optimize(out, OptConfig(dataframe_ops=True))
     assert not any(isinstance(op, ColumnMethodOp) for op in ops)
 
-    result = st._api.evaluate(out)
+    result = _api.evaluate(out)
     np.testing.assert_array_equal(
         np.asarray(list(result["x"]), dtype=np.float32),
         np.asarray([1.0, 0.0, 3.0], dtype=np.float32),
@@ -938,7 +939,7 @@ _MISSING = pd.DataFrame({"a": [0.0, 1.0, np.nan, 4.0], "b": [0.0, 2.0, 1.0, None
 def _evaluate_on_polars(plan):
     """Run ``plan`` end to end, where greedy picks the native polars impls."""
     with st.config(scheduler=True, implementation_selector="greedy"):
-        result = st._api.evaluate(plan)
+        result = _api.evaluate(plan)
     assert isinstance(result, (pl.Series, pl.DataFrame))
     return result.to_pandas()
 
@@ -1334,7 +1335,7 @@ def test_untranslated_dt_attribute_falls_back_to_pandas(column, attr, path):
     # polars refuses it at plan time.
     dag, expected = _pandas_only_dt_plan(column, attr, path)
     with st.config(scheduler=True, implementation_selector="greedy"):
-        result = st._api.evaluate(dag)
+        result = _api.evaluate(dag)
     if isinstance(result, (pl.Series, pl.DataFrame)):
         result = result.to_pandas()
     if path == "accessor":
@@ -1379,7 +1380,7 @@ def test_dt_method_call_falls_back_to_pandas(method, args):
     # pandas if polars refuses the bare `.dt` namespace at plan time.
     dag, expected = _dt_method_plan(method, args)
     with st.config(scheduler=True, implementation_selector="greedy"):
-        result = st._api.evaluate(dag)
+        result = _api.evaluate(dag)
     if isinstance(result, pl.Series):
         result = result.to_pandas()
     assert expected.tolist() == result.tolist()
@@ -1451,7 +1452,7 @@ def test_pandas_only_attribute_falls_back_to_pandas(name):
     # polars refuses it at plan time.
     dag, expected = _pandas_only_attr_plan(name)
     with st.config(scheduler=True, implementation_selector="greedy"):
-        result = st._api.evaluate(dag)
+        result = _api.evaluate(dag)
     _assert_same_pandas_value(expected, result)
 
 

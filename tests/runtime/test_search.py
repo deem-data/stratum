@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import pytest
 import stratum as st
+from stratum.frontend import _api
 import logging
 import re
 
@@ -60,7 +61,7 @@ class SearchTest(RuntimeTest):
         y = st.choose_from({"pipeline 1": y1, "pipeline 2": y2}).as_data_op()
 
         cv = KFold(n_splits=3, shuffle=True, random_state=42)
-        search_stratum, preds = st._api.grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
+        search_stratum, preds = _api.grid_search(y, cv=cv, scoring="neg_mean_squared_error", return_predictions=True)
 
         search = y.skb.make_grid_search(cv=cv, fitted=True,scoring="neg_mean_squared_error")
         assert(np.allclose(search.results_["mean_test_score"], search_stratum.results_["scores"]))
@@ -73,7 +74,7 @@ class SearchTest(RuntimeTest):
 
         try:
             with st.config(stats=True):
-                st._api.grid_search(end, scoring="neg_mean_squared_error", return_predictions=True)
+                _api.grid_search(end, scoring="neg_mean_squared_error", return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
             self.assertEqual("X and y nodes not found in the DAG",str(e))
@@ -84,7 +85,7 @@ class SearchTest(RuntimeTest):
 
         try:
             with st.config(stats=True):
-                st._api.grid_search(end, scoring="neg_mean_squared_error", return_predictions=True)
+                _api.grid_search(end, scoring="neg_mean_squared_error", return_predictions=True)
             self.fail("Expected RuntimeError")
         except RuntimeError as e:
             self.assertEqual("X and y nodes not found in the DAG",str(e))
@@ -96,7 +97,7 @@ class SearchTest(RuntimeTest):
         y = data["y"].skb.mark_as_y()
         X = X + st.choose_from([0,1]).as_data_op()
         pred = X.skb.apply(DummyRegressor(), y=y)
-        st._api.grid_search(pred, scoring="neg_mean_squared_error")
+        _api.grid_search(pred, scoring="neg_mean_squared_error")
 
     def test_search_choice_not_at_the_end2(self):
         data = st.as_data_op(self.df)
@@ -119,7 +120,7 @@ class SearchTest(RuntimeTest):
         pred = X.skb.apply(InputCheckEstimator(), y=y)
         # InputCheckEstimator has no `score`, so (as under skrub) the metric has to be
         # named: `scoring=None` would have nothing to fall back on.
-        st._api.grid_search(pred, scoring="neg_mean_squared_error")
+        _api.grid_search(pred, scoring="neg_mean_squared_error")
 
     def test_search_error_during_dataop_processing(self):
         data = st.as_data_op(self.df)
@@ -128,7 +129,7 @@ class SearchTest(RuntimeTest):
         y = y.skb.apply_func(lambda a, m: (a, print(m))[0] if m != 'predict' else int("grr"), st.eval_mode())
         pred = X.skb.apply(DummyRegressor(), y=y)
         try:
-            st._api.grid_search(pred, scoring="neg_mean_squared_error")
+            _api.grid_search(pred, scoring="neg_mean_squared_error")
             self.fail("Expected RunTimeError")
         except RuntimeError as e:
             self.assertTrue(e.args[0].startswith("[predict] Error processing 'CallExec(<lambda>)': invalid literal for int() with base 10: 'grr'"))
@@ -144,7 +145,7 @@ class SearchTest(RuntimeTest):
         pred = X2.skb.apply(DummyRegressor(), y=y)
         # capture stdout
         with redirect_stdout(StringIO()) as stdout, st.config(stats=True, stats_top_k=1):
-            st._api.grid_search(pred, scoring="neg_mean_squared_error", return_predictions=False)
+            _api.grid_search(pred, scoring="neg_mean_squared_error", return_predictions=False)
         out = stdout.getvalue()
         def seconds(label):
             match = re.search(rf"^\s*{label}:\s+([\d.]+)$", out, re.MULTILINE)
@@ -175,7 +176,7 @@ class SearchTest(RuntimeTest):
         X = X.assign(year=date.dt.year)
         X = X.drop(columns=["datetime"])
         pred = X.skb.apply(DummyRegressor(), y=y)
-        st._api.grid_search(pred, scoring="neg_mean_squared_error")
+        _api.grid_search(pred, scoring="neg_mean_squared_error")
 
 
 class RefusesRefitParams(ClassifierMixin, BaseEstimator):
@@ -218,7 +219,7 @@ class ChoiceSearchTest(unittest.TestCase):
     def _assert_matches_skrub(self, pred, n_candidates):
         expected = pred.skb.make_grid_search(fitted=True, refit=False, scoring="accuracy").results_
         with config(scheduler=True):
-            results = st._api.grid_search(dag=pred, cv=None, scoring="accuracy").results_
+            results = _api.grid_search(dag=pred, cv=None, scoring="accuracy").results_
         self.assertEqual(len(results), n_candidates)
         self.assertEqual(len(expected), n_candidates)
         # Both are sorted by score, but ties may be ordered differently.
@@ -405,7 +406,7 @@ class CrossValidationSplitterTest(unittest.TestCase):
     def test_stratified_cv_gets_y(self):
         """A stratified splitter needs the labels; passing X only raised TypeError."""
         cv = StratifiedKFold(n_splits=3)
-        sched = st._api.grid_search(self._classification_pipeline(),
+        sched = _api.grid_search(self._classification_pipeline(),
                                     cv=cv, scoring="accuracy")
 
         search = self._classification_pipeline().skb.make_grid_search(
@@ -432,7 +433,7 @@ class CrossValidationSplitterTest(unittest.TestCase):
         """skrub's precedence: an explicit splitter wins over the declared one."""
         declared = CountingKFold(n_splits=3)
         pred = self._classification_pipeline(cv=declared, split_kwargs={})
-        st._api.grid_search(pred, cv=StratifiedKFold(n_splits=2), scoring="accuracy")
+        _api.grid_search(pred, cv=StratifiedKFold(n_splits=2), scoring="accuracy")
         self.assertEqual(declared.calls, 0)
 
     def test_declared_split_kwargs_reach_the_splitter(self):
@@ -440,7 +441,7 @@ class CrossValidationSplitterTest(unittest.TestCase):
         groups = np.arange(len(self.df)) % 3
         pred = self._classification_pipeline(cv=GroupKFold(n_splits=3),
                                              split_kwargs={"groups": groups})
-        sched = st._api.grid_search(pred, scoring="accuracy")
+        sched = _api.grid_search(pred, scoring="accuracy")
 
         search = self._classification_pipeline(
             cv=GroupKFold(n_splits=3), split_kwargs={"groups": groups},
@@ -474,7 +475,7 @@ class PlanComputedSplitterTest(unittest.TestCase):
 
     def _assert_matches_skrub(self, pred, cv=None):
         with config(scheduler=True):
-            sched = st._api.grid_search(pred, cv=cv, scoring="accuracy")
+            sched = _api.grid_search(pred, cv=cv, scoring="accuracy")
         self.assertEqual(_LOADS["n"], 1)
         expected = pred.skb.make_grid_search(cv=cv, fitted=True, refit=False,
                                              scoring="accuracy")
@@ -485,7 +486,7 @@ class PlanComputedSplitterTest(unittest.TestCase):
         self._assert_matches_skrub(self._plan(GroupKFold(n_splits=3)))
 
     def test_x_mark_is_removed_without_splitting_other_source_consumers(self):
-        from stratum.optimizer._optimize import convert_to_ops
+        from stratum.frontend._conversion import convert_to_ops
         from stratum.optimizer.logical._ops import SplitXOp
         from stratum.optimizer.logical._split_ops import BuildSplitterOp, SplitOp, add_splitting_op
         from stratum.optimizer._op_utils import topological_iterator, validate_dag
