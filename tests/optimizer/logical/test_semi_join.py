@@ -6,7 +6,7 @@ import polars as pl
 
 import stratum as st
 from stratum.optimizer._optimize import OptConfig
-from stratum.optimizer.logical.rewrites._relational import promote_isin_to_filtering_join
+from stratum.optimizer.logical.rewrites._relational_rewrites import promote_isin_to_filtering_join
 from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
 from stratum.optimizer.logical._ops import Op, OutputType
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp

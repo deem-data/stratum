@@ -9,7 +9,8 @@ from skrub import ApplyToCols
 from skrub._utils import PassThrough
 from stratum._api import evaluate
 from stratum.optimizer._op_utils import topological_iterator
-from stratum.optimizer._optimize import choice_unrolling, convert_to_ops
+from stratum.optimizer._optimize import convert_to_ops
+from stratum.optimizer.logical.rewrites._choice_unrolling import choice_unrolling
 from stratum.optimizer.logical._ops import ChoiceOp, GetItemOp, OperandRef, PredictorOp, TransformerOp, _iter_choices
 import numpy as np
 import pandas as pd

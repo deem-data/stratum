@@ -1,7 +1,7 @@
 import unittest
 
 from tests.runtime.runtime_test_utils import _make_linear_dag, _make_diamond_dag, _make_op
-from stratum.optimizer._input_removal_planning import plan_input_removals
+from stratum.optimizer.physical.rewrites._input_removal_planning import plan_input_removals
 
 
 def _plan_remove_schedule(ops, split_pos, flagged_ops, pinned_ops=None):

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from stratum._profiler._diagnostics import current_diagnostics, record_reuse_plan
 from stratum.optimizer._lineage import compute_lineage_keys
-from stratum.optimizer._linearization import is_recomputed
+from stratum.optimizer.physical.rewrites._linearization import is_recomputed
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.logical._ops import ValueOp

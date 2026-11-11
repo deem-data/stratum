@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from stratum.optimizer.logical.rewrites._numeric import (
+from stratum.optimizer.logical.rewrites._numeric_rewrites import (
     eliminate_exp_log,
     eliminate_expm1_log1p,
     eliminate_log_exp,

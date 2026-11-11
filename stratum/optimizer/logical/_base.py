@@ -153,7 +153,8 @@ def remap_operand_refs(value, mapping: dict):
 
     Recurses tuples/lists/dicts/slices and column-expression trees (anything exposing a
     ``remap_operand_refs`` method, e.g. a ``ColumnExpr`` predicate). This is the
-    single walker shared by CSE edge de-duplication (``rewrites._cse``) and
+    single walker shared by CSE edge de-duplication
+    (``rewrites._common_subexpression_elimination``) and
     :meth:`IRNode._dedupe_input_refs`, so both renumber refs identically --
     including refs buried inside a ``ColumnExpr`` field.
     """
@@ -299,7 +300,8 @@ class IRNode:
         #: Set by reuse planning: admit this result under its lineage key.
         self.cache_key: str | None = None
         #: A retained cached value replaces execution; the op then has no inputs.
-        #: See _reuse_planning.CacheHit for the one-time handoff to the scheduler.
+        #: See physical.rewrites._reuse_planning.CacheHit for the one-time
+        #: handoff to the scheduler.
         self.cache_hit = None
 
     def propagate_output_schema(self):
@@ -412,8 +414,9 @@ class IRNode:
 
         Such ops (ChoiceOp outcomes, ImplOp's cached ``operand_index``) must never
         have two input slots collapsed into one by edge de-duplication -- their
-        slots are kept distinct instead. Shared with ``rewrites._cse._can_merge`` so the
-        two dedup paths treat the same op types as un-collapsible.
+        slots are kept distinct instead. Shared with
+        ``rewrites._common_subexpression_elimination._can_merge`` so the two
+        dedup paths treat the same op types as un-collapsible.
         """
         return False
 

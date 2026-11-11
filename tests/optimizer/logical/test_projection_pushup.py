@@ -9,7 +9,8 @@ import polars as pl
 import pytest
 
 import stratum as st
-from stratum.optimizer._optimize import OptConfig, logical_optimize, propagate_output_schema
+from stratum.optimizer._optimize import OptConfig, logical_optimize
+from stratum.optimizer.logical.rewrites._schema_propagation import propagate_output_schema
 from stratum.optimizer.logical._column_expr import BinOpExpr, Col, Const
 from stratum.optimizer.logical._map_ops import AssignMapOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, DropOp

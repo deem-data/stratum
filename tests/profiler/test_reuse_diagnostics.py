@@ -7,7 +7,7 @@ import pytest
 
 import stratum as st
 from stratum import _api
-from stratum.optimizer import _reuse_planning
+from stratum.optimizer.physical.rewrites import _reuse_planning
 from stratum.runtime import _buffer_pool, _reuse_cache
 from tests.optimizer.test_reuse_planning import features, model
 from tests.profiler.test_diagnostics import artifact, fail

@@ -1,7 +1,8 @@
 #from curses import flash
 import unittest
 import stratum as st
-from stratum.optimizer._optimize import optimize as optimize_, OptConfig, choice_unrolling, convert_to_ops
+from stratum.optimizer._optimize import optimize as optimize_, OptConfig, convert_to_ops
+from stratum.optimizer.logical.rewrites._choice_unrolling import choice_unrolling
 from stratum.optimizer._op_utils import (
     show_graph, clone_sub_dag, topological_iterator, validate_operands,
     validate_dag, compute_graph_node_indegree, FLAGS,

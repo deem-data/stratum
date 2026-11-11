@@ -1,36 +1,33 @@
-from skrub._data_ops._evaluation import _Graph
 from skrub._data_ops import DataOp
 from skrub._data_ops._data_ops import Apply
 from skrub._data_ops._subsampling import SubsamplePreviews
-from collections import deque, defaultdict
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from .logical.rewrites._cse import apply_op_cse
+from .logical.rewrites._common_subexpression_elimination import apply_op_cse
+from .logical.rewrites._candidate_construction import install_candidate_set
+from .logical.rewrites._choice_unrolling import choice_unrolling
+from .logical.rewrites._schema_propagation import propagate_output_schema
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .logical.rewrites._literal_inlining import literal_inlining
 from .logical._numeric_ops import extract_numeric_op
-from .logical._candidate_ops import CollectCandidatesOp, DeclaredScoringOp, ScoreCandidatesOp
-from .logical._ops import BaseEstimatorOp, ChoiceOp, Op, OperandRef, as_op, check_choices_not_shared, remap_operand_refs
-from .logical._split_ops import SplitOutput
+from .logical._ops import Op, as_op, check_choices_not_shared
 from ._op_utils import show_graph, topological_iterator, validate_dag
 from ._explain import explain_linear_plan
-from .logical.rewrites._algebraic import algebraic_rewrites, AlgebraicRewritesConfig
-from .logical.rewrites._relational import relational_rewrites
-from ._linearization import linearize_dag
-from ._dead_code_elimination import mark_dead_ops_during_fit
-from ._input_removal_planning import compute_pinned_ops, plan_input_removals
-from ._reuse_planning import apply_reuse_cache
+from .logical.rewrites._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
+from .logical.rewrites._relational_rewrites import relational_rewrites
+from .physical.rewrites._linearization import linearize_dag
+from .physical.rewrites._dead_code_elimination import mark_dead_ops_during_fit
+from .physical.rewrites._input_removal_planning import compute_pinned_ops, plan_input_removals
+from .physical.rewrites._reuse_planning import apply_reuse_cache
 from .physical._plan_context import PlanContext
 from .physical._lowering import lower_to_physical
 from .physical._impl_selection import (ImplementationSelector, get_implementation_selector, select_implementations)
 from stratum.frontend._skrub_graph import build_graph
-import logging
 from stratum._config import FLAGS
 from stratum._profiler._diagnostics import capture_plan, diagnostics_enabled
 from stratum.utils._utils import start_time, log_time
-
-logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from stratum.runtime._reuse_cache import ReuseCache
@@ -222,6 +219,7 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
     # Unrolling of choices to a dag with only a single ChoiceOp at the end
     if config.unroll_choices:
         root = choice_unrolling(root)
+        _debug_show_graph(root, "unrolled")
 
     # Final logical DAG
     if config.algebraic_rewrites:
@@ -320,23 +318,6 @@ def extract_numeric_operators(root):
     return root
 
 
-def propagate_output_schema(root, check: bool = False):
-    """Propagate each op's output schema from its inputs, bottom-up.
-
-    With ``check``, compare each existing schema to the recomputed one to detect
-    stale schema metadata left by a rewrite. Skip comparisons for missing schemas.
-    """
-    start = start_time()
-    for op in topological_iterator(root):
-        before = op.output_schema
-        op.propagate_output_schema()
-        if check and before is not None and before != op.output_schema:
-            raise AssertionError(
-                f"stale output schema on {op!r}: {before} was set, but its inputs "
-                f"give {op.output_schema}")
-    log_time("schema_propagation took", start)
-
-
 def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
     """Convert a Skrub DataOp DAG to stratum's logical IR (Op DAG).
 
@@ -394,167 +375,6 @@ def _apply_fed_nodes(nodes: dict, parents: dict, order: list) -> set:
     return fed
 
 
-def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
-    """Terminate the plan in a candidate-set operator.
-
-    Replace the sink `ChoiceOp` left by unrolling with explicit candidate inputs
-    and labels. For a plan without choices, append a candidate-set operator with
-    one input so the runtime uses the same result representation.
-    """
-    start = start_time()
-    fold = _split_outputs(root)
-    if fold is None:
-        # Without a split, evaluate returns the final operator result;
-        # grid_search requires X/y markers.
-        return root
-    replacing = isinstance(root, ChoiceOp)
-    names = root.make_outcome_names() if replacing else ["default"]
-    candidates = list(root.inputs) if replacing else [root]
-    # Postprocessing may follow the declaration of the plan's shared metric.
-    # Unrolling can clone that declaration, so retain its kwargs bindings for
-    # each candidate while still scoring the candidate's final output.
-    declarations = _scoring_declarations(root)
-    declared = [declarations[c] for c in candidates]
-
-    if search is None or search.metric is None:
-        node = CollectCandidatesOp(names)
-    else:
-        mode = _response_mode(search.metric, names, candidates)
-        if search.return_predictions and mode != "predict":
-            raise ValueError(
-                f"return_predictions=True cannot be honoured with scoring="
-                f"{search.metric.name!r}: that metric reads `{mode}`, so the values this"
-                " plan produces are responses, not predictions. Ask for one or the other."
-            )
-        node = ScoreCandidatesOp(names, search.metric, response_mode=mode,
-                                 emit_predictions=search.return_predictions)
-    node.inputs = list(candidates)
-    for candidate in candidates:
-        if replacing:
-            # The choice is the root, so it is the only consumer being redirected. A
-            # rebuild rather than `replace_output` because one operator may fill two
-            # candidate slots and therefore be redirected twice.
-            candidate.outputs = [node if out is root else out
-                                 for out in candidate.outputs]
-        else:
-            candidate.add_output(node)
-
-    if isinstance(node, ScoreCandidatesOp):
-        _, y_op = fold
-        node.y_ref = OperandRef(node.add_input(y_op))
-        y_op.add_output(node)
-        if search.declared_kwargs:
-            if any(d is None for d in declared):
-                raise ValueError(
-                    "not every candidate contains `.skb.with_scoring()`, so the declared"
-                    " scorer cannot score them all. Pass `scoring=` instead.")
-            node.kwargs_refs = [_rebind(d.scorers[0]["kwargs"], d.inputs, node)
-                                for d in declared]
-    for d in dict.fromkeys(declared):
-        if d is not None:
-            # Bypass the metadata wherever it occurs, keeping postprocessing and
-            # the scorer's kwargs alive before pruning the declaration.
-            pred = d.inputs[0]
-            for out in d.outputs:
-                while any(in_ is d for in_ in out.inputs):
-                    out.replace_input(d, pred)
-                # Positional candidate slots may now share one producer. Keep
-                # one reverse edge per slot for the topological indegree count.
-                pred.outputs = [o for o in pred.outputs if o is not out]
-                pred.outputs.extend(out for in_ in out.inputs if in_ is pred)
-            d.detach_and_prune()
-    log_time("installing the candidate set took", start)
-    return node
-
-
-def _scoring_declarations(root: Op) -> dict[Op, DeclaredScoringOp | None]:
-    """Propagate the shared scoring declaration through downstream operators.
-
-    Walk the graph once, including when several candidates share its upstream
-    nodes. The metric itself is already resolved in SearchConfig.
-    """
-    declarations = {}
-    for op in topological_iterator(root):
-        declarations[op] = op if isinstance(op, DeclaredScoringOp) else next(
-            (declarations[in_] for in_ in op.inputs if declarations[in_] is not None), None)
-    return declarations
-
-
-def _rebind(value, operands: list[Op], consumer: Op):
-    """``value`` with its OperandRefs into ``operands`` re-pointed at inputs of ``consumer``."""
-    mapping = {}
-    for k in _referenced(value):
-        if k not in mapping:
-            mapping[k] = consumer.add_input(operands[k])
-            operands[k].add_output(consumer)
-    return remap_operand_refs(value, mapping)
-
-
-def _referenced(value):
-    """The operand indices ``value`` refers to, through nested tuples, lists and dicts."""
-    if isinstance(value, OperandRef):
-        yield value.k
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            yield from _referenced(v)
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _referenced(v)
-
-
-def _response_mode(metric, names: list[str], candidates: list[Op]) -> str:
-    """Select a response method supported by every candidate in the scoring pass.
-
-    - Try the metric's response methods in preference order. For example,
-      `roc_auc` accepts decision scores or probabilities.
-    - Accept `predict` for any candidate, including a precomputed prediction DAG.
-      Other responses require a compatible estimator in each candidate.
-    - Raise when no common response method is available, before executing folds.
-    """
-    estimators = [_last_estimator(c) for c in candidates]
-    for response in metric.response_method:
-        if response == "predict" or all(e is not None and response in e.supported_modes
-                                        for e in estimators):
-            return response
-    wanted = " or ".join(metric.response_method)
-    cannot = [name for name, e in zip(names, estimators)
-              if e is None or not set(metric.response_method) & e.supported_modes]
-    raise ValueError(
-        f"scoring={metric.name!r} reads {wanted}, which no single response provides for"
-        f" every candidate in this plan: {', '.join(cannot)} cannot produce it. Use a"
-        " metric that reads predictions, or a model that provides what this one needs."
-    )
-
-
-def _last_estimator(op: Op) -> BaseEstimatorOp | None:
-    """The estimator nearest the end of a candidate's path, or None if it has none.
-
-    Search input edges breadth-first, allowing for post-processing after an estimator.
-    """
-    seen, queue = set(), [op]
-    while queue:
-        node = queue.pop(0)
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        if isinstance(node, BaseEstimatorOp):
-            return node
-        queue.extend(node.inputs)
-    return None
-
-
-def _split_outputs(root: Op) -> tuple[Op, Op] | None:
-    """The plan's X and y split outputs, or None when the plan has no split op."""
-    for op in topological_iterator(root):
-        if not op.is_split_op:
-            continue
-        x = next((o for o in op.outputs if isinstance(o, SplitOutput) and o.is_x), None)
-        y = next((o for o in op.outputs if isinstance(o, SplitOutput) and not o.is_x), None)
-        assert x is not None and y is not None, f"split op {op} without both outputs"
-        return x, y
-    return None
-
-
 def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
     start = start_time()
     g = build_graph(dag)
@@ -563,88 +383,3 @@ def get_dataops_graph(dag: DataOp) -> tuple[dict, dict, dict]:
     children = g["children"]
     log_time("Conversion dag took", start)
     return children, nodes, parents
-
-
-def choice_unrolling(root: Op):
-    """Unroll the choices into one candidate sub-dag per grid point.
-
-    The result ends in a single ChoiceOp whose inputs are the candidates: the root if
-    it is a choice already, otherwise one appended over the root. Choices are unrolled
-    downstream-first, so the region a choice copies never holds another choice, and
-    choices on different branches multiply into their Cartesian product. A candidate a
-    choice does not reach is kept as is: as in skrub's grid, a choice nested in one
-    outcome of another only varies when that outcome is taken.
-    """
-    start = start_time()
-    choices = [op for op in topological_iterator(root) if op.is_choice() and op is not root]
-    if choices:
-        if root.is_choice():
-            sink = root
-        else:
-            sink = ChoiceOp(outcome_names=[[]], append_choice_name=False, inputs=[root])
-            root.add_output(sink)
-        for choice in reversed(choices):
-            logger.debug(f"Unrolling choice: {choice}")
-            unroll_choice(choice, sink)
-        sink.update_name()
-        root = sink
-    log_time("unrolled took", start)
-    _debug_show_graph(root, "unrolled")
-    return root
-
-
-def unroll_choice(choice: ChoiceOp, sink: ChoiceOp):
-    """Replace ``choice`` by one copy of the region downstream of it per outcome.
-
-    The region (every op between ``choice`` and ``sink``) must hold no other choice.
-    The first outcome reuses the region, the others get clones. Each candidate of
-    ``sink`` the region reaches becomes one candidate per outcome, named with the
-    outcome's name in front of its own; the other candidates are kept as they are.
-    """
-    region, reached = [], {choice}
-    for op in topological_iterator(sink):
-        if op is not sink and any(in_ in reached for in_ in op.inputs):
-            assert not op.is_choice(), "choices must be unrolled downstream-first"
-            reached.add(op)
-            region.append(op)
-
-    outcomes = list(choice.inputs)
-    copies = [{choice: outcome} for outcome in outcomes]
-    # Clone before the region is rewired below, so clones still see the choice.
-    for k in range(1, len(outcomes)):
-        copy = copies[k]
-        for op in region:
-            clone = op.clone()
-            clone.inputs = [in_ if in_ is choice else copy.get(in_, in_) for in_ in op.inputs]
-            _replace_choice_input(clone, choice, outcomes[k])
-            for in_ in dict.fromkeys(clone.inputs):
-                in_.add_output(clone)
-            copy[op] = clone
-    for op in region:
-        copies[0][op] = op
-        if _replace_choice_input(op, choice, outcomes[0]):
-            outcomes[0].add_output(op)
-    choice.detach()
-
-    names, candidates = [], []
-    for copy, outcome_name in zip(copies, choice.outcome_names):
-        for name, candidate in zip(sink.outcome_names, sink.inputs):
-            if candidate in copy:
-                names.append(outcome_name + name)
-                candidates.append(copy[candidate])
-            elif copy is copies[0]:
-                names.append(name)
-                candidates.append(candidate)
-    sink.outcome_names = names
-    sink.inputs = candidates
-    for candidate in candidates:
-        candidate.add_output(sink)
-
-
-def _replace_choice_input(op: Op, choice: ChoiceOp, outcome: Op) -> bool:
-    """Replace every input edge of ``op`` from ``choice`` by one from ``outcome``."""
-    replaced = False
-    while any(in_ is choice for in_ in op.inputs):
-        op.replace_input(choice, outcome)
-        replaced = True
-    return replaced

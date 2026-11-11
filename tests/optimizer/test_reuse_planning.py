@@ -10,12 +10,12 @@ from skrub._data_ops._data_ops import EvalMode
 
 import stratum as st
 from stratum.frontend._skrub_graph import get_data
-from stratum.optimizer._input_removal_planning import compute_pinned_ops
+from stratum.optimizer.physical.rewrites._input_removal_planning import compute_pinned_ops
 from stratum.optimizer._lineage import compute_lineage_keys
-from stratum.optimizer._linearization import is_recomputed, linearize_dag
+from stratum.optimizer.physical.rewrites._linearization import is_recomputed, linearize_dag
 from stratum.optimizer._op_utils import topological_iterator, validate_dag, validate_operands
 from stratum.optimizer._optimize import OptConfig, optimize
-from stratum.optimizer._reuse_planning import (
+from stratum.optimizer.physical.rewrites._reuse_planning import (
     CacheHit, apply_reuse_cache, cacheable_region, post_split_region)
 from stratum.optimizer.logical._base import OperandRef
 from stratum.optimizer.logical._ops import ImplOp, ValueOp

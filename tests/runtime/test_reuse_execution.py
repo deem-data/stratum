@@ -9,7 +9,7 @@ import pytest
 import stratum as st
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import OptConfig, SearchConfig, optimize
-from stratum.optimizer._reuse_planning import CacheHit
+from stratum.optimizer.physical.rewrites._reuse_planning import CacheHit
 from stratum.optimizer.logical._scoring import resolve_scoring
 from stratum.optimizer.physical._impl_selection import FlagBasedSelector
 from stratum.optimizer.physical._physical_ops import PhysicalOp
