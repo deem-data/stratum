@@ -16,7 +16,7 @@ from .logical.rewrites._algebraic_rewrites import algebraic_rewrites, AlgebraicR
 from .logical.rewrites._relational_rewrites import relational_rewrites
 from .physical.rewrites._linearization import linearize_dag
 from .physical.rewrites._dead_code_elimination import mark_dead_ops_during_fit
-from .physical.rewrites._input_removal_planning import compute_pinned_ops, plan_input_removals
+from .physical.rewrites._lifetime_planning import compute_pinned_ops, plan_input_removals
 from .physical.rewrites._reuse_planning import apply_reuse_cache
 from .physical._plan_context import PlanContext
 from .physical._lowering import lower_to_physical
@@ -132,7 +132,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
        logical ops to physical ops (one logical op may become several).
     3. :func:`physical_optimize` -- select a concrete implementation per
        physical op, optionally prune work found in ``reuse_cache``, then linearize
-       and plan intermediate last use as the final step.
+       and plan intermediate lifetimes.
 
     ``env`` (variable name -> value), when supplied, lets the converter resolve
     variables to compile-time constants (ValueOps) instead of VariableOps. ``search``,
@@ -234,11 +234,11 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 def physical_optimize(root: Op, ctx: PlanContext, registry=None,
                       selector: ImplementationSelector | None = None,
                       reuse_cache: "ReuseCache | None" = None):
-    """Step 3: select implementations, plan reuse, then linearize and plan removals.
+    """Step 3: select implementations, plan reuse, then linearize and plan lifetimes.
     Implementation selection resolves each op with registered candidates to a
     concrete implementation (consulting the default PhysicalRegistry unless one
     is injected). An explicit cache supplies hits and admission keys before
-    linearization, so buffer-removal planning and dead code elimination see the
+    linearization, so lifetime planning and dead code elimination see the
     pruned graph."""
 
     # TODO: add physical rewrites here (or afterwards)
@@ -252,7 +252,7 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
     _debug_show_graph(root, "physical_impl")
     # Parallel execution planning could also run here, before linearization.
 
-    # Linearize and mark last used intermediates for removal
+    # Linearize and plan intermediate retention and releases.
     linearized_dag, split_pos, flagged_ops = linearize_dag(root)
     pinned_ops = compute_pinned_ops(linearized_dag, split_pos, flagged_ops)
     plan_input_removals(linearized_dag, pinned_ops)

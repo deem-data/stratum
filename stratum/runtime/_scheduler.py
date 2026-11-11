@@ -29,7 +29,7 @@ class Scheduler:
       outputs to the runtime on return. Retaining references to either beyond
       execution is a memory leak and violates the operator contract.
     - The runtime owns intermediate lifetimes. The scheduler pins inputs during
-      execution and releases them according to the plan's last-use analysis.
+      execution and performs the releases scheduled by lifetime planning.
       The pool and reuse cache share materialized results without copying.
     """
 
@@ -149,7 +149,7 @@ class Scheduler:
         scorer chose at plan time (see `ScoreCandidatesOp`).
         """
         # The split op's inputs are [X, y] (see add_splitting_op). Both are still
-        # in the pool after compute_xy because removal planning retains them.
+        # in the pool after compute_xy because lifetime planning retains them.
         # Pin both while generating folds; stratified splitters need the labels.
         x_data = self.pool.pin(split_op.inputs[0])
         y_data = self.pool.pin(split_op.inputs[1])
@@ -220,7 +220,7 @@ class Scheduler:
             return op
         if self.mode == FITTING_MODE and op.dead_in_fit:
             # Skip execution, but release inputs scheduled for removal here.
-            # Last-use analysis includes this operator even when fitting skips it.
+            # Lifetime planning includes this operator even when fitting skips it.
             for in_op in op.remove_after:
                 self.pool.remove(in_op)
             return op

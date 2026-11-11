@@ -10,7 +10,7 @@ from skrub._data_ops._data_ops import EvalMode
 
 import stratum as st
 from stratum.frontend._skrub_graph import get_data
-from stratum.optimizer.physical.rewrites._input_removal_planning import compute_pinned_ops
+from stratum.optimizer.physical.rewrites._lifetime_planning import compute_pinned_ops
 from stratum.optimizer._lineage import compute_lineage_keys
 from stratum.optimizer.physical.rewrites._linearization import is_recomputed, linearize_dag
 from stratum.optimizer._op_utils import topological_iterator, validate_dag, validate_operands

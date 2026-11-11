@@ -1,21 +1,17 @@
-"""Input removal planning for the linearized Op DAG.
+"""Plan intermediate retention and buffer-pool releases for the linearized DAG.
 
-Removal planning marks the last use of each intermediate in the DAG. The list of
-intermediates to be removed is materialized in each op's ``op.remove_after`` attribute.
-Skrub/stratum's execution plan does not include control flow, so we can mark the last
-use of each intermediate at compile time.
+Use final-consumer information to schedule releases, retaining intermediates
+needed across passes and CV folds.
 
-How it works:
-- Each op starts with a consumer count equal to ``len(op.outputs)`` (min 1).
-- Walking the linearized order, every time an op appears as an input of
-  another op, its remaining count is decremented.
-- When the count hits zero, the intermediate is scheduled for removal right after
-  the current op finishes (set via ``op.remove_after``).
-- Outputs retained across folds (pre-split ops that feed post-split or
-  re-executed ops) are excluded from this removal schedule. These outputs can
-  still spill to disk; ``pinned_ops`` does not imply ``BufferPool.pin`` residency.
-- At execution time the scheduler calls ``pool.remove()`` for every
-  entry in ``op.remove_after``.
+- Last-use analysis counts remaining uses in the fixed execution order and
+  records releases in each consumer's ``op.remove_after``.
+- Pre-split outputs are retained if they are not recomputed and feed post-split
+  or re-executed ops. They may still spill to disk; ``pinned_ops`` does not
+  imply ``BufferPool.pin`` residency.
+- Operators skipped during fitting still perform their scheduled releases,
+  so a release need not follow an actual read in that pass.
+- The scheduler calls ``pool.remove()`` for scheduled releases. The reuse
+  cache may retain the same objects after their buffer-pool entries are removed.
 """
 from __future__ import annotations
 
