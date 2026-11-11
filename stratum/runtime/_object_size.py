@@ -1,5 +1,4 @@
-# This util function helps to determine the memory usage of a certain object
-# this is relevant for the buffer pool and intermediate cache
+# Estimate object sizes for the buffer pool and intermediate-result cache.
 
 from sys import getsizeof
 from types import BuiltinFunctionType, FunctionType, MethodType, ModuleType
@@ -21,11 +20,11 @@ def get_size(obj):
     else:
         return get_size_single_object(obj)
 
-# TODO: an unsized object is accounted for as 1 byte, so the pool never counts
-# it towards its memory budget and never picks it for eviction: whatever it holds
-# (possibly a whole frame behind a lazy view) leaks until the plan tears the pool
-# down. Add a real estimate for every type that reaches the pool; the fallback
-# only exists so an unknown intermediate cannot crash a plan mid-execution.
+# TODO: replace the one-byte fallback with estimates for unsupported types.
+# It can substantially undercount retained memory, delaying budget-triggered
+# eviction. Such entries are still eviction candidates, but unsupported spill
+# types remain resident until removed. The fallback allows plans to continue
+# when an intermediate's size is unknown.
 UNKNOWN_SIZE = 1
 
 
@@ -52,9 +51,9 @@ def get_size_single_object(obj):
 def get_size_estimator(estimator):
     """Estimate retained estimator state, including private and nested objects.
 
-    What is shared counts once, an array by the buffer it views, which a view
-    keeps alive whole. An estimator holding anything whose state only user code
-    can build is not sized at all, rather than counted in part.
+    Count shared objects once and array views by their underlying numpy buffer.
+    Return UNKNOWN_SIZE for the estimator if any object requires a custom
+    __getstate__ implementation from an unsupported package.
 
     Native storage absent from serialization state is not included. Physical
     implementations with a known layout measure their state directly instead.
@@ -65,18 +64,18 @@ def get_size_estimator(estimator):
         return _unknown_size(estimator, f"estimator holding a {exc.args[0].__qualname__}")
 
 
-#: Held by reference, not owned: a class, a function or a module.
+#: Classes, functions, modules and methods excluded from retained-state estimates.
 _NOT_OWNED = (type, ModuleType, FunctionType, BuiltinFunctionType, MethodType)
 
-#: Packages whose ``__getstate__`` is called to size what an object retains. Any
-#: other is user code and may do anything: skorch's pickles the net, importing
-#: the modules of the classes it names, which re-runs a script loaded by path.
+#: Packages allowed to supply __getstate__ for memory estimation. Other
+#: implementations may have side effects: skorch serializes its network and
+#: imports referenced modules, which can re-execute a script loaded by path.
 _KNOWN_STATE_PACKAGES = frozenset({"sklearn", "skrub", "stratum", "lightgbm", "xgboost",
                                    "catboost"})
 
 
 class _UserState(Exception):
-    """An object's state would be built by user code (the class, as ``args[0]``)."""
+    """Unsupported __getstate__ implementation; args[0] is the defining class."""
 
 
 def _state_builder(cls: type) -> type:
@@ -85,10 +84,10 @@ def _state_builder(cls: type) -> type:
 
 
 def _retained(obj, seen: dict) -> int:
-    """The bytes ``obj`` retains that ``seen`` does not hold already.
+    """Estimate retained bytes for objects not already counted in ``seen``.
 
-    ``seen`` maps ids to the objects counted, keeping each alive, as a pickled
-    state is built anew and its id would otherwise be reused by the next one.
+    ``seen`` maps object IDs to references. Retaining temporary serialization
+    state prevents its ID from being reused during traversal.
     """
     if isinstance(obj, ndarray):
         while isinstance(obj.base, ndarray):
@@ -104,9 +103,9 @@ def _retained(obj, seen: dict) -> int:
         return getsizeof(obj)
     if type(obj).__module__.split(".")[0] in ("pandas", "polars", "numpy"):
         return get_size_single_object(obj)
-    # An estimator holds its attributes in the state it pickles, and so do native
-    # structures (sklearn's trees, a LightGBM booster as its model string). Only
-    # Python's default (the instance dict) or a known library builds that state.
+    # Estimate estimator and native state from serialization state, for example
+    # sklearn tree arrays or a LightGBM model string. Only call Python's default
+    # __getstate__ or implementations from supported libraries.
     builder = _state_builder(type(obj))
     if builder is not object and builder.__module__.partition(".")[0] not in _KNOWN_STATE_PACKAGES:
         raise _UserState(builder)
@@ -122,8 +121,8 @@ def get_size_pandas(obj):
     elif isinstance(obj, Series):
         return obj.memory_usage(deep=True)
     elif isinstance(obj, GroupBy):
-        # A groupby is a lazy view: it holds the frame it was built from plus the
-        # grouper, so the frame dominates. Reached whenever a groupby(...) op is
+        # Estimate a GroupBy by its retained source frame, excluding grouper state.
+        # This path is used when a groupby(...) op is
         # left unfused (no `by` argument, a column selection in between, or an
         # aggregation spec the logical IR cannot represent) and its intermediate
         # lands in the pool.

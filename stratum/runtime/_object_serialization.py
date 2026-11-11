@@ -22,10 +22,9 @@ _FORMAT_EXT = {
     "numpy_ndarray": ".npy",
 }
 
-# Structured leaves are the only objects that get their own portable file
-# (parquet / .npy), so a spilled intermediate can be read by other tools
-# (polars, arrow, rust, gpu, ...) without a Python round-trip. Everything else
-# — primitives and the container glue — is folded into a single skeleton file.
+# Frames, series and arrays are stored in separate Parquet or .npy files that
+# other tools can read without Python. Primitives and container structure are
+# stored in a single pickle file.
 _STRUCTURED_FORMAT: list[tuple[type, str]] = [
     (DataFrame, "pandas_dataframe"),
     (Series, "pandas_series"),
@@ -37,20 +36,21 @@ _STRUCTURED_FORMAT: list[tuple[type, str]] = [
 
 # Column name a nameless pandas Series is written under. `to_frame()` would name
 # the column 0, and the series would come back named 0 instead of None.
+# TODO: store the original name separately so a Series named exactly
+# "__stratum_unnamed_series__" does not reload with name=None.
 _UNNAMED_SERIES = "__stratum_unnamed_series__"
 
 
-# Non-structured leaves we know how to pickle. Mirrors the types `get_size`
-# accepts, so anything the buffer pool admits can also be spilled (and we reject
-# the same unsupported types here, rather than silently pickling them).
+# Primitive types supported inside the skeleton pickle. The buffer pool can
+# retain other types, but serialization rejects unsupported values explicitly.
 _PICKLABLE_PRIMITIVE = (str, int, float, bool, bytes)
 
 
 class UnsupportedSpillType(ValueError):
     """The object (or something inside it) has no spill format.
 
-    The buffer pool admits such objects (it sizes them as UNKNOWN_SIZE), so it
-    catches this and keeps the entry in memory rather than failing the plan.
+    The buffer pool can retain such objects even when their size is unknown.
+    It catches this exception and keeps the entry in memory.
     """
 
 
@@ -94,7 +94,7 @@ def serialize_object(obj: Any, stem: Path) -> SpilledObject:
     """Spill a single object. `stem` is the target path prefix without extension.
 
     A bare frame/array/series is written straight to its native file. Any
-    container is walked once: each structured leaf is peeled out to its own
+    container is traversed recursively: each structured leaf is written to its own
     native file and replaced by a `_LeafRef`; primitives stay inline; the
     resulting skeleton is pickled to a single file.
     """
@@ -106,11 +106,9 @@ def serialize_object(obj: Any, stem: Path) -> SpilledObject:
     leaves: list[_LeafRef] = []
     ids = count()
 
-    # Note: a container of *many small* structured objects (e.g. thousands of
-    # tiny frames) still fans out to one native file each. That is a pathological
-    # shape we have no real use for — normal structured leaves are large and few
-    # — so we don't special-case it. If it ever matters, fold sub-threshold
-    # leaves into the skeleton pickle instead of giving them their own file.
+    # Each structured leaf produces a separate file, even for containers holding
+    # thousands of small frames. If file overhead becomes significant, consider
+    # storing small leaves in the skeleton pickle.
     def build(node: Any) -> Any:
         leaf_fmt = _native_format(node)
         if leaf_fmt is not None:
@@ -136,12 +134,10 @@ def serialize_object(obj: Any, stem: Path) -> SpilledObject:
         for ref in leaves:
             Path(ref.path).unlink(missing_ok=True)
         raise
-    # The skeleton is pickled, so it is Python-only. That is a deliberate
-    # trade-off: the heavy data (frames/arrays) lives in portable native files
-    # above, which is what another language would actually consume. If a
-    # non-Python reader ever needs the *structure* too, swap this for a tagged
-    # JSON encoding (tuples/bytes/non-str dict keys need tagging) and record
-    # `format="json"` — the buffer pool is agnostic to the value.
+    # Reading the container structure requires Python's pickle protocol, even
+    # though the frame and array files are portable. A future cross-language
+    # format could use tagged JSON for tuples, bytes and non-string dict keys.
+    # The buffer pool treats the format identifier as opaque.
     skel_path = _write_pickle(skeleton, stem)
     size = skel_path.stat().st_size + sum(Path(r.path).stat().st_size for r in leaves)
     return SpilledObject(path=skel_path, format="skeleton", leaves=tuple(leaves), size_on_disk=size)
@@ -150,7 +146,7 @@ def serialize_object(obj: Any, stem: Path) -> SpilledObject:
 def deserialize_object(spilled: SpilledObject) -> Any:
     if spilled.format != "skeleton":
         return _read_native(spilled.path, spilled.format)
-    # Only ever loads a pickle we wrote ourselves; never an untrusted one.
+    # Callers must supply trusted spill files produced by serialize_object.
     with open(spilled.path, "rb") as f:
         return _rehydrate(pickle.load(f))
 

@@ -23,8 +23,14 @@ if TYPE_CHECKING:
 class Scheduler:
     """Scheduler for executing pre-planned Op DAGs in linearized order.
 
-    Operators borrow inputs read-only. The pool and reuse cache share these
-    objects; operators requiring mutation must make their own copies.
+    - All intermediates are immutable, including nested objects. Operators must
+      not modify them in place; mutable workspace must be operator-local.
+    - Operators borrow inputs only for the duration of ``process`` and hand
+      outputs to the runtime on return. Retaining references to either beyond
+      execution is a memory leak and violates the operator contract.
+    - The runtime owns intermediate lifetimes. The scheduler pins inputs during
+      execution and releases them according to the plan's last-use analysis.
+      The pool and reuse cache share materialized results without copying.
     """
 
     def __init__(self, print_heavy_hitters=False, t0=None, reuse_cache: ReuseCache | None = None):
@@ -102,8 +108,8 @@ class Scheduler:
         if cv is not None:
             cv = check_cv(cv)
         logger.debug("\n" + "="*100 + "\n" + "Starting grid search" + "\n" + "="*100 + "\n")
-        # Before the sink: a plan with no X/y has no candidate set either, and the
-        # missing marks are the more useful thing to report.
+        # Validate X/y markers before the sink type so a plan missing both
+        # reports the missing input annotations first.
         split_op = self.compute_xy()
         sink = self.linearized_dag[-1]
         if not isinstance(sink, ScoreCandidatesOp):
@@ -143,9 +149,8 @@ class Scheduler:
         scorer chose at plan time (see `ScoreCandidatesOp`).
         """
         # The split op's inputs are [X, y] (see add_splitting_op). Both are still
-        # in the pool after compute_xy and are pinned by removal planning, so the
-        # labels can be handed to the splitter: stratified splitters need them,
-        # and every sklearn splitter accepts split(X, y=None, groups=None).
+        # in the pool after compute_xy because removal planning retains them.
+        # Pin both while generating folds; stratified splitters need the labels.
         x_data = self.pool.pin(split_op.inputs[0])
         y_data = self.pool.pin(split_op.inputs[1])
         splits = []
@@ -179,8 +184,8 @@ class Scheduler:
             results.append(fold.select("id", "scores"))
 
         results = pl.concat(results)
-        # A scorer returns a utility whatever its metric -- a `neg_*` scorer carries the
-        # sign that makes it one -- so the best candidate is always the highest score.
+        # sklearn scorers use a higher-is-better convention; `neg_*` scorers
+        # negate loss metrics so candidates can be ranked in descending order.
         results = results.group_by("id").mean().sort("scores", descending=True)
         return results
 
@@ -208,15 +213,14 @@ class Scheduler:
                          prettify_bytes(self.retained_state_memory_usage))
 
     def process_op(self, op: Op):
-        """Process a single DataOp node and return its output."""
+        """Process one operator, store its output in the pool and return the operator."""
         if op.cache_hit is not None:
             # Already loaded into the pool. Reuse planning cut its inputs, so
             # this op has no work or input removals left to perform.
             return op
         if self.mode == FITTING_MODE and op.dead_in_fit:
-            # Nothing this pass runs reads its output, so it is not pinned, run or
-            # stored. Its removals still happen: it is the last consumer of those
-            # buffers, and skipping it is the only reason no one else drops them.
+            # Skip execution, but release inputs scheduled for removal here.
+            # Last-use analysis includes this operator even when fitting skips it.
             for in_op in op.remove_after:
                 self.pool.remove(in_op)
             return op

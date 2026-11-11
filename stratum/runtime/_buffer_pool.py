@@ -67,8 +67,9 @@ def _host_memory_bytes() -> int | None:
 
 
 def _resolve_memory_budget(fraction: float, *, name: str = "buffer pool") -> int:
-    """Memory budget: ``fraction`` of the detected memory.
-    A failed detection logs a warning and falls back to _FALLBACK_MEMORY_BUDGET
+    """Return ``fraction`` of the detected physical memory as a byte budget.
+
+    If detection fails, log a warning and return _FALLBACK_MEMORY_BUDGET.
     """
     host_memory = _host_memory_bytes()
     if host_memory is None:
@@ -83,7 +84,7 @@ def _resolve_memory_budget(fraction: float, *, name: str = "buffer pool") -> int
 
 @dataclass
 class _Entry:
-    """Internal record. `data` is None iff the entry has been spilled to disk."""
+    """Internal record; a non-None ``handle`` identifies a spilled entry."""
     size: int  # in-memory cost; constant after put
     data: Any = None
     handle: SpilledObject | None = None
@@ -130,10 +131,16 @@ class BufferPoolStats:
 
 
 class BufferPool:
-    """Cache for intermediates with spill-to-disk eviction.
+    """Manage materialized intermediates with spill-to-disk eviction.
 
-    In-memory values are stored and borrowed by reference, without copying.
-    Readers must treat them as read-only, including any nested mutable objects.
+    Intermediates are immutable, including nested objects, and shared by
+    reference without copying. Operators must not modify them in place or
+    retain references to inputs or outputs beyond their execution. Such
+    retention is a memory leak; the runtime owns intermediate lifetimes.
+
+    The scheduler pins inputs for operator execution, unpins them afterward,
+    and removes intermediates after their last consumer. The reuse cache may
+    retain the same materialization for subsequent plans.
 
     When `memory_usage` exceeds `memory_budget`, unpinned entries are spilled to
     disk under `spill_root`, in the order the eviction policy ranks them (LRU by
@@ -148,16 +155,15 @@ class BufferPool:
 
     def __init__(self, spill_root: Path | str = _DEFAULT_SPILL_ROOT,
                  eviction_policy: EvictionPolicy | None = None):
-        # TODO:
-        # right now our buffer pool is basically a symbol table and (main memory) puffer pool in one thing
-        # once we have multiple backends, we will have to separate both
+        # TODO: separate operator-to-buffer mappings from memory management
+        # when adding backend-specific buffer pools.
         self.live_variable_map: dict[Hashable, _Entry] = {}
         self.eviction_policy = eviction_policy if eviction_policy is not None else LRUPolicy()
         self._removed_count: int = 0
         self.memory_usage = 0
         # The spill root is created lazily on the first eviction. Each spill
-        # gets a uuid4 filename prefix, so files never collide across entries,
-        # BufferPool instances, or processes sharing the same root.
+        # gets a uuid4 filename prefix to avoid collisions across entries,
+        # BufferPool instances, and processes sharing the same root.
         # TODO: stale spill files from a crashed run are never reclaimed; add
         # startup/teardown cleanup of the spill root.
         self._spill_root = Path(spill_root)
@@ -255,7 +261,11 @@ class BufferPool:
         return prettify_bytes(self.memory_usage)
 
     def check_for_eviction(self) -> bool:
-        """Spill unpinned entries until under budget. Returns True if any evicted."""
+        """Attempt to reach the budget by spilling unpinned entries.
+
+        Return True if any bytes were evicted; unspillable or pinned entries
+        may keep memory usage above the budget.
+        """
         if self.memory_budget <= 0 or self.memory_usage <= self.memory_budget:
             return False
         evicted = self.evict(self.memory_usage - self.memory_budget) > 0

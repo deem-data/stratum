@@ -1,15 +1,13 @@
-"""Eviction policies: *which* entries a memory store gives up first.
+"""Rank entries for eviction from the buffer pool or reuse cache.
 
-A store (the BufferPool, the reuse cache) decides *when* it has to evict and *how
-much*; a policy only ranks its entries. Keeping the two apart is what lets one
-memory manager later decide how much each store must free while every store keeps
-its own notion of what is worth keeping.
+- The store determines when to evict and how many bytes to release.
+- The policy tracks insertions, accesses and removals, then yields candidates
+  in eviction order through ``victims()``.
+- The store skips ineligible candidates (pinned, already spilled or unspillable)
+  and stops when it has released enough bytes.
 
-A store reports every entry's lifecycle to its policy (``on_insert``,
-``on_access``, ``on_remove``) and asks for ``victims()`` when it needs room. The
-policy yields candidates best-victim-first; the store skips the ones it cannot
-evict right now (pinned, already spilled, unspillable) and stops once it has freed
-enough, so a policy never needs to know about pins or tiers.
+Separating ranking from eviction allows a shared memory manager to allocate
+budgets while each store retains its own eviction policy.
 """
 from __future__ import annotations
 
@@ -30,7 +28,7 @@ class EvictionPolicy:
         raise NotImplementedError
 
     def on_remove(self, key: Hashable) -> None:
-        """``key`` left the store for good."""
+        """Remove ``key`` from the policy's tracked entries."""
         raise NotImplementedError
 
     def victims(self) -> Iterator[Hashable]:

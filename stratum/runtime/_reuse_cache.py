@@ -1,15 +1,19 @@
-"""Intermediates kept in memory across plans, keyed by Merkle lineage keys.
+"""In-memory reuse of materialized intermediates, keyed by Merkle lineage keys.
 
-The planner decides which results have reliable keys. This store accepts every
-such result that fits its budget, without cost-based admission. It owns a reference
-to each cached object; a reader keeps its own reference even after eviction.
-Outputs are shared with execution without copying. Callers must not mutate values
-after insertion or retrieval, including nested objects.
-
-The budget accounts for estimated object sizes using the same sizing helper as
-the BufferPool. It is not a bound on total process memory: readers can keep evicted
-objects alive, and shared buffers can be counted more than once. Entries live
-only as long as this cache instance and are never serialized.
+- The planner decides which results have reliable keys. This store accepts every
+  such result that fits its budget, without cost-based admission.
+- All intermediates are immutable, including nested objects. No operator may
+  modify an intermediate in place. The cache and BufferPool share materialized
+  results without copying.
+- The runtime owns intermediate lifetimes through the BufferPool and reuse
+  cache. Operators borrow intermediates only for the duration of their
+  execution; retaining references to inputs or outputs afterward is a memory
+  leak and violates the operator contract.
+- The cache budget (> 0) bounds the sum of estimated sizes of resident cache entries,
+  using the same sizing helper as the BufferPool. Eviction releases cache
+  ownership; the BufferPool manages intermediates still live in an executing
+  plan.
+- Entries live only as long as this cache instance and are never serialized (currently).
 """
 from __future__ import annotations
 
@@ -60,9 +64,9 @@ class ReuseCache:
     """Thread-safe memory cache with fixed LRU eviction.
 
     ``memory_budget`` is an estimated byte limit; zero means unlimited. Lowering
-    the budget evicts entries immediately. Each operation is atomic, but a
-    membership check does not reserve an entry: use ``get(key, sentinel)`` to
-    distinguish a miss from a cached ``None`` in a single operation.
+    the budget evicts entries immediately. Each operation is atomic, but an entry can be evicted between checking
+    whether its key exists and retrieving its value: use ``get(key, sentinel)`` to
+    distinguish a miss (returns ``None``) from a cached ``None`` in a single operation.
     """
 
     def __init__(self, *, memory_budget: int = 0):
@@ -171,7 +175,8 @@ class ReuseCache:
         """Drop least recently used entries until enough estimated bytes are freed.
 
         Return the bytes removed from this cache, which can be less than requested
-        if the cache is exhausted. Existing readers retain their references.
+        if the cache is exhausted. Eviction releases cache ownership without
+        changing the lifetime of intermediates managed by an executing plan.
         """
         with self._lock:
             freed = self._evict(bytes_needed)
