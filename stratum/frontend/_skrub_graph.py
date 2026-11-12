@@ -2,14 +2,15 @@
 
 Drop-in replacement for ``skrub._data_ops._evaluation._Graph().run(dag)``
 that avoids the heavyweight generator-based ``_DataOpTraversal`` machinery.
-We only need the DataOp-to-DataOp adjacency; choices, estimators, slices etc.
-are irrelevant for graph structure and can be skipped.
+Only DataOps become graph nodes. Containers, choices and estimator parameters
+are traversed to discover their DataOp dependencies.
 
 The same traversal also backs :func:`get_data`, the fast counterpart of
 ``dag.skb.get_data()``, which goes through that same slow machinery.
 """
 
 from collections import defaultdict
+from sklearn.base import BaseEstimator
 from skrub._data_ops import DataOp
 from skrub._data_ops._choosing import BaseChoice, Choice, Match
 from skrub._data_ops._data_ops import Var
@@ -24,7 +25,7 @@ def _collect_child_data_ops(value):
 
     Handles DataOps stored directly in a field, or nested inside the built-in
     container types that skrub uses (tuple, list, dict, set, frozenset, and the
-    bounds of a slice), as well as skrub Choice/Match wrappers.
+    bounds of a slice), estimator parameters, and skrub Choice/Match wrappers.
     """
     if isinstance(value, DataOp):
         yield value
@@ -36,6 +37,10 @@ def _collect_child_data_ops(value):
             yield from _collect_child_data_ops(outcome)
     elif isinstance(value, BaseChoice):
         pass
+    elif isinstance(value, BaseEstimator):
+        # Nested estimators are visited recursively; flattened parameter names
+        # would visit the same dependencies again.
+        yield from _collect_child_data_ops(value.get_params(deep=False))
     elif isinstance(value, dict):
         for v in value.values():
             yield from _collect_child_data_ops(v)

@@ -231,13 +231,19 @@ def test_graph_fed_parameters_and_selectors_use_operand_keys(csv_path):
     assert lineage_key(op, ["source", "true"]) != lineage_key(op, ["source", "false"])
 
 
-def test_unbound_graph_parameters_are_uncacheable(csv_path):
+def test_unbound_graph_parameters_are_uncacheable():
     with pytest.raises(Uncacheable, match="no graph input binding"):
         key(StandardScaler(with_mean=st.as_data_op(True)))
+
+
+def test_converted_graph_parameters_use_operand_lineage(csv_path):
+    keys = []
     for mean in (True, False):
         dag = read_csv(csv_path).skb.apply(
             StandardScaler(with_mean=st.as_data_op(mean)))
-        assert plan_keys(dag)[-1][1] is None
+        keys.append(plan_keys(dag)[-1][1])
+    assert all(value is not None for value in keys)
+    assert keys[0] != keys[1]
 
 
 def test_a_bound_but_unresolved_seed_is_uncacheable():

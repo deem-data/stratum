@@ -173,6 +173,10 @@ class OperandBinder:
                 raise NotImplementedError(
                     f"A choice inside the parameters of {type(value).__name__} is only "
                     "supported in the estimator of `.skb.apply()`.")
+        if isinstance(value, BaseEstimator) and next(_collect_child_data_ops(value), None) is not None:
+            raise NotImplementedError(
+                f"DataOp parameters of {type(value).__name__} are only supported "
+                "in the estimator of `.skb.apply()`.")
         if isinstance(value, tuple):
             return tuple(self.bind(v) for v in value)
         if isinstance(value, list):
@@ -272,6 +276,57 @@ def _iter_nested(value):
             yield from _iter_nested(v)
 
 
+def _has_unbound_parameter(value, named_estimators: set[int]) -> bool:
+    """Find DataOps in containers (list, dict, etx), excluding estimators with named parameters.
+
+    For example, Pipeline exposes its steps through ``get_params()`` as well as
+    storing them in a list. Their parameters are bound by their flattened names.
+    """
+    if isinstance(value, BaseEstimator):
+        return (id(value) not in named_estimators
+                and next(_collect_child_data_ops(value), None) is not None)
+    if isinstance(value, dict):
+        items = value.values()
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        items = value
+    elif isinstance(value, slice):
+        items = (value.start, value.stop, value.step)
+    else:
+        return next(_collect_child_data_ops(value), None) is not None
+    return any(_has_unbound_parameter(item, named_estimators) for item in items)
+
+
+def _bind_estimator_params(binder: OperandBinder, estimator) -> dict:
+    """Bind direct and sklearn named nested parameters to input references.
+
+    Named nested parameters such as ``scale__with_mean`` are supported::
+
+        allowed = X.skb.apply(Pipeline([
+            ("scale", StandardScaler(with_mean=st.as_data_op(True))),
+        ]))
+
+    A DataOp inside a parameter container is rejected during conversion::
+
+        rejected = X.skb.apply(FunctionTransformer(
+            kw_args={"offset": st.as_data_op(1)},
+        ))
+    """
+    params = estimator.get_params()
+    named_estimators = {id(value) for value in params.values()
+                        if isinstance(value, BaseEstimator)}
+    refs = {}
+    for name, value in params.items():
+        if isinstance(value, DataOp):
+            refs[name] = binder.ref(value)
+        elif _has_unbound_parameter(value, named_estimators):
+            # TODO: Support DataOps inside estimator parameter containers when needed.
+            raise NotImplementedError(
+                f"DataOps inside parameter containers are not supported "
+                f"({type(estimator).__name__} parameter {name!r}). "
+                "DataOp parameters must be exposed directly by get_params().")
+    return refs
+
+
 def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimator: bool = False,
                         choice_ops: dict | None = None) -> Op:
     """Build a TransformerOp or PredictorOp for one concrete Apply estimator.
@@ -298,8 +353,7 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimato
         estimator_class = TransformerOp
     binder = OperandBinder(ids_to_ops, choice_ops)
     binder.ref(impl.X)  # OperandRef(0)
-    param_refs = {k: binder.ref(v) for k, v in estimator.get_params().items()
-                  if isinstance(v, DataOp) and id(v) in ids_to_ops}
+    param_refs = _bind_estimator_params(binder, estimator)
     y = _bind_or_value(binder, impl.y)
     cols = _bind_or_value(binder, impl.cols)
     exclude_cols = _bind_or_value(binder, impl.exclude_cols)
