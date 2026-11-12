@@ -39,7 +39,8 @@ class TestApplyChoice(unittest.TestCase):
         self.assertEqual(len(root.inputs), 2)
         for est_op, scaler in zip(root.inputs, scalers):
             self.assertIsInstance(est_op, TransformerOp)
-            self.assertIs(est_op.estimator, scaler)
+            self.assertIsNot(est_op.estimator, scaler)
+            self.assertEqual(est_op.estimator.get_params(), scaler.get_params())
             self.assertIn(root, est_op.outputs)
             self.assertIn(est_op, est_op.inputs[0].outputs)
         # Both outcomes consume the same upstream (selected) frame op.
@@ -267,12 +268,13 @@ class TestApplyParamChoice(unittest.TestCase):
             convert_to_ops(pred)
         self.assertIn("more than one operator", str(ctx.exception))
 
-    def test_estimator_without_choice_is_kept(self):
+    def test_estimator_without_choice_is_cloned(self):
         ridge = Ridge()
         root = convert_to_ops(self._predict(ridge))
 
         self.assertIsInstance(root, PredictorOp)
-        self.assertIs(root.estimator, ridge)
+        self.assertIsNot(root.estimator, ridge)
+        self.assertEqual(root.estimator.get_params(), ridge.get_params())
 
 
 class TestNestedChoice(unittest.TestCase):

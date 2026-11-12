@@ -359,8 +359,10 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimato
     exclude_cols = _bind_or_value(binder, impl.exclude_cols)
     no_wrap = _bind_or_value(binder, impl.no_wrap)
     kwargs = _bind_apply_kwargs(binder, estimator_class, estimator, impl.kwargs)
+    # Bind the original DataOp identities before cloning. Each converted op gets
+    # its own estimator so rewrites can update its parameters independently.
     op = estimator_class(
-        estimator=estimator,
+        estimator=clone(estimator),
         y=y,
         cols=cols,
         exclude_cols=exclude_cols,

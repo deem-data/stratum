@@ -62,6 +62,34 @@ def test_direct_and_named_nested_parameters_are_bound(nested):
     validate_dag(root)
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("graph_parameter", [False, True])
+def test_converted_estimators_can_be_updated_independently(nested, graph_parameter):
+    mean = st.as_data_op(True) if graph_parameter else True
+    scaler = StandardScaler(with_mean=mean)
+    estimator = Pipeline([("scale", scaler)]) if nested else scaler
+    X = features()
+    first, second = X.skb.apply(estimator), X.skb.apply(estimator)
+    root = convert_to_ops(first.skb.apply_func(lambda a, b: (a, b), second))
+    first_op, second_op = root.inputs
+    name = "scale__with_mean" if nested else "with_mean"
+    untouched = [first_op.original_estimator, second_op.estimator, second_op.original_estimator]
+    parameters = [prototype.get_params()[name] for prototype in untouched]
+
+    first_op.estimator.set_params(**{name: False})
+
+    assert first_op.estimator.get_params()[name] is False
+    assert scaler.with_mean is mean
+    for prototype, parameter in zip(untouched, parameters, strict=True):
+        assert prototype.get_params()[name] is parameter
+    first_op.original_estimator.set_params(**{name: False})
+    assert second_op.original_estimator.get_params()[name] is parameters[-1]
+    assert scaler.with_mean is mean
+    if graph_parameter:
+        assert first_op.inputs[first_op.param_refs[name].k] is second_op.inputs[second_op.param_refs[name].k]
+    validate_dag(root)
+
+
 def test_parameter_variable_uses_conversion_environment():
     dag = features().skb.apply(StandardScaler(with_mean=st.var("mean")))
     root = convert_to_ops(dag, env={"mean": False})
