@@ -214,7 +214,8 @@ class TestColumnSelectorExtraction(unittest.TestCase):
         sel = selectors.numeric()
         ops = optimize(data.skb.select(sel), OptConfig(dataframe_ops=True))
         col_sel = self._one(ops, ColumnSelectorOp)
-        self.assertIs(sel, col_sel.selector)
+        self.assertIsInstance(col_sel.selector, type(sel))
+        self.assertEqual(sel.expand(self.df), col_sel.selector.expand(self.df))
         self.assertIs(OutputType.FRAME, col_sel.output_type)
         # the SelectCols TransformerOp is fully replaced
         self.assertEqual([], [o for o in ops if isinstance(o, TransformerOp)])
