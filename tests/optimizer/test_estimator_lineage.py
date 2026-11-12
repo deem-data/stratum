@@ -25,7 +25,7 @@ from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._estimator_lineage import estimator_lineage, selector_lineage
 from stratum.optimizer._lineage import (
     LineageEncoder, Uncacheable, compute_lineage_keys, lineage_key)
-from stratum.optimizer._optimize import optimize
+from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.logical._base import OperandRef
 from stratum.optimizer.logical._ops import BaseEstimatorOp, TransformerOp
 from stratum.optimizer.logical._projection_ops import ColumnSelectorOp
@@ -241,9 +241,21 @@ def test_converted_graph_parameters_use_operand_lineage(csv_path):
     for mean in (True, False):
         dag = read_csv(csv_path).skb.apply(
             StandardScaler(with_mean=st.as_data_op(mean)))
-        keys.append(plan_keys(dag)[-1][1])
+        plan, *_ = optimize(dag, OptConfig(literal_inlining=False))
+        keys.append(compute_lineage_keys(plan)[plan[-1]])
     assert all(value is not None for value in keys)
     assert keys[0] != keys[1]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("mean", [False, True])
+def test_inlined_parameters_match_literal_lineage(csv_path, nested, mean):
+    def build(parameter):
+        scaler = StandardScaler(with_mean=parameter)
+        estimator = Pipeline([("scale", scaler)]) if nested else scaler
+        return read_csv(csv_path).skb.apply(estimator)
+
+    assert plan_keys(build(st.as_data_op(mean))) == plan_keys(build(mean))
 
 
 def test_a_bound_but_unresolved_seed_is_uncacheable():

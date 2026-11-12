@@ -2,8 +2,9 @@
 from stratum.optimizer._op_utils import _iter_operand_refs, topological_iterator
 from stratum.optimizer.logical._base import _resolve_operand
 from stratum.optimizer.logical._dataframe_ops import ConcatOp
-from stratum.optimizer.logical._ops import (CallOp, GetItemOp, MethodCallOp, Op, OperandRef,
-                                             ValueOp, _getitem_key_name)
+from stratum.optimizer.logical._ops import (BaseEstimatorOp, CallOp, GetItemOp,
+                                             MethodCallOp, Op, OperandRef, ValueOp,
+                                             _getitem_key_name)
 
 
 def _is_literal(op: Op) -> bool:
@@ -24,13 +25,41 @@ def _inlinable(op: Op, k: int) -> bool:
 
 
 def literal_inlining(root: Op) -> Op:
-    """Replace each eligible literal input slot by its value, then drop the edge."""
-    plan = [(op, slots) for op in topological_iterator(root)
-            if (slots := {k for k, in_ in enumerate(op.inputs)
-                          if _is_literal(in_) and _inlinable(op, k)})]
-    for op, slots in plan:
-        _inline_slots(op, slots)
+    """Substitute eligible literals and remove input edges with no remaining use."""
+    # Snapshot the traversal before changing edges.
+    for op in list(topological_iterator(root)):
+        if isinstance(op, BaseEstimatorOp):
+            _inline_estimator_params(op)
+        elif slots := {k for k, in_ in enumerate(op.inputs)
+                       if _is_literal(in_) and _inlinable(op, k)}:
+            _inline_slots(op, slots)
     return root
+
+
+def _inline_estimator_params(op: BaseEstimatorOp) -> None:
+    """Move scalar parameter inputs into an owned, unfitted estimator prototype.
+
+    ``param_refs`` retains only runtime bindings. An input also used by X, y or
+    another Apply field stays an input even after its parameter use is inlined.
+    """
+    literals = {name: ref for name, ref in op.param_refs.items()
+                if _is_literal(op.inputs[ref.k])}
+    if not literals:
+        return
+
+    # Each converted op owns both prototypes. Planning and fitting must see the same
+    # parameters, so update both before removing their runtime bindings.
+    params = {name: op.inputs[ref.k].value for name, ref in literals.items()}
+    op.estimator.set_params(**params)
+    op.original_estimator.set_params(**params)
+    op.supported_modes = frozenset(m for m in op.response_modes if hasattr(op.estimator, m))
+    op.param_refs = {name: ref for name, ref in op.param_refs.items() if name not in literals}
+
+    used = {0}  # X is implicit, so it does not appear in the fields below.
+    used.update(ref.k for field in op.fields
+                for ref in _iter_operand_refs(getattr(op, field)))
+    if unused := {ref.k for ref in literals.values()} - used:
+        _inline_slots(op, unused)
 
 
 def _inline_slots(op: Op, inlined: set[int]) -> None:

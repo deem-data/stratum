@@ -125,8 +125,8 @@ _UNCHECKED = object()
     pytest.param(lambda: BinOp(operator.sub, R0, R1), [np.array([10, 20]), 3], [0, 1], np.array([7, 17]),
                  id="binop-unsupported"),
     pytest.param(lambda: UnaryOp(operator.neg, R0), [3], [0], -3, id="unary-unsupported"),
-    pytest.param(lambda: PredictorOp(estimator=Ridge(), param_refs={"alpha": R1}),
-                 [pd.DataFrame({"x": [1, 2]}), 0.5], [0, 1], _UNCHECKED, id="unsupported-consumer"),
+    pytest.param(lambda: PredictorOp(estimator=Ridge(), y=R1),
+                 [pd.DataFrame({"x": [1, 2]}), 0.5], [0, 1], _UNCHECKED, id="estimator-keeps-y"),
 ])
 def test_consumer_rules(make, values, kept, expected):
     root, sources = inline(make, values)

@@ -19,7 +19,7 @@ from stratum.optimizer.physical._transform_execs import (
 )
 
 
-def _pipeline():
+def _pipeline(wrapped):
     X = np.random.default_rng(30).normal(size=(90, 4))
     X[:, 0] *= 100
     y = X @ np.array([0.02, 2, -1, 3])
@@ -28,11 +28,13 @@ def _pipeline():
         split_kwargs={},
     )
     target = st.var("y", y).skb.mark_as_y()
-    return features.skb.apply(StandardScaler()).skb.apply(Ridge(alpha=0.1), y=target)
+    mean = st.as_data_op(True) if wrapped else True
+    return features.skb.apply(StandardScaler(with_mean=mean)).skb.apply(Ridge(alpha=0.1), y=target)
 
 
 @pytest.mark.skipif(rb.standard_scale_fit is None, reason="native scaler unavailable")
-def test_standard_scaler_pipeline_selects_and_scores_both_backends(monkeypatch, capfd):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_standard_scaler_pipeline_selects_and_scores_both_backends(monkeypatch, capfd, wrapped):
     calls = []
     native_fit = rb.standard_scale_fit
 
@@ -55,7 +57,7 @@ def test_standard_scaler_pipeline_selects_and_scores_both_backends(monkeypatch, 
             num_threads=2,
             explain=False,
         ):  # Set True to print the physical plan.
-            pipeline = _pipeline()
+            pipeline = _pipeline(wrapped)
             ops, *_ = optimize(pipeline, env=pipeline.skb.get_data())
             (scaler,) = [op for op in ops if isinstance(op, StandardScalerOp)]
             assert type(scaler) is expected
