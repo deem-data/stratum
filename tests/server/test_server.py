@@ -248,6 +248,36 @@ def stop_server(server_dir: Path, proc: subprocess.Popen) -> str:
     return out
 
 
+def test_server_publishes_complete_discovery_file(tmp_path, monkeypatch):
+    info_path = tmp_path / SERVER_INFO
+    server = StratumServer(tmp_path)
+    monkeypatch.setattr(FLAGS, "reuse_cache", True)
+    dump = json.dump
+
+    def dump_while_discovering(info, stream):
+        stream.write("{")
+        stream.flush()
+        assert not info_path.exists(), "discovery must not expose a partial write"
+        stream.seek(0)
+        dump(info, stream)
+
+    def check_discovery():
+        info = json.loads(info_path.read_text())
+        assert info["pid"] == os.getpid()
+        assert info["token"] == server.token
+        if os.name == "posix":
+            assert info_path.stat().st_mode & 0o777 == 0o600
+        assert list(tmp_path.iterdir()) == [info_path]
+        with StratumClient(server_dir=tmp_path) as client:
+            assert client.health()["ok"]
+
+    monkeypatch.setattr(json, "dump", dump_while_discovering)
+    server._tasks.put(check_discovery)
+    server._tasks.put(None)
+    server.serve_forever()
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.fixture(autouse=True)
 def no_remote_server(monkeypatch):
     monkeypatch.delenv("STRATUM_URL", raising=False)

@@ -398,9 +398,14 @@ class StratumServer:
             # The address is published only once the API accepts requests.
             local = {"0.0.0.0": "127.0.0.1", "": "127.0.0.1", "::": "::1"}.get(self.host, self.host)
             url = f"http://[{local}]:{port}" if ":" in local else f"http://{local}:{port}"
-            fd = os.open(info_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump({"url": url, "token": self.token, "pid": os.getpid()}, f)
+            # Publish complete JSON atomically; discovery readers may run during the write.
+            fd, temporary = tempfile.mkstemp(dir=self.server_dir, prefix=f".{SERVER_INFO}.")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump({"url": url, "token": self.token, "pid": os.getpid()}, f)
+                os.replace(temporary, info_path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
             print(f"stratum server listening on {self.host}:{port} "
                   f"(in-memory reuse cache, {len(cache)} entries)", flush=True)
             while True:
