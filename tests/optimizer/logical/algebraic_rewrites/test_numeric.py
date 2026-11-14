@@ -244,7 +244,7 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(t2)
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 5)
+        self.assertEqual(out[1].process([out[0].value]), 5)
 
     def test_disable_eliminate_identity_operation(self):
         df = st.as_data_op(2)
@@ -257,9 +257,9 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
-        multiply_result = out[1].process("fit", [out[0].value])
+        multiply_result = out[1].process([out[0].value])
         self.assertEqual(multiply_result, 2)
-        self.assertEqual(out[2].process("fit", [multiply_result]), 5)
+        self.assertEqual(out[2].process([multiply_result]), 5)
 
     def test_eliminate_identity_operation_root_safe(self):
         value = st.as_data_op(2)
@@ -267,7 +267,7 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(root)
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].process("fit", [out[0].value]), 2)
+        self.assertEqual(out[0].process([out[0].value]), 2)
 
     def test_eliminate_identity_operation_dedups_repeated_input(self):
         value = st.as_data_op(2)
@@ -281,9 +281,9 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(out[1].inputs, [out[0]])
         self.assertEqual(out[2].inputs, [out[0]])
         self.assertEqual(out[2].opt_operand, OperandRef(0))
-        left_sum = out[1].process("fit", [out[0].value])
-        right_sum = out[2].process("fit", [out[0].value])
-        self.assertEqual(out[3].process("fit", [left_sum, right_sum]), 8)
+        left_sum = out[1].process([out[0].value])
+        right_sum = out[2].process([out[0].value])
+        self.assertEqual(out[3].process([left_sum, right_sum]), 8)
 
     def test_abs_abs_collapses_to_single_abs(self):
         df = st.as_data_op(-3)
@@ -344,7 +344,7 @@ class TestCSE(unittest.TestCase):
         t2 = t1 + 3
         out, *_ = optimize(t2)
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 5)
+        self.assertEqual(out[1].process([out[0].value]), 5)
 
     def test_eliminate_zero_add(self):
         df = st.as_data_op(2)
@@ -352,14 +352,14 @@ class TestCSE(unittest.TestCase):
         t2 = t1 + 3
         out, *_ = optimize(t2)
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 5)
+        self.assertEqual(out[1].process([out[0].value]), 5)
 
     def test_eliminate_add_zero_root_safe(self):
         df = st.as_data_op(2)
         root = df + 0
         out, *_ = optimize(root)
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].process("fit", [out[0].value]), 2)
+        self.assertEqual(out[0].process([out[0].value]), 2)
 
     def test_disable_eliminate_add_zero(self):
         df = st.as_data_op(2)
@@ -372,14 +372,14 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(t2, config=config)
         print(out)
         self.assertEqual(len(out), 3)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 2)
+        self.assertEqual(out[1].process([out[0].value]), 2)
 
     def test_no_rewrite_add_nonzero(self):
         df = st.as_data_op(2)
         t1 = df + 1
         out, *_ = optimize(t1)
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 3)
+        self.assertEqual(out[1].process([out[0].value]), 3)
 
     def test_add_zero_with_trailing_op(self):
         df = st.as_data_op(2)
@@ -405,7 +405,7 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 2)                                  # source + expm1 (was 3)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.EXPM1)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 0)     # expm1(0) == 0
+        self.assertEqual(out[1].process([out[0].value]), 0)     # expm1(0) == 0
 
     def test_no_rewrite_one_minus_exp(self):
         df = st.as_data_op(0)
@@ -415,7 +415,7 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.EXP)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 1)
+        self.assertEqual(out[1].process([out[0].value]), 1)
 
     def test_no_rewrite_exp_minus_two(self):
         df = st.as_data_op(0)
@@ -476,7 +476,7 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(t2)
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 8)
+        self.assertEqual(out[1].process([out[0].value]), 8)
 
     def test_eliminate_identity_subtract_root_safe(self):
         """When x - 0 is the root, the rewrite must not break the DAG."""
@@ -485,7 +485,7 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(root)
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].process("fit", [out[0].value]), 7)
+        self.assertEqual(out[0].process([out[0].value]), 7)
 
     def test_disable_eliminate_identity_subtract(self):
         """Disabling identity_subtract must leave x - 0 untouched."""
@@ -499,9 +499,9 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
-        subtract_result = out[1].process("fit", [out[0].value])
+        subtract_result = out[1].process([out[0].value])
         self.assertEqual(subtract_result, 5)
-        self.assertEqual(out[2].process("fit", [subtract_result]), 8)
+        self.assertEqual(out[2].process([subtract_result]), 8)
 
     def test_no_rewrite_const_minus_var(self):
         """0 - x  should NOT be rewritten (it is not an identity)."""
@@ -528,7 +528,7 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(t2)
         self.assertEqual(len(out), 2)                        # ValueOp + ADD
-        self.assertEqual(out[1].process("fit", [out[0].value]), 9)
+        self.assertEqual(out[1].process([out[0].value]), 9)
 
     def test_eliminate_div_by_one_disabled(self):
         df = st.as_data_op(6)
@@ -608,7 +608,7 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(t2)
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 4)
+        self.assertEqual(out[1].process([out[0].value]), 4)
 
     def test_pow_zero_root_safe(self):
         """When x ** 0 is the root, the DAG must not break."""
@@ -691,7 +691,7 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.GENERIC)
-        result = out[1].process("fit", [out[0].value])
+        result = out[1].process([out[0].value])
         expected = np.log(np.sum(np.exp([1.0, 2.0, 3.0])))
         np.testing.assert_almost_equal(result, expected)
 
@@ -704,7 +704,7 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(root)
         self.assertEqual(len(out), 2)
-        result = out[1].process("fit", [out[0].value])
+        result = out[1].process([out[0].value])
         expected = np.log(np.sum(np.exp([0.0, 1.0])))
         np.testing.assert_almost_equal(result, expected)
 
@@ -827,7 +827,7 @@ class TestCSE(unittest.TestCase):
 
             out, *_ = optimize(t3)
         self.assertEqual(len(out), 2)
-        result = out[1].process("fit", [out[0].value])
+        result = out[1].process([out[0].value])
         self.assertTrue(np.isfinite(result))
         np.testing.assert_almost_equal(result, 1000.0 + np.log(2.0))
 
@@ -915,7 +915,7 @@ class TestPowByOne(unittest.TestCase):
 
         out, *_ = optimize(t1)
         self.assertEqual(len(out), 2)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 8)
+        self.assertEqual(out[1].process([out[0].value]), 8)
 
     def test_pow_by_one_with_fanout(self):
         """The eliminated POW may have several consumers; all must be rewired to x.
@@ -934,9 +934,9 @@ class TestPowByOne(unittest.TestCase):
         self.assertEqual(len(out), 4)
         self.assertEqual(out[1].inputs, [out[0]])
         self.assertEqual(out[2].inputs, [out[0]])
-        left = out[1].process("fit", [out[0].value])
-        right = out[2].process("fit", [out[0].value])
-        self.assertEqual(out[3].process("fit", [left, right]), 18)
+        left = out[1].process([out[0].value])
+        right = out[2].process([out[0].value])
+        self.assertEqual(out[3].process([left, right]), 18)
 
     def test_pow_by_one_disabled(self):
         """Disabling pow_by_one must leave x ** 1 untouched."""
@@ -1002,7 +1002,7 @@ class TestPowByOne(unittest.TestCase):
                 self.assertEqual(len(out), 2)
                 self.assertIsInstance(out[1], NumericOp)
                 self.assertIs(out[-1].type, NumericOpType.SQUARE)
-                self.assertEqual(out[-1].process("fit", [out[0].value]), value * value)
+                self.assertEqual(out[-1].process([out[0].value]), value * value)
 
     def test_self_multiply_operand_with_other_consumers(self):
         """(x * x) + x: x feeds both the multiply and the add; the extra edge survives."""
@@ -1010,8 +1010,8 @@ class TestPowByOne(unittest.TestCase):
         out, *_ = optimize((df * df) + df)
         self.assertEqual(len(out), 3)
         self.assertIs(out[1].type, NumericOpType.SQUARE)
-        squared = out[1].process("fit", [out[0].value])
-        self.assertEqual(out[2].process("fit", [squared, out[0].value]), 30)
+        squared = out[1].process([out[0].value])
+        self.assertEqual(out[2].process([squared, out[0].value]), 30)
 
     def test_self_multiply_after_cse(self):
         """log(x) * log(x): two distinct DataOps merged by CSE still fold to square.
@@ -1024,7 +1024,7 @@ class TestPowByOne(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertIs(out[1].type, NumericOpType.LOG)
         self.assertIs(out[2].type, NumericOpType.SQUARE)
-        self.assertEqual(out[2].process(out[2].mode, [out[1].process("fit", [out[0].value])]),
+        self.assertEqual(out[2].process([out[1].process([out[0].value])]),
                          np.log(2.0) ** 2)
 
     def test_self_multiply_cubed_only_folds_once(self):
@@ -1034,8 +1034,8 @@ class TestPowByOne(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertIs(out[1].type, NumericOpType.SQUARE)
         self.assertIs(out[2].type, NumericOpType.MULTIPLY)
-        squared = out[1].process("fit", [out[0].value])
-        self.assertEqual(out[2].process("fit", [squared, out[0].value]), 27)
+        squared = out[1].process([out[0].value])
+        self.assertEqual(out[2].process([squared, out[0].value]), 27)
 
     def test_self_multiply_after_identity_elimination(self):
         """(x * 1) * x  →  square(x): identity_op runs first and exposes the self-op."""
@@ -1043,7 +1043,7 @@ class TestPowByOne(unittest.TestCase):
         out, *_ = optimize((df * 1) * df)
         self.assertEqual(len(out), 2)
         self.assertIs(out[1].type, NumericOpType.SQUARE)
-        self.assertEqual(out[1].process("fit", [out[0].value]), 25)
+        self.assertEqual(out[1].process([out[0].value]), 25)
 
     def test_self_multiply_dataframe_operand(self):
         """The fold works on frame data, not just scalars."""
@@ -1051,7 +1051,7 @@ class TestPowByOne(unittest.TestCase):
         out, *_ = optimize(df * df)
         self.assertIs(out[-1].type, NumericOpType.SQUARE)
         # A frame source lowers to an in-memory source op, so read it via process().
-        result = out[-1].process(out[-1].mode, [out[0].process("fit", [])])
+        result = out[-1].process([out[0].process([])])
         assert_frame_equal(result, pd.DataFrame({"a": [1.0, 4.0], "b": [9.0, 16.0]}))
 
     def test_other_self_operations_not_rewritten(self):
@@ -1117,7 +1117,7 @@ class TestPowByOne(unittest.TestCase):
         out, *_ = optimize((df * df) + 3)
         self.assertEqual(len(out), 3)
         self.assertEqual(out[1].type, NumericOpType.SQUARE)
-        self.assertEqual(out[2].process(out[2].mode, [out[1].process("fit", [out[0].value])]), 28)
+        self.assertEqual(out[2].process([out[1].process([out[0].value])]), 28)
 
     def test_self_multiply_then_sqrt_is_abs(self):
         """sqrt(x * x) → sqrt(square(x)) → abs(x): composes with sqrt_square."""

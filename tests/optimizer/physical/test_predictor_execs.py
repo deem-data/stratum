@@ -185,9 +185,9 @@ def test_any_estimator_passes_through():
 
     assert type(op) is PassthroughPredictor
     assert str(op) == "PredictorOp_fit(_UserDefinedPredictor())"
-    fitted = op.process(op.mode, [X])
+    fitted = op.process([X])
     assert fitted.output is None
-    np.testing.assert_array_equal(response_op(op).process(op.fallback_mode, [X, fitted.state]),
+    np.testing.assert_array_equal(response_op(op).process([X, fitted.state]),
                                   np.full(len(X), np.mean(y)))
 
 
@@ -336,10 +336,10 @@ def test_graph_fed_catboost_parameter_is_only_applied_while_fitting():
         param_refs={"iterations": OperandRef(1)},
     )
 
-    fitted = op.process(op.mode, [X, 2])
+    fitted = op.process([X, 2])
 
     assert fitted.state.get_params()["iterations"] == 2
-    assert len(response_op(op, 2).process(op.fallback_mode, [X, 2, fitted.state])) == len(X)
+    assert len(response_op(op, 2).process([X, 2, fitted.state])) == len(X)
 
 
 class _RefusesRefitParams(Ridge):
@@ -357,9 +357,9 @@ def test_graph_fed_parameter_is_applied_to_a_fresh_estimator_every_fold():
     op = PredictorOp(estimator=_RefusesRefitParams(), y=y, cols=All(), no_wrap=True,
                      param_refs={"alpha": OperandRef(1)})
 
-    fitted = op.process(op.mode, [X, 2.0])
-    response_op(op, 2).process(op.fallback_mode, [X, 2.0, fitted.state])
-    fitted = op.process(op.mode, [X, 3.0])
+    fitted = op.process([X, 2.0])
+    response_op(op, 2).process([X, 2.0, fitted.state])
+    fitted = op.process([X, 3.0])
 
     assert fitted.state.alpha == 3.0
     # The prototype the fits are cloned from is never fitted itself.

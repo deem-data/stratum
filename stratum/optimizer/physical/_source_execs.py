@@ -416,7 +416,7 @@ def _read_csv_in_file_order(file_path, kwargs: dict):
 
 @physical_impl(of=ReadCSVOp, backend="pandas", input_format="value", output_format="frame")
 class PandasReadCSV(ReadCSVOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return pd.read_csv(_resolve_operand(self.file_path, inputs),
                            **_resolve_kwargs(pandas_read_kwargs(self), inputs))
 
@@ -428,7 +428,7 @@ class PolarsReadCSV(ReadCSVOp, PhysicalOp):
         return _refuse(op, _polars_refusal(op, _POLARS_CSV_TRANSLATORS)
                        or _csv_shape_refusal(op))
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         translated = _polars_read_kwargs(self, inputs, _POLARS_CSV_TRANSLATORS)
         # pandas infers header=None when names are supplied. Polars otherwise
         # consumes the first data row as a header, even with new_columns set.
@@ -444,7 +444,7 @@ class PolarsReadCSV(ReadCSVOp, PhysicalOp):
 
 @physical_impl(of=ReadParquetOp, backend="pandas", input_format="value", output_format="frame")
 class PandasReadParquet(ReadParquetOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return pd.read_parquet(_resolve_operand(self.file_path, inputs),
                                **_resolve_kwargs(pandas_read_kwargs(self), inputs))
 
@@ -455,7 +455,7 @@ class PolarsReadParquet(ReadParquetOp, PhysicalOp):
     def supports(cls, op: ReadParquetOp, ctx) -> bool:
         return _refuse(op, _polars_refusal(op, _POLARS_PARQUET_TRANSLATORS))
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         read_kwargs = _polars_read_kwargs(self, inputs, _POLARS_PARQUET_TRANSLATORS)
         file_path = _polars_cloud_path(_resolve_operand(self.file_path, inputs))
         predicate = read_kwargs.pop("filters", None)
@@ -476,7 +476,7 @@ class PolarsReadParquet(ReadParquetOp, PhysicalOp):
 class NumpyLoad(LoadNumpyOp, PhysicalOp):
     """Load NumPy data independently of the dataframe backend."""
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return np.load(_resolve_operand(self.file_path, inputs),
                        **_resolve_kwargs(self.options, inputs))
 
@@ -485,7 +485,7 @@ class NumpyLoad(LoadNumpyOp, PhysicalOp):
 
 @physical_impl(of=InMemoryFrameOp, backend="pandas", input_format="value", output_format="frame")
 class PandasInMemoryFrame(InMemoryFrameOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # The frame passed in may be a polars one; this impl produces pandas.
         return to_pandas(self.data)
 
@@ -496,6 +496,6 @@ class PolarsInMemoryFrame(InMemoryFrameOp, PhysicalOp):
         # Fold the rechunk decision into instance state at plan time.
         self.rechunk = ctx.rechunk
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         out = pl.DataFrame(self.data)
         return rechunk_pl_frame(out) if getattr(self, "rechunk", True) else out

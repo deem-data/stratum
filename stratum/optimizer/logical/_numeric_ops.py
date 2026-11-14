@@ -109,7 +109,7 @@ class NumericOp(Op):
         self.opt_operand = opt_operand
         self.reversed = reversed
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # A trailing argument can be another operand (e.g. `np.arctan2(dy, dx)`),
         # not just a constant, so resolve refs the same way CallOp does before the
         # rewrite: passing an unresolved OperandRef to a ufunc makes numpy fall

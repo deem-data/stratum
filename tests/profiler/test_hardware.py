@@ -151,7 +151,7 @@ OP_SECONDS = .5
 
 
 class BusyOp(SameLabelOp):
-    def process(self, mode, inputs):
+    def process(self, inputs):
         end = perf_counter() + OP_SECONDS
         while perf_counter() < end:
             sum(range(1000))
@@ -159,7 +159,7 @@ class BusyOp(SameLabelOp):
 
 
 class IdleOp(SameLabelOp):
-    def process(self, mode, inputs):
+    def process(self, inputs):
         sleep(OP_SECONDS)
         return 1
 

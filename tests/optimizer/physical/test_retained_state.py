@@ -61,19 +61,19 @@ def test_size_is_refreshed_only_when_fitting(data, transformer, no_wrap):
     assert op.retained_state_size() == 0
 
     with patch.object(op, "_measure_retained_state", wraps=op._measure_retained_state) as measure:
-        fitted = op.process(op.mode, [X])
+        fitted = op.process([X])
         response = response_op(op)
         expected = getattr(fitted.state, response.mode)(X)
         first_size = op.retained_state_size()
         assert first_size > UNKNOWN_SIZE
         for _ in range(3):
             assert op.retained_state_size() == first_size
-            np.testing.assert_allclose(response.process(response.mode, [X, fitted.state]), expected)
+            np.testing.assert_allclose(response.process([X, fitted.state]), expected)
         assert measure.call_count == 1
 
         # A new fold replaces the fitted state and its estimate.
         op.y = y[:100]
-        op.process(op.mode, [X.iloc[:100].copy()])
+        op.process([X.iloc[:100].copy()])
         assert measure.call_count == 2
         if not transformer:
             assert UNKNOWN_SIZE < op.retained_state_size() < first_size
@@ -87,7 +87,7 @@ def test_size_is_refreshed_only_when_fitting(data, transformer, no_wrap):
 def test_sklearn_tree_storage_is_included(data, impl, estimator, no_generic_sizing):
     X, y = data
     op = impl(estimator=estimator, y=y, cols=All(), no_wrap=True)
-    fitted = op.process(op.mode, [X])
+    fitted = op.process([X])
     trees = getattr(fitted.state, "estimators_", [fitted.state])
     native_bytes = sum(
         sum(arr.nbytes for arr in tree.tree_.__getstate__().values()
@@ -110,7 +110,7 @@ def test_rust_forest_native_size_is_read_once_per_fit(data, impl, no_wrap, no_ge
                                     rust_backend=True, allow_patch=True))
     native_info = rb.forest_model_info
     with patch.object(rb, "forest_model_info", wraps=native_info) as measure:
-        fitted = op.process(op.mode, [X])
+        fitted = op.process([X])
         response = response_op(op)
         expected = fitted.state.predict(X)
         assert measure.call_count == 1
@@ -122,11 +122,11 @@ def test_rust_forest_native_size_is_read_once_per_fit(data, impl, no_wrap, no_ge
 
         for _ in range(3):
             assert op.retained_state_size() == size
-            np.testing.assert_array_equal(response.process(response.mode, [X, fitted.state]), expected)
+            np.testing.assert_array_equal(response.process([X, fitted.state]), expected)
         assert measure.call_count == 1
 
         op.y = y[:100]
-        op.process(op.mode, [X.iloc[:100]])
+        op.process([X.iloc[:100]])
         assert measure.call_count == 2
         assert UNKNOWN_SIZE < op.retained_state_size() < size
 
@@ -134,10 +134,10 @@ def test_rust_forest_native_size_is_read_once_per_fit(data, impl, no_wrap, no_ge
 def test_failed_measurement_does_not_break_fit_or_keep_previous_size(data):
     X, y = data
     op = SklearnKNeighbors(estimator=KNeighborsClassifier(), y=y, cols=All(), no_wrap=True)
-    op.process(op.mode, [X])
+    op.process([X])
     assert op.retained_state_size() > UNKNOWN_SIZE
     with patch.object(op, "_measure_retained_state", side_effect=RuntimeError("no estimate")):
-        fitted = op.process(op.mode, [X])
+        fitted = op.process([X])
     assert op.retained_state_size() == UNKNOWN_SIZE
     response = response_op(op)
-    np.testing.assert_array_equal(response.process(response.mode, [X, fitted.state]), fitted.state.predict(X))
+    np.testing.assert_array_equal(response.process([X, fitted.state]), fitted.state.predict(X))

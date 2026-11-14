@@ -24,8 +24,8 @@ from stratum.optimizer.physical._registry import physical_impl
 
 @physical_impl(of=AggregateOp, backend="pandas")
 class PandasAggregateOp(AggregateOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
-        ctx = EvalContext.of(inputs, mode)
+    def process(self, inputs: list):
+        ctx = EvalContext.of(inputs, self.mode)
         if not self.grouped:
             return self._reduce_whole(ctx)
         return self._reduce_grouped(ctx)
@@ -114,10 +114,10 @@ class PolarsAggregateOp(AggregateOp, PhysicalOp):
         return refuse_unsupported_exprs(
             op, [*(agg for _, agg in op.aggregations), *op.grouping])
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # pandas treats floating NaN as missing for grouping and reductions.
         frame = inputs[0].with_columns(pl.col(pl.Float32, pl.Float64).fill_nan(None))
-        ctx = EvalContext.of([frame, *inputs[1:]], mode)
+        ctx = EvalContext.of([frame, *inputs[1:]], self.mode)
         if self.grouped and self.counts_group_rows():
             # The rows per group, not a count per column; pandas names it "size".
             exprs = [pl.len().alias("size")]

@@ -21,7 +21,7 @@ from stratum.optimizer.physical._registry import physical_impl
 
 @physical_impl(of=RenameOp, backend="pandas")
 class PandasRenameOp(RenameOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # Only the axes being renamed: a Series takes no ``columns``.
         axes = {k: v for k, v in (("columns", self.columns), ("index", self.index))
                 if v is not None}
@@ -37,7 +37,7 @@ class PolarsRenameOp(RenameOp, PhysicalOp):
             return False
         return True
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         kwargs = _resolve_kwargs({"columns": self.columns, "errors": self.errors}, inputs)
         return inputs[0].rename(kwargs["columns"], strict=kwargs["errors"] == "raise")
 
@@ -46,13 +46,13 @@ class PolarsRenameOp(RenameOp, PhysicalOp):
 
 @physical_impl(of=ResetIndexOp, backend="pandas")
 class PandasResetIndexOp(ResetIndexOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0].reset_index(drop=True)
 
 
 @physical_impl(of=ResetIndexOp, backend="polars")
 class PolarsResetIndexOp(ResetIndexOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # polars rows carry no labels to drop, so there is nothing to do.
         return inputs[0]
 
@@ -61,13 +61,13 @@ class PolarsResetIndexOp(ResetIndexOp, PhysicalOp):
 
 @physical_impl(of=ShapeOp, backend="pandas")
 class PandasShapeOp(ShapeOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0].shape
 
 
 @physical_impl(of=ShapeOp, backend="polars")
 class PolarsShapeOp(ShapeOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # polars shapes match pandas': (n_rows, n_cols), or (n,) for a series.
         return inputs[0].shape
 
@@ -86,12 +86,12 @@ class _ColumnNamesExec(ColumnNamesOp, PhysicalOp):
 
 @physical_impl(of=ColumnNamesOp, backend="pandas")
 class PandasColumnNamesOp(_ColumnNamesExec):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0].columns
 
 
 @physical_impl(of=ColumnNamesOp, backend="polars")
 class PolarsColumnNamesOp(_ColumnNamesExec):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # polars lists the names as plain strings; pandas callers expect an Index.
         return pd.Index(inputs[0].columns)

@@ -381,7 +381,7 @@ class TestSeriesMaskFolding(unittest.TestCase):
         pool_values = {}
         for op in ops:
             pool_values[id(op)] = op.process(
-                "fit_transform", [pool_values[id(i)] for i in op.inputs])
+                [pool_values[id(i)] for i in op.inputs])
         expected = self.df["v"][self.df["v"] >= 3]
         pd.testing.assert_series_equal(pool_values[id(ops[-1])], expected)
 

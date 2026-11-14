@@ -98,7 +98,7 @@ def test_sample_greedy_selector_falls_back_to_pandas(field, value):
     bound = greedy_bind(SampleSelectionOp(**fields))
 
     assert isinstance(bound, PandasSampleSelectionOp)
-    assert_pandas_frame_equal(bound.process("fit_transform", [frame]), expected)
+    assert_pandas_frame_equal(bound.process([frame]), expected)
 
 
 @pytest.mark.parametrize("method,kwargs", [
@@ -161,7 +161,7 @@ def test_series_drop_duplicates_keep_in_greedy_plan(keep):
 def test_polars_series_dropna_removes_nan_and_null():
     series = pl.Series("x", [1.0, np.nan, None])
     op = PolarsSeriesDropMissingSelectionOp()
-    assert op.process("fit_transform", [series]).to_list() == [1.0]
+    assert op.process([series]).to_list() == [1.0]
 
 
 class TestPandasSampleSelectionOp(unittest.TestCase):
@@ -170,7 +170,7 @@ class TestPandasSampleSelectionOp(unittest.TestCase):
         op = PandasSampleSelectionOp(n=OperandRef(1), with_replacement=OperandRef(2),
                                      weights="weight", seed=OperandRef(3), ignore_index=True)
 
-        result = op.process("fit_transform", [frame, 3, False, 7])
+        result = op.process([frame, 3, False, 7])
         expected = frame.sample(n=3, replace=False, weights="weight", random_state=7,
                                 ignore_index=True)
 
@@ -210,7 +210,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         op = SampleSelectionOp(n=2, weights=OperandRef(1), seed=7)
 
         bound = greedy_bind(op)
-        result = bound.process("fit_transform", [frame, weights])
+        result = bound.process([frame, weights])
         expected = frame.sample(n=2, weights=weights, random_state=7)
 
         self.assertIsInstance(bound, PandasSampleSelectionOp)
@@ -229,7 +229,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
     def test_process_defaults_to_one_row(self):
         frame = pl.DataFrame({"x": range(5)})
 
-        result = PolarsSampleSelectionOp().process("fit_transform", [frame])
+        result = PolarsSampleSelectionOp().process([frame])
 
         self.assertEqual(1, result.height)
 
@@ -237,8 +237,8 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"x": range(5)})
         op = PolarsSampleSelectionOp(frac=0.5, seed=7)
 
-        first = op.process("fit", [frame])
-        second = op.process("fit", [frame])
+        first = op.process([frame])
+        second = op.process([frame])
 
         self.assertEqual(2, first.height)
         assert_polars_frame_equal(first, second)
@@ -247,7 +247,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"x": range(3)})
         op = PolarsSampleSelectionOp(n=8, with_replacement=True, seed=7)
 
-        result = op.process("fit", [frame])
+        result = op.process([frame])
 
         self.assertEqual(8, result.height)
 
@@ -255,7 +255,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame(schema={"x": pl.Int64})
         op = PolarsSampleSelectionOp(frac=0.0, seed=7)
 
-        result = op.process("fit", [frame])
+        result = op.process([frame])
 
         assert_polars_frame_equal(result, frame)
 
@@ -263,7 +263,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"x": [42]})
         op = PolarsSampleSelectionOp(seed=7)
 
-        result = op.process("fit", [frame])
+        result = op.process([frame])
 
         assert_polars_frame_equal(result, frame)
 
@@ -273,7 +273,7 @@ def test_sample_resolves_optional_operands_before_defaults(n, fraction):
     frame = pd.DataFrame({"x": range(5)})
     op = PolarsSampleSelectionOp(n=OperandRef(1), frac=OperandRef(2))
 
-    result = op.process("fit_transform", [pl.from_pandas(frame), n, fraction])
+    result = op.process([pl.from_pandas(frame), n, fraction])
 
     assert result.height == len(frame.sample(n=n, frac=fraction))
     assert result.columns == list(frame.columns)
@@ -288,7 +288,7 @@ def test_sample_resolves_optional_operands_before_defaults(n, fraction):
 def test_sample_rejects_resolved_n_and_frac(fields, extra):
     op = PolarsSampleSelectionOp(**fields)
     with pytest.raises(ValueError, match="provide n or frac exclusively"):
-        op.process("fit_transform", [pl.DataFrame({"x": range(5)}), *extra])
+        op.process([pl.DataFrame({"x": range(5)}), *extra])
 
 
 SAMPLE_ROUNDING_CASES = [(5, 0.0, 0), (5, 0.1, 0), (5, 0.3, 2), (5, 0.5, 2), (3, 0.5, 2), (5, 1.0, 5)]
@@ -311,7 +311,7 @@ def test_polars_sample_shuffles_like_pandas():
     # pandas.sample returns a permutation; polars only does with shuffle=True.
     frame = pl.DataFrame({"x": range(20)})
     op = PolarsSampleSelectionOp(frac=1.0, seed=0)
-    result = op.process("fit", [frame])["x"].to_list()
+    result = op.process([frame])["x"].to_list()
     assert sorted(result) == list(range(20))
     assert result != list(range(20))
 
@@ -324,7 +324,7 @@ def test_slice_matches_pandas(impl, from_end, method, args):
     op = impl(*args, from_end=from_end)
     source = frame if impl is PandasSliceSelectionOp else pl.from_pandas(frame)
 
-    result = op.process("fit_transform", [source])
+    result = op.process([source])
     expected = getattr(frame, method)(*args)
 
     assert_polars_frame_equal(pl.DataFrame(result), pl.from_pandas(expected))
@@ -334,7 +334,7 @@ def test_pandas_slice_resolves_runtime_operand():
     frame = pd.DataFrame({"x": range(5)})
     op = PandasSliceSelectionOp(n=OperandRef(1))
 
-    result = op.process("fit_transform", [frame, -2])
+    result = op.process([frame, -2])
 
     assert_pandas_frame_equal(result, frame.head(-2))
 
@@ -343,7 +343,7 @@ def test_polars_slice_resolves_runtime_operand():
     frame = pl.DataFrame({"x": range(5)})
     op = PolarsSliceSelectionOp(n=OperandRef(1), from_end=True)
 
-    result = op.process("fit_transform", [frame, -2])
+    result = op.process([frame, -2])
 
     assert_polars_frame_equal(result, frame.tail(-2))
 
@@ -353,7 +353,7 @@ class TestPandasDropDuplicatesSelectionOp(unittest.TestCase):
         frame = pd.DataFrame({"k": [1, 1, 2], "v": ["a", "b", "c"]})
         op = PandasDropDuplicatesSelectionOp(subset=OperandRef(1), keep="none")
 
-        result = op.process("fit_transform", [frame, "k"])
+        result = op.process([frame, "k"])
         expected = frame.drop_duplicates(subset="k", keep=False)
 
         assert_pandas_frame_equal(result, expected)
@@ -376,14 +376,14 @@ class TestPolarsDropDuplicatesSelectionOp(unittest.TestCase):
     def test_default_keeps_first_and_maintains_order(self):
         frame = pl.DataFrame({"k": [2, 1, 2]})
 
-        result = PolarsDropDuplicatesSelectionOp().process("fit_transform", [frame])
+        result = PolarsDropDuplicatesSelectionOp().process([frame])
 
         self.assertEqual([2, 1], result["k"].to_list())
 
     def test_keep_none_drops_every_copy(self):
         frame = pl.DataFrame({"k": [2, 1, 2]})
 
-        result = PolarsDropDuplicatesSelectionOp(keep="none").process("fit_transform", [frame])
+        result = PolarsDropDuplicatesSelectionOp(keep="none").process([frame])
 
         self.assertEqual([1], result["k"].to_list())
 
@@ -391,7 +391,7 @@ class TestPolarsDropDuplicatesSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"k": [2, 1, 2], "v": ["a", "b", "c"]})
         op = PolarsDropDuplicatesSelectionOp(subset=OperandRef(1))
 
-        result = op.process("fit_transform", [frame, "k"])
+        result = op.process([frame, "k"])
 
         self.assertEqual(["a", "b"], result["v"].to_list())
 
@@ -413,8 +413,8 @@ def test_drop_duplicate_rows_match_pandas(subset, keep, expected_ids):
     pandas_frame, polars_frame = duplicate_frames()
     fields = {"subset": subset, "keep": _KEEP_FIELD[keep]}
 
-    pandas_result = PandasDropDuplicatesSelectionOp(**fields).process("fit_transform", [pandas_frame])
-    polars_result = PolarsDropDuplicatesSelectionOp(**fields).process("fit_transform", [polars_frame])
+    pandas_result = PandasDropDuplicatesSelectionOp(**fields).process([pandas_frame])
+    polars_result = PolarsDropDuplicatesSelectionOp(**fields).process([polars_frame])
 
     assert pandas_frame.drop_duplicates(subset=subset, keep=keep)["id"].tolist() == expected_ids
     assert pandas_result["id"].tolist() == expected_ids
@@ -432,8 +432,8 @@ def test_default_subset_matches_pandas(keep, expected_values):
     polars_frame = pl.DataFrame(rows)
     fields = {"keep": _KEEP_FIELD[keep]}
 
-    pandas_result = PandasDropDuplicatesSelectionOp(**fields).process("fit_transform", [pandas_frame])
-    polars_result = PolarsDropDuplicatesSelectionOp(**fields).process("fit_transform", [polars_frame])
+    pandas_result = PandasDropDuplicatesSelectionOp(**fields).process([pandas_frame])
+    polars_result = PolarsDropDuplicatesSelectionOp(**fields).process([polars_frame])
 
     assert pandas_result["v"].tolist() == expected_values
     assert_polars_frame_equal(polars_result, polars_frame[pandas_result.index.to_list()])
@@ -443,8 +443,8 @@ def test_drop_duplicates_empty_input_matches_pandas():
     pandas_frame = pd.DataFrame({"k": pd.Series(dtype="int64"), "v": pd.Series(dtype="str")})
     polars_frame = pl.DataFrame(schema={"k": pl.Int64, "v": pl.String})
 
-    pandas_result = PandasDropDuplicatesSelectionOp().process("fit_transform", [pandas_frame])
-    polars_result = PolarsDropDuplicatesSelectionOp().process("fit_transform", [polars_frame])
+    pandas_result = PandasDropDuplicatesSelectionOp().process([pandas_frame])
+    polars_result = PolarsDropDuplicatesSelectionOp().process([polars_frame])
 
     assert pandas_result.to_dict("records") == polars_result.to_dicts()
 
@@ -453,8 +453,8 @@ def test_drop_duplicates_single_row_matches_pandas():
     pandas_frame = pd.DataFrame({"k": [1], "v": ["a"]})
     polars_frame = pl.DataFrame({"k": [1], "v": ["a"]})
 
-    pandas_result = PandasDropDuplicatesSelectionOp().process("fit_transform", [pandas_frame])
-    polars_result = PolarsDropDuplicatesSelectionOp().process("fit_transform", [polars_frame])
+    pandas_result = PandasDropDuplicatesSelectionOp().process([pandas_frame])
+    polars_result = PolarsDropDuplicatesSelectionOp().process([polars_frame])
 
     assert pandas_result.to_dict("records") == polars_result.to_dicts()
 
@@ -477,8 +477,8 @@ def test_dropna_rows_match_pandas(kwargs, fields, expected_s):
     pandas_frame = pd.DataFrame(rows)
     polars_frame = pl.DataFrame(rows)
 
-    pandas_result = PandasDropMissingSelectionOp(**fields).process("fit_transform", [pandas_frame])
-    polars_result = PolarsDropMissingSelectionOp(**fields).process("fit_transform", [polars_frame])
+    pandas_result = PandasDropMissingSelectionOp(**fields).process([pandas_frame])
+    polars_result = PolarsDropMissingSelectionOp(**fields).process([polars_frame])
 
     assert pandas_frame.dropna(**kwargs)["s"].tolist() == expected_s
     assert pandas_result["s"].tolist() == expected_s
@@ -495,7 +495,7 @@ class TestPolarsDropMissingSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"f": [1.0, np.nan, None], "s": ["a", "b", "c"]})
         op = PolarsDropMissingSelectionOp(subset=OperandRef(1), min_present=OperandRef(2))
 
-        result = op.process("fit_transform", [frame, ["f", "s"], 2])
+        result = op.process([frame, ["f", "s"], 2])
 
         self.assertEqual(["a"], result["s"].to_list())
 
@@ -510,7 +510,7 @@ class TestDropLabelsSelectionOp(unittest.TestCase):
         frame = pd.DataFrame({"x": [1, 2, 3]}, index=["a", "b", "c"])
         op = PandasDropLabelsSelectionOp(labels=OperandRef(1), errors="ignore")
 
-        result = op.process("fit_transform", [frame, ["b", "z"]])
+        result = op.process([frame, ["b", "z"]])
 
         assert_pandas_frame_equal(result, frame.drop(index=["b", "z"], errors="ignore"))
 

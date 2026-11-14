@@ -397,9 +397,9 @@ def test_q3_filter_binds_query_impl_under_flag():
         assert isinstance(shipped, PandasIndexSelectionOp)
         # The date selections take the shared date as a second input, which
         # the runtime resolves from the ValueOp; pass it directly here.
-        result = segment.process("fit_transform", [df])
+        result = segment.process([df])
         for sel in (ordered, shipped):
-            result = sel.process("fit_transform", [result, CUTOFF])
+            result = sel.process([result, CUTOFF])
         pd.testing.assert_frame_equal(
             expected, pd.DataFrame(result).reset_index(drop=True), check_dtype=False)
 

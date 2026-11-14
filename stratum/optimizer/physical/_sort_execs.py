@@ -16,7 +16,7 @@ from stratum.optimizer.physical._registry import physical_impl
 
 @physical_impl(of=SortOp, backend="pandas")
 class PandasSortOp(SortOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         obj = inputs[0]
         ascending = (self.ascending if isinstance(self.ascending, bool)
                      else list(self.ascending))
@@ -33,7 +33,7 @@ class PolarsSortOp(SortOp, PhysicalOp):
     # A pandas Series (notably value_counts' pandas fallback) keeps its index on
     # pandas: its frame library is pandas, which this impl does not accept (#226).
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         obj = inputs[0]
         descending = (not self.ascending if isinstance(self.ascending, bool)
                       else [not flag for flag in self.ascending])

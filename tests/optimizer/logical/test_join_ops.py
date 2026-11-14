@@ -19,7 +19,7 @@ def _evaluate(ops):
     pool = BufferPool()
     for op in ops:
         inputs = [pool.pin(key) for key in op.inputs]
-        pool.put(op, op.process("fit_transform", inputs))
+        pool.put(op, op.process(inputs))
     return pool.pin(ops[-1])
 
 

@@ -58,7 +58,7 @@ def _impl(op_type, backend, supports=lambda op, ctx: True, impl_class=None):
 
 
 class DummyOp(Op):
-    def process(self, mode, inputs):
+    def process(self, inputs):
         return "dummy"
 
 
@@ -351,7 +351,7 @@ class TestPlanTimeBinding(unittest.TestCase):
         self.assertIsInstance(op, BoundDummyOp)
         self.assertEqual([op], bound)
         # Execution afterwards is the op's plain process -- nothing left to decide.
-        self.assertEqual("dummy", op.process("fit_transform", []))
+        self.assertEqual("dummy", op.process([]))
 
     def test_supports_filter_excludes_candidates(self):
         class FailDummyOp(DummyOp, PhysicalOp):

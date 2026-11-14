@@ -45,7 +45,7 @@ class SplitOp(Op):
         """
         return self.inputs[2] if len(self.inputs) > 2 else None
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         x, y = inputs[0], inputs[1]
         train, test = self.indices
         return (*_take(x, y, train), *_take(x, y, test))
@@ -87,7 +87,7 @@ class SplitOutput(Op):
         src = split_op.inputs[0 if self.is_x else 1]
         self.output_schema = src.output_schema
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0][(0 if self.train else 2) + (0 if self.is_x else 1)]
 
 class BuildSplitterOp(Op):
@@ -108,7 +108,7 @@ class BuildSplitterOp(Op):
         self.cv = cv
         self.split_kwargs = split_kwargs
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         cv = _resolve_operand(self.cv, inputs)
         split_kwargs = _resolve_operand(self.split_kwargs, inputs)
         # `split_kwargs` defaults to None when only `cv` is passed.

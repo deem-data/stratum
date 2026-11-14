@@ -378,8 +378,8 @@ def test_q5_filter_binds_query_impl_under_flag():
                            BinOpExpr(operator.ge, Col("o_orderdate"), Const(START)),
                            BinOpExpr(operator.lt, Col("o_orderdate"), Const(END))))
         assert isinstance(region, impl) and isinstance(window, impl)
-        result = region.process("fit_transform", [df])
-        result = window.process("fit_transform", [result])
+        result = region.process([df])
+        result = window.process([result])
         pd.testing.assert_frame_equal(
             expected, pd.DataFrame(result).reset_index(drop=True), check_dtype=False)
 

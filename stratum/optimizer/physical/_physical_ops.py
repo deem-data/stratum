@@ -129,8 +129,8 @@ class EstimatorExecution:
     and implementations without a dedicated estimate yet.
     """
 
-    def process(self, mode: str, inputs: list):
-        task_data = self.extract_args_from_inputs(mode, inputs)
+    def process(self, inputs: list):
+        task_data = self.extract_args_from_inputs(inputs)
         result, estimator = self.get_process_task()(task_data)
         if self.produces_state:
             # Update the estimate after fitting; response calls do not recompute it.

@@ -108,7 +108,7 @@ def test_prediction_failure_releases_state_and_pins(monkeypatch):
     sched = SequentialScheduler(ops, None)
     fitted = []
 
-    def fail(mode, inputs):
+    def fail(inputs):
         fitted.append(weakref.ref(inputs[1]))
         raise ValueError("prediction failed")
 

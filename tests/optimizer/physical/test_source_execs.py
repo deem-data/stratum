@@ -153,47 +153,47 @@ class TestConcreteSourceProcess(unittest.TestCase):
     def test_numpy_read(self):
         with npy_file(np.array([1, 2, 3])) as path:
             op = NumpyLoad(file_path=path)
-            result = op.process("fit_transform", [])
+            result = op.process([])
             np.testing.assert_array_equal(result, [1, 2, 3])
 
     def test_pandas_from_dataframe(self):
         df = pd.DataFrame({"a": [1, 2]})
         op = PandasInMemoryFrame(data=df)
-        self.assertIs(df, op.process("fit_transform", []))
+        self.assertIs(df, op.process([]))
 
     def test_pandas_from_a_polars_dataframe(self):
         op = PandasInMemoryFrame(data=pl.DataFrame({"a": [1, 2]}))
-        result = op.process("fit_transform", [])
+        result = op.process([])
         self.assertIsInstance(result, pd.DataFrame)
         self.assertEqual([1, 2], result["a"].tolist())
 
     def test_polars_from_dataframe(self):
         op = PolarsInMemoryFrame(data=pd.DataFrame({"a": [1, 2]}))
-        self.assertIsInstance(op.process("fit_transform", []), pl.DataFrame)
+        self.assertIsInstance(op.process([]), pl.DataFrame)
 
     def test_polars_read_csv(self):
         with csv_file(pd.DataFrame({"a": [1, 2]})) as path:
             op = PolarsReadCSV(file_path=path)
-            self.assertIsInstance(op.process("fit_transform", []), pl.DataFrame)
+            self.assertIsInstance(op.process([]), pl.DataFrame)
 
     def test_pandas_read_parquet(self):
         with parquet_file(pd.DataFrame({"a": [1, 2], "b": [3, 4]})) as path:
             op = PandasReadParquet(file_path=path)
-            result = op.process("fit_transform", [])
+            result = op.process([])
             self.assertIsInstance(result, pd.DataFrame)
             self.assertEqual([1, 2], result["a"].tolist())
 
     def test_polars_read_parquet(self):
         with parquet_file(pd.DataFrame({"a": [1, 2]})) as path:
             op = PolarsReadParquet(file_path=path)
-            self.assertIsInstance(op.process("fit_transform", []), pl.DataFrame)
+            self.assertIsInstance(op.process([]), pl.DataFrame)
 
     def test_logical_sources_have_no_process(self):
         # The logical ops are plan-time data only; executing one is a bug.
         for op in (InMemoryFrameOp(data=pd.DataFrame({"a": [1]})),
                    ReadCSVOp(file_path="x.csv")):
             with self.subTest(type(op).__name__), self.assertRaises(NotImplementedError):
-                op.process("fit_transform", [])
+                op.process([])
 
 
 class TestExecutionIsBranchFree(unittest.TestCase):
@@ -247,28 +247,28 @@ class TestPolarsReadOptionTranslation(unittest.TestCase):
     def test_usecols_becomes_columns(self):
         with csv_file(self.df) as path:
             op = PolarsReadCSV(file_path=path, usecols=["x", "y"])
-            self.assertEqual(["x", "y"], op.process("fit_transform", []).columns)
+            self.assertEqual(["x", "y"], op.process([]).columns)
 
     def test_sep_becomes_separator(self):
         with csv_file(self.df, sep=";") as path:
             op = PolarsReadCSV(file_path=path, sep=";")
             self.assertEqual(["x", "y", "unused"],
-                             op.process("fit_transform", []).columns)
+                             op.process([]).columns)
 
     def test_nrows_becomes_n_rows(self):
         with csv_file(self.df) as path:
             op = PolarsReadCSV(file_path=path, nrows=2)
-            self.assertEqual(2, len(op.process("fit_transform", [])))
+            self.assertEqual(2, len(op.process([])))
 
     def test_header_none_becomes_has_header_false(self):
         with csv_file(self.df, header=False) as path:
             op = PolarsReadCSV(file_path=path, header=None)
-            self.assertEqual(3, len(op.process("fit_transform", [])))
+            self.assertEqual(3, len(op.process([])))
 
     def test_names_without_header_keeps_first_row(self):
         with csv_file(self.df) as path:
             options = {"names": ["a", "b", "c"]}
-            result = PolarsReadCSV(file_path=path, **options).process("fit_transform", [])
+            result = PolarsReadCSV(file_path=path, **options).process([])
             expected = pd.read_csv(path, **options)
             self.assertEqual(expected.columns.tolist(), result.columns)
             self.assertEqual(expected.astype(str).values.tolist(),
@@ -277,7 +277,7 @@ class TestPolarsReadOptionTranslation(unittest.TestCase):
     def test_names_with_explicit_header_consumes_first_row(self):
         with csv_file(self.df) as path:
             options = {"names": ["a", "b", "c"], "header": 0}
-            result = PolarsReadCSV(file_path=path, **options).process("fit_transform", [])
+            result = PolarsReadCSV(file_path=path, **options).process([])
             expected = pd.read_csv(path, **options)
             self.assertEqual(expected.columns.tolist(), result.columns)
             self.assertEqual(expected.values.tolist(),
@@ -286,7 +286,7 @@ class TestPolarsReadOptionTranslation(unittest.TestCase):
     def test_parquet_columns_pass_through(self):
         with parquet_file(self.df) as path:
             op = PolarsReadParquet(file_path=path, columns=["x"])
-            self.assertEqual(["x"], op.process("fit_transform", []).columns)
+            self.assertEqual(["x"], op.process([]).columns)
 
     def test_untranslatable_option_is_refused_at_plan_time(self):
         # index_col has no polars counterpart, so polars refuses the read in
@@ -335,7 +335,7 @@ class TestPolarsReadOptionTranslation(unittest.TestCase):
         with csv_file(self.df) as path:
             op = PolarsReadCSV(file_path=path, header=2)
             with self.assertRaises(ValueError):
-                op.process("fit_transform", [])
+                op.process([])
 
     def test_parquet_filters_select_the_plan_backend(self):
         # pyarrow `filters` used to fail the whole polars plan at selection time.
@@ -348,7 +348,7 @@ class TestPolarsReadOptionTranslation(unittest.TestCase):
     def test_untranslatable_parquet_filter_is_rejected(self):
         op = PolarsReadParquet(file_path="x.parquet", filters=[("x", "like", "a%")])
         with self.assertRaises(ValueError):
-            op.process("fit_transform", [])
+            op.process([])
 
     def test_fsspec_storage_options_become_object_store_keys(self):
         # Passed verbatim, polars ignored gcsfs' `token` and read the bucket
@@ -402,7 +402,7 @@ class TestPolarsReadOptionValues(unittest.TestCase):
         self.assertTrue(PolarsReadCSV.supports(op, PlanContext.from_flags()),
                         getattr(op, "_unsupported_reason", None))
         pd.testing.assert_frame_equal(pd.read_csv(path, **options),
-                                      op.process("fit_transform", []).to_pandas(),
+                                      op.process([]).to_pandas(),
                                       check_dtype=False)
 
     def assert_refused(self, op, reason):
@@ -483,7 +483,7 @@ class TestPolarsParquetFilters(unittest.TestCase):
     def assert_matches_pandas(self, **options):
         expected = pd.read_parquet(self.root, **options)
         result = PolarsReadParquet(file_path=self.root, **options).process(
-            "fit_transform", [])
+            [])
         columns = options.get("columns") or ["x", "kind"]
         self.assertEqual(columns, [c for c in result.columns if c in columns])
         key = ["x"] if "x" in columns else columns

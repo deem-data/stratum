@@ -189,8 +189,8 @@ def test_fused_stratum_table_vectorizer_fits_and_transforms_with_rust_leaves(cap
         allow_patch=False,
         debug_timing=True,
     ):
-        fitted = op.process(op.mode, [train])
-        transformed = response_op(op).process(op.fallback_mode, [test, fitted.state])
+        fitted = op.process([train])
+        transformed = response_op(op).process([test, fitted.state])
 
     assert "[rust]" in capture_std_out(capfd)
     assert fitted.output.shape[1] == transformed.shape[1]

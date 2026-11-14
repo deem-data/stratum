@@ -217,7 +217,7 @@ class Scheduler:
             if obs is not None:
                 token = obs.before(node)
             t1 = perf_counter()
-            result = op.process(mode=op.mode, inputs=inputs)
+            result = op.process(inputs=inputs)
             t2 = perf_counter()
 
             # 3. Release input pins and borrowed references.

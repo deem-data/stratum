@@ -10,7 +10,7 @@ from stratum.optimizer.physical._representation import FrameLib
 
 
 class ValueExec(ValueOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         out = self.value
         self.value = None
         return out
@@ -20,7 +20,7 @@ class MethodCallExec(MethodCallOp, PhysicalOp):
     #: Runs the recorded pandas method verbatim (#226).
     frame_lib = FrameLib.PANDAS
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         obj = inputs[0]
         args = _resolve_args(self.args, inputs)
         kwargs = _resolve_kwargs(self.kwargs, inputs)
@@ -33,7 +33,7 @@ class CallExec(CallOp, PhysicalOp):
     #: Runs the recorded call verbatim; its frame operands are pandas (#226).
     frame_lib = FrameLib.PANDAS
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         args = _resolve_args(self.args, inputs)
         kwargs = _resolve_kwargs(self.kwargs, inputs)
         return self.func(*args, **kwargs)

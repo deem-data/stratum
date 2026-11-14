@@ -66,7 +66,7 @@ class PandasQuerySelectionOp(MaskSelectionOp, PhysicalOp):
         self.query = to_pandas_query(self.predicate, params)
         self.query_params = params
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0].query(self.query, local_dict=self.query_params)
 
 
@@ -78,8 +78,8 @@ class PandasIndexSelectionOp(MaskSelectionOp, PhysicalOp):
     def supports(cls, op: MaskSelectionOp, ctx) -> bool:
         return not (ctx.pandas_query and _query_selectable(op))
 
-    def process(self, mode: str, inputs: list):
-        return inputs[0][to_pandas(self.predicate, EvalContext.of(inputs, mode))]
+    def process(self, inputs: list):
+        return inputs[0][to_pandas(self.predicate, EvalContext.of(inputs, self.mode))]
 
 
 @physical_impl(of=MaskSelectionOp, backend="polars")
@@ -90,8 +90,8 @@ class PolarsMaskSelectionOp(MaskSelectionOp, PhysicalOp):
         # pandas, which this impl does not accept (#226).
         return op.predicate is None or refuse_unsupported_exprs(op, [op.predicate])
 
-    def process(self, mode: str, inputs: list):
-        return inputs[0].filter(to_polars(self.predicate, EvalContext.of(inputs, mode)))
+    def process(self, inputs: list):
+        return inputs[0].filter(to_polars(self.predicate, EvalContext.of(inputs, self.mode)))
 
 
 # --- SliceSelectionOp -----------------------------------------------------------
@@ -104,13 +104,13 @@ def _slice(op: SliceSelectionOp, inputs: list):
 
 @physical_impl(of=SliceSelectionOp, backend="pandas")
 class PandasSliceSelectionOp(SliceSelectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return _slice(self, inputs)
 
 
 @physical_impl(of=SliceSelectionOp, backend="polars")
 class PolarsSliceSelectionOp(SliceSelectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return _slice(self, inputs)
 
 
@@ -118,7 +118,7 @@ class PolarsSliceSelectionOp(SliceSelectionOp, PhysicalOp):
 
 @physical_impl(of=SampleSelectionOp, backend="pandas")
 class PandasSampleSelectionOp(SampleSelectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         kwargs = _resolve_kwargs({
             "n": self.n, "frac": self.frac, "replace": self.with_replacement,
             "weights": self.weights, "random_state": self.seed,
@@ -154,7 +154,7 @@ class PolarsSampleSelectionOp(SampleSelectionOp, PhysicalOp):
     def supports(cls, op: SampleSelectionOp, ctx) -> bool:
         return op.weights is None and (op.seed is None or isinstance(op.seed, Integral))
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0].sample(**get_polars_sample_kwargs(self, inputs))
 
 
@@ -165,7 +165,7 @@ _PANDAS_KEEP = {"first": "first", "last": "last", "none": False}
 
 @physical_impl(of=DropDuplicatesSelectionOp, backend="pandas")
 class PandasDropDuplicatesSelectionOp(DropDuplicatesSelectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         kwargs = {"keep": _PANDAS_KEEP[self.keep], "ignore_index": self.ignore_index}
         if self.subset is not None:  # a Series takes no subset
             kwargs["subset"] = self.subset
@@ -178,7 +178,7 @@ class PolarsDropDuplicatesSelectionOp(DropDuplicatesSelectionOp, PhysicalOp):
     def supports(cls, op: DropDuplicatesSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.FRAME
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         subset = _resolve_operand(self.subset, inputs)
         return inputs[0].unique(subset=subset, keep=self.keep, maintain_order=True)
 
@@ -191,7 +191,7 @@ class PolarsSeriesDropDuplicatesSelectionOp(DropDuplicatesSelectionOp, PhysicalO
     def supports(cls, op: DropDuplicatesSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.SERIES
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         series = inputs[0]
         return series.filter(getattr(series, self._KEEP_MASK[self.keep])())
 
@@ -200,7 +200,7 @@ class PolarsSeriesDropDuplicatesSelectionOp(DropDuplicatesSelectionOp, PhysicalO
 
 @physical_impl(of=DropMissingSelectionOp, backend="pandas")
 class PandasDropMissingSelectionOp(DropMissingSelectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         kwargs = {"ignore_index": self.ignore_index}
         if self.subset is not None:  # a Series takes neither subset nor thresh
             kwargs["subset"] = self.subset
@@ -231,7 +231,7 @@ class PolarsDropMissingSelectionOp(DropMissingSelectionOp, PhysicalOp):
     def supports(cls, op: DropMissingSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.FRAME
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         subset, min_present = (_resolve_operand(v, inputs)
                                for v in (self.subset, self.min_present))
         return inputs[0].filter(_present_count_predicate(subset, min_present))
@@ -243,7 +243,7 @@ class PolarsSeriesDropMissingSelectionOp(DropMissingSelectionOp, PhysicalOp):
     def supports(cls, op: DropMissingSelectionOp, ctx) -> bool:
         return op.output_type is OutputType.SERIES
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0].drop_nulls().drop_nans()
 
 
@@ -251,7 +251,7 @@ class PolarsSeriesDropMissingSelectionOp(DropMissingSelectionOp, PhysicalOp):
 
 @physical_impl(of=DropLabelsSelectionOp, backend="pandas")
 class PandasDropLabelsSelectionOp(DropLabelsSelectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         kwargs = _resolve_kwargs(
             {"index": self.labels, "level": self.level, "errors": self.errors}, inputs)
         return inputs[0].drop(**kwargs)

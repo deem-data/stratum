@@ -135,7 +135,7 @@ class ImplOp(Op):
 
         return SimpleNamespace(**{field: replace_dataop(getattr(self.skrub_impl, field)) for field in self.skrub_impl._fields})
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         impl = self.skrub_impl
         if hasattr(impl, "eval"):
             # An eval method combines dependency requests with computation.
@@ -146,7 +146,7 @@ class ImplOp(Op):
             last_yield = None
             # Variables are resolved to constants at compile time, so the skrub
             # impl needs no environment -- its inputs arrive via the generator.
-            gen = impl.eval(mode=mode, environment={})
+            gen = impl.eval(mode=self.mode, environment={})
             while True:
                 try:
                     last_yield = gen.send(last_yield)
@@ -157,7 +157,7 @@ class ImplOp(Op):
                     last_yield = inputs[k]
         else:
             ns = self.replace_fields_with_values(inputs)
-            return impl.compute(ns, mode, {})
+            return impl.compute(ns, self.mode, {})
 
 
 class SplitXOp(Op):
@@ -176,7 +176,7 @@ class SplitXOp(Op):
     def source(self) -> Op:
         return self.inputs[self.operand_index[id(self.skrub_impl.X)]]
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         raise RuntimeError("SplitXOp should be replaced by the splitting rewrite before execution")
 
 
@@ -196,7 +196,7 @@ class VariableOp(Op):
         # Two `var("x")` references denote the same input regardless of identity.
         return (VariableOp, self.name)
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # Variables are resolved to constant ValueOps at compile time (see as_op
         # with an `env`), so a VariableOp should never reach the runtime.
         raise RuntimeError(
@@ -328,12 +328,13 @@ class BaseEstimatorOp(Op):
         new_op.was_cloned = True
         return new_op
 
-    def extract_args_from_inputs(self, mode: str, inputs: list):
+    def extract_args_from_inputs(self, inputs: list):
         """Resolve estimator arguments into a tuple for the execution task.
 
         Worker-process execution requires the estimator and argument values
         themselves to support serialization.
         """
+        mode = self.mode
         fitting = self.produces_state
         x = inputs[0]
         assert x is not None, f"X is None for {self}"
@@ -371,9 +372,9 @@ class BaseEstimatorOp(Op):
             self.parallelism
         )
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         # A separate task function supports local and worker-process execution.
-        task_data = self.extract_args_from_inputs(mode, inputs)
+        task_data = self.extract_args_from_inputs(inputs)
         process_task = self.get_process_task()
         result, estimator = process_task(task_data)
         return Fitted(result, estimator) if self.produces_state else result
@@ -400,7 +401,7 @@ class TransformerOp(BaseEstimatorOp):
     fit_kwargs_key = "fit_transform"
     call_kwargs_key = "transform"
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         raise NotImplementedError("TransformerOp must be lowered before execution")
 
     def get_process_task(self):
@@ -547,7 +548,7 @@ class ChoiceOp(Op):
         # stay distinct even when two outcomes are the same op.
         return True
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         results = [{"id" : name, "vals" : inputs[i]} for i, name in enumerate(self.make_outcome_names())]
         return results[0] if len(results) == 1 else results
 
@@ -630,7 +631,7 @@ class GetAttrOp(Op):
         super().__init__(name=attr_name if attr_name else '?')
         self.attr_name = attr_name
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         if self.output_type is OutputType.FRAME:
             result = inputs[0]
             for attr in self.attr_name:
@@ -735,7 +736,7 @@ class BinOp(Op):
         :func:`_elementwise_schema`."""
         self.output_schema = _elementwise_schema(self, (self.left, self.right))
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         left = inputs[self.left.k] if isinstance(self.left, OperandRef) else self.left
         right = inputs[self.right.k] if isinstance(self.right, OperandRef) else self.right
         return apply_binary(self.op, left, right)
@@ -774,6 +775,6 @@ class UnaryOp(Op):
         """As :class:`BinOp`, for the unary case (``~mask``, ``-df``, ``abs(df)``)."""
         self.output_schema = _elementwise_schema(self, (self.operand,))
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         operand = inputs[self.operand.k] if isinstance(self.operand, OperandRef) else self.operand
         return self.op(operand)

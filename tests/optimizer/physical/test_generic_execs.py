@@ -28,13 +28,13 @@ def test_generic_ops_lower_in_place_and_execute():
         assert isinstance(lowered, expected_type)
         assert isinstance(lowered, PhysicalOp)
         assert " [df]" not in str(lowered)
-        assert lowered.process("fit_transform", inputs) == expected
+        assert lowered.process(inputs) == expected
 
 
 def test_generic_transformer_lowers_in_place():
     op = TransformerOp(estimator=MinMaxScaler(), cols=selectors.all(), no_wrap=True)
     with pytest.raises(NotImplementedError, match="must be lowered"):
-        op.process("fit_transform", [pd.DataFrame({"x": [1.0, 2.0]})])
+        op.process([pd.DataFrame({"x": [1.0, 2.0]})])
     original_id = id(op)
     lowered = lower_to_physical(op, PlanContext.from_flags())
     assert id(lowered) == original_id
@@ -42,5 +42,5 @@ def test_generic_transformer_lowers_in_place():
     assert isinstance(lowered, PhysicalOp)
     lowered.output_type = OutputType.FRAME
     assert " [df]" not in str(lowered)
-    result = lowered.process("fit_transform", [pd.DataFrame({"x": [1.0, 2.0]})])
+    result = lowered.process([pd.DataFrame({"x": [1.0, 2.0]})])
     assert result.output.shape == (2, 1)

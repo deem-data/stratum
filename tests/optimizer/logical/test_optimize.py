@@ -104,7 +104,7 @@ class TestResolveConstants(unittest.TestCase):
         pool = BufferPool()
         for op in out:
             inputs = [pool.pin(k) for k in op.inputs]
-            pool.put(op, op.process("fit_transform", inputs))
+            pool.put(op, op.process(inputs))
         result = pool.pin(out[-1])
         pd.testing.assert_frame_equal(
             result.reset_index(drop=True), self.df[["x"]])

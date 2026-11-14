@@ -16,7 +16,7 @@ from stratum.optimizer.physical._registry import physical_impl
 @physical_impl(of=JoinOp, backend="pandas")
 class PandasJoinOp(JoinOp, PhysicalOp):
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         if len(inputs) != 2:
             raise ValueError(f"JoinOp expects exactly 2 inputs (left and right dataframes), got {len(inputs)}.")
         left_df, right_df = inputs
@@ -48,7 +48,7 @@ class PolarsJoinOp(JoinOp, PhysicalOp):
             return True
         return False
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         if len(inputs) != 2:
             raise ValueError(f"JoinOp expects exactly 2 inputs (left and right dataframes), got {len(inputs)}.")
         left_df, right_df = inputs
@@ -107,7 +107,7 @@ class PandasIsInSemiJoinOp(FilteringJoinExec):
                         or isinstance(op.right_on, (list, tuple)) and len(op.right_on) == 1)
         return single_left and single_right
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         left, build = inputs
         if self.right_on is not None:
             key = self.right_on if isinstance(self.right_on, str) else self.right_on[0]
@@ -128,7 +128,7 @@ class PandasMergeSemiJoinOp(FilteringJoinExec):
                 and (right_keys is None and len(left_keys) == 1
                      or right_keys is not None and len(left_keys) == len(right_keys)))
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         left, build = inputs
         left_keys = [self.left_on] if isinstance(self.left_on, str) else list(self.left_on)
         right_keys = ([self.right_on] if isinstance(self.right_on, str)
@@ -164,7 +164,7 @@ class PolarsFilteringJoinOp(FilteringJoinExec):
     def supports(cls, op: FilteringJoinOp, ctx) -> bool:
         return op.left_on is not None
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         left, build = inputs
         left_on = [self.left_on] if isinstance(self.left_on, str) else list(self.left_on)
         if self.right_on is None:

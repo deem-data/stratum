@@ -14,7 +14,7 @@ from stratum._profiler._observer import observe
 
 
 class SameLabelOp(Op):
-    def process(self, mode, inputs):
+    def process(self, inputs):
         return 1
 
 

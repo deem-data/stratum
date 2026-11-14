@@ -63,7 +63,7 @@ class TestMakeReadOp(unittest.TestCase):
             pool = BufferPool()
             for op in ops:
                 inputs = [pool.pin(key) for key in op.inputs]
-                pool.put(op, op.process("fit_transform", inputs))
+                pool.put(op, op.process(inputs))
             self.assertIsInstance(pool.pin(ops[-1]), pd.DataFrame)
 
     def test_with_variable_kwarg(self):
@@ -136,7 +136,7 @@ class TestDeferredReadRewrites(unittest.TestCase):
         for op in ops:
             inputs = [pool.pin(key) for key in op.inputs]
             value = (env[op.name] if isinstance(op, VariableOp)
-                     else op.process("fit_transform", inputs))
+                     else op.process(inputs))
             pool.put(op, value)
         return pool.pin(ops[-1])
 

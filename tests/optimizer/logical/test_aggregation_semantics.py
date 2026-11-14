@@ -21,7 +21,7 @@ def execute(expression):
     ops = optimize(expression, OptConfig(dataframe_ops=True))
     values = {}
     for op in ops:
-        values[id(op)] = op.process("fit_transform", [values[id(i)] for i in op.inputs])
+        values[id(op)] = op.process([values[id(i)] for i in op.inputs])
     return values[id(ops[-1])], ops
 
 
@@ -129,9 +129,9 @@ def test_filtering_join_nulls_order_duplicates_and_index(how):
     for cls in [PandasIsInSemiJoinOp, PandasMergeSemiJoinOp]:
         op = cls(anti=how == "anti", left_on="c")
         assert cls.supports(op, None)
-        pd.testing.assert_frame_equal(op.process("fit_transform", [left, build]), expected)
+        pd.testing.assert_frame_equal(op.process([left, build]), expected)
     op = PolarsFilteringJoinOp(anti=how == "anti", left_on="c")
-    result = op.process("fit_transform", [pl.from_pandas(left), pl.from_pandas(build)])
+    result = op.process([pl.from_pandas(left), pl.from_pandas(build)])
     assert result["_merge"].to_list() == expected["_merge"].tolist()
 
 
@@ -143,7 +143,7 @@ def test_merge_strategy_preserves_object_membership_sentinels(build_values, how)
     build = pd.Series(build_values, dtype=object)
     mask = left["k"].isin(build)
     expected = left[mask if how == "semi" else ~mask]
-    result = PandasMergeSemiJoinOp(anti=how == "anti", left_on="k").process("fit_transform", [left, build])
+    result = PandasMergeSemiJoinOp(anti=how == "anti", left_on="k").process([left, build])
     pd.testing.assert_frame_equal(result, expected)
 
 

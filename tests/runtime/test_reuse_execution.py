@@ -266,7 +266,7 @@ class ResultOp(PhysicalOp):
         self.value = value
         self.cache_key = key
 
-    def process(self, mode, inputs):
+    def process(self, inputs):
         return self.value
 
 
@@ -287,7 +287,7 @@ def test_cache_and_pool_share_values_with_read_only_consumers(value):
         sink.inputs = [source]
         seen = []
 
-        def read(mode, inputs):
+        def read(inputs):
             seen.append(inputs[0])
             return len(inputs[0])
 

@@ -59,7 +59,7 @@ def execute(root):
     values = {}
     for op in topological_iterator(root):
         bind_op(op, PlanContext.from_flags(), selector=DefaultImplementationSelector())
-        values[op] = op.process("fit_transform", [values[p] for p in op.inputs])
+        values[op] = op.process([values[p] for p in op.inputs])
     return values[root]
 
 
@@ -196,7 +196,7 @@ def test_optconfig_disables_literal_inlining():
 def run_plan(ops):
     pool = BufferPool()
     for op in ops:
-        pool.put(op, op.process("fit_transform", [pool.pin(key) for key in op.inputs]))
+        pool.put(op, op.process([pool.pin(key) for key in op.inputs]))
     return pool.pin(ops[-1])
 
 

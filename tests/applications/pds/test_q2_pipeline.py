@@ -398,7 +398,7 @@ def test_q2_filter_binds_query_impl_under_flag():
         assert isinstance(region, impl)
         result = df
         for sel in (size, suffix, region):
-            result = sel.process("fit_transform", [result])
+            result = sel.process([result])
         pd.testing.assert_frame_equal(
             expected, pd.DataFrame(result).reset_index(drop=True), check_dtype=False)
 

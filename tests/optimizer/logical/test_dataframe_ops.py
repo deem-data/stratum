@@ -93,7 +93,7 @@ def run_op(op, *values, mode="fit_transform"):
     op.inputs = [_inp(v) for v in values]
     bind_op(op, plan_context(), selector=selector())
     op.mode = mode
-    return op.process(mode, _inputs_for(op))
+    return op.process(_inputs_for(op))
 
 
 @contextmanager

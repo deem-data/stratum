@@ -22,14 +22,14 @@ from stratum.optimizer.physical._registry import physical_impl
 
 @physical_impl(of=GetItemOp, backend="pandas")
 class PandasGetItemOp(GetItemOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         key = _resolve_operand(self.key, inputs)
         return inputs[0][key]
 
 
 @physical_impl(of=GetItemOp, backend="polars")
 class PolarsGetItemOp(GetItemOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         key = _resolve_operand(self.key, inputs)
         if self.is_filter:
             return inputs[0].filter(key)

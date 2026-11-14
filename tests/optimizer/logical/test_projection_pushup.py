@@ -31,7 +31,7 @@ def polars(request):
 def _run(ops):
     pool = {}
     for op in ops:
-        pool[id(op)] = op.process("fit_transform", [pool[id(i)] for i in op.inputs])
+        pool[id(op)] = op.process([pool[id(i)] for i in op.inputs])
     result = pool[id(ops[-1])]
     return result.to_pandas() if isinstance(result, pl.DataFrame) else result
 

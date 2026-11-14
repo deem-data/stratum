@@ -296,8 +296,8 @@ def test_q4_filter_binds_query_impl_under_flag():
         late = by_predicate(
             ops, BinOpExpr(operator.lt, Col("l_commitdate"), Col("l_receiptdate")))
         assert isinstance(window, impl) and isinstance(late, impl)
-        result = window.process("fit_transform", [df])
-        result = late.process("fit_transform", [result])
+        result = window.process([df])
+        result = late.process([result])
         pd.testing.assert_frame_equal(
             expected, pd.DataFrame(result).reset_index(drop=True), check_dtype=False)
 

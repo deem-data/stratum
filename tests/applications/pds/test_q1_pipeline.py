@@ -269,7 +269,7 @@ def test_q1_filter_binds_query_impl_under_flag():
                         env=get_data(dag))[0]
         sel = _one(ops, SelectionOp)
         assert isinstance(sel, impl)
-        result = sel.process("fit_transform", [df])
+        result = sel.process([df])
         pd.testing.assert_frame_equal(
             expected, pd.DataFrame(result).reset_index(drop=True), check_dtype=False)
 

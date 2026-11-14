@@ -40,7 +40,7 @@ class DeclaredScoringOp(Op):
         super().__init__(inputs=list(inputs) if inputs else [])
         self.scorers = scorers
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0]
 
 
@@ -88,7 +88,7 @@ class CollectCandidatesOp(CandidateSetOp):
 
     logical_family = "CollectCandidates"
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return [{"id": name, "vals": inputs[i]}
                 for i, name in enumerate(self.candidate_names)]
 
@@ -141,7 +141,7 @@ class ScoreCandidatesOp(CandidateSetOp):
         new_op.was_cloned = True
         return new_op
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         y_true = inputs[self.y_ref.k]
         ids, scores, values = [], [], []
         for i, name in enumerate(self.candidate_names):

@@ -543,7 +543,7 @@ class IRNode:
         new_op.was_cloned = True
         return new_op
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         """Execute the bound mode with borrowed data and fitted-state inputs."""
         raise NotImplementedError(f"Processing of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
 

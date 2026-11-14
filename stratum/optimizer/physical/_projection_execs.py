@@ -20,7 +20,7 @@ from stratum.optimizer.physical._registry import physical_impl
 
 @physical_impl(of=DropOp, backend="pandas")
 class PandasDropOp(DropOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         kwargs = _resolve_kwargs(
             {"columns": self.columns, "level": self.level, "errors": self.errors}, inputs)
         return inputs[0].drop(**kwargs)
@@ -35,7 +35,7 @@ class PolarsDropOp(DropOp, PhysicalOp):
             return False
         return True
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         columns, errors = (_resolve_operand(v, inputs) for v in (self.columns, self.errors))
         columns = [columns] if isinstance(columns, str) else list(columns)
         # pandas' errors="ignore" skips labels that are not there.
@@ -65,7 +65,7 @@ class ColumnSelectorExec(ColumnSelectorOp, PhysicalOp):
     Backend implementations define column indexing through ``_select``.
     """
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         frame = inputs[0]
         if self.produces_state:
             columns = resolve_selector_columns(frame, self.selector)
@@ -95,11 +95,11 @@ class PolarsColumnSelectorOp(ColumnSelectorExec):
 
 @physical_impl(of=ColumnProjectionOp, backend="pandas")
 class PandasColumnProjectionOp(ColumnProjectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0][self.key]
 
 
 @physical_impl(of=ColumnProjectionOp, backend="polars")
 class PolarsColumnProjectionOp(ColumnProjectionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return inputs[0][self.key]

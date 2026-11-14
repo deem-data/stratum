@@ -1078,7 +1078,7 @@ class TestIndexAttribute(unittest.TestCase):
         from stratum.runtime._buffer_pool import BufferPool
         pool = BufferPool()
         for op in ops:
-            pool.put(op, op.process("fit_transform", [pool.pin(inp) for inp in op.inputs]))
+            pool.put(op, op.process([pool.pin(inp) for inp in op.inputs]))
         pd.testing.assert_index_equal(pool.pin(ops[-1]), frame.index)
 
 
@@ -1269,7 +1269,7 @@ def _run_plan(dag, env, polars):
         ops = optimize(dag, env=env)
     pool = BufferPool()
     for op in ops:
-        pool.put(op, op.process("fit_transform", [pool.pin(inp) for inp in op.inputs]))
+        pool.put(op, op.process([pool.pin(inp) for inp in op.inputs]))
     result = pool.pin(ops[-1])
     # Every op here has a native polars impl, so a pandas result would mean a
     # fallback hid the polars kernel.

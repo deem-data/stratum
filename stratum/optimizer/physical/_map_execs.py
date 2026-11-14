@@ -47,8 +47,8 @@ def _resolved_call(op, inputs: list):
 
 @physical_impl(of=AssignMapOp, backend="pandas")
 class PandasAssignMapOp(AssignMapOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
-        ctx = EvalContext.of(inputs, mode)
+    def process(self, inputs: list):
+        ctx = EvalContext.of(inputs, self.mode)
         values = {name: to_pandas(expr, ctx) for name, expr in self.entries.items()}
         return ctx.frame.assign(**values)
 
@@ -59,8 +59,8 @@ class PolarsAssignMapOp(AssignMapOp, PhysicalOp):
     def supports(cls, op: AssignMapOp, ctx) -> bool:
         return refuse_unsupported_exprs(op, op.entries.values())
 
-    def process(self, mode: str, inputs: list):
-        ctx = EvalContext.of(inputs, mode)
+    def process(self, inputs: list):
+        ctx = EvalContext.of(inputs, self.mode)
         columns = {}
         for name, expr in self.entries.items():
             result = to_polars(expr, ctx)
@@ -82,12 +82,12 @@ def _method_fields(op: ColumnMethodOp, inputs: list) -> dict:
 
 
 class _PandasColumnMethodExec(ColumnMethodOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return pandas_column_method(inputs[0], self.method, _method_fields(self, inputs))
 
 
 class _PolarsColumnMethodExec(ColumnMethodOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         obj = inputs[0]
         return polars_column_method(self.method, obj, _method_fields(self, inputs),
                                     getattr(obj, "dtype", None))
@@ -184,14 +184,14 @@ class PolarsMapValuesOp(MapValuesOp, _PolarsColumnMethodExec):
 
 @physical_impl(of=ApplyUDFOp, backend="pandas")
 class PandasApplyUDFOp(ApplyUDFOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         _obj, _args, _kwargs = _resolved_call(self, inputs)
         return _obj.apply(*_args, **_kwargs)
 
 
 @physical_impl(of=ApplyUDFOp, backend="polars")
 class PolarsApplyUDFOp(ApplyUDFOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         _obj, _args, _kwargs = _resolved_call(self, inputs)
         if not isinstance(_obj, pl.Series):
             return _obj.map_rows(*_args, **_kwargs)
@@ -208,14 +208,14 @@ class PolarsApplyUDFOp(ApplyUDFOp, PhysicalOp):
 
 @physical_impl(of=AssignOp, backend="pandas")
 class PandasAssignOp(AssignOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         _obj, _args, _kwargs = _resolved_call(self, inputs)
         return _obj.assign(*_args, **_kwargs)
 
 
 @physical_impl(of=AssignOp, backend="polars")
 class PolarsAssignOp(AssignOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         _obj, _args, _kwargs = _resolved_call(self, inputs)
         checked_kwargs = {}
         for k, v in _kwargs.items():
@@ -239,13 +239,13 @@ def _to_datetime_fields(op: DatetimeConversionOp, inputs: list) -> tuple:
 
 @physical_impl(of=DatetimeConversionOp, backend="pandas")
 class PandasDatetimeConversionOp(DatetimeConversionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return pandas_to_datetime(inputs[0], *_to_datetime_fields(self, inputs))
 
 
 @physical_impl(of=DatetimeConversionOp, backend="polars")
 class PolarsDatetimeConversionOp(DatetimeConversionOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return polars_to_datetime(inputs[0], *_to_datetime_fields(self, inputs))
 
 
@@ -253,7 +253,7 @@ class PolarsDatetimeConversionOp(DatetimeConversionOp, PhysicalOp):
 
 @physical_impl(of=StringMethodOp, backend="pandas")
 class PandasStringMethodOp(StringMethodOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return getattr(inputs[0].str, self.method)(**_resolve_kwargs(self.params, inputs))
 
 
@@ -275,7 +275,7 @@ class PolarsStringMethodOp(StringMethodOp, PhysicalOp):
             return False
         return True
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return polars_string_method(inputs[0], self.method,
                                     _resolve_kwargs(self.params, inputs))
 
@@ -284,7 +284,7 @@ class PolarsStringMethodOp(StringMethodOp, PhysicalOp):
 
 @physical_impl(of=DatetimeFieldOp, backend="pandas")
 class PandasDatetimeFieldOp(DatetimeFieldOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return getattr(inputs[0].dt, self.field)
 
 
@@ -300,7 +300,7 @@ class PolarsDatetimeFieldOp(DatetimeFieldOp, PhysicalOp):
             return False
         return True
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         return polars_dt_attribute(inputs[0], self.field)
 
 
@@ -310,7 +310,7 @@ class PolarsDatetimeFieldOp(DatetimeFieldOp, PhysicalOp):
 
 @physical_impl(of=AttributeReadOp, backend="pandas")
 class PandasAttributeReadOp(AttributeReadOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         result = inputs[0]
         for attr in self.attr_name:
             result = getattr(result, attr)

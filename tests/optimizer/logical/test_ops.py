@@ -130,7 +130,7 @@ class TestVariableOp(unittest.TestCase):
         # reaches the runtime is a bug, so process() refuses to run.
         op = VariableOp(name="x")
         with self.assertRaises(RuntimeError):
-            op.process("fit_transform", [])
+            op.process([])
 
 
 class TestImplOp(unittest.TestCase):
@@ -167,13 +167,13 @@ class TestImplOp(unittest.TestCase):
             val = yield mock_dataop
             return val * 2
         op = ImplOp(name="test", skrub_impl=SimpleNamespace(eval=fake_eval))
-        result = op.process("fit_transform", [10])
+        result = op.process([10])
         self.assertEqual(result, 20)
 
     def test_process_without_eval(self):
         cls = type("Impl", (), {"_fields": ["a"], "a": 42, "compute": lambda self, ns, mode, env: ns.a + 1})
         op = ImplOp(name="test", skrub_impl=cls())
-        result = op.process("fit_transform", [])
+        result = op.process([])
         self.assertEqual(result, 43)
 
 
@@ -226,42 +226,42 @@ class TestUtilFunctions(unittest.TestCase):
 class TestOpProcess(unittest.TestCase):
     def test_method_call(self):
         op = lower_to_physical(MethodCallOp("upper", args=(), kwargs={}), PlanContext.from_flags())
-        result = op.process("fit_transform", ["hello"])
+        result = op.process(["hello"])
         self.assertEqual(result, "HELLO")
 
     def test_method_call_with_placeholders(self):
         # input 0 is the implicit object; the format arg/kwarg reference inputs 1 and 2.
         op = lower_to_physical(MethodCallOp("format", args=(OperandRef(1),), kwargs={"end": OperandRef(2)}), PlanContext.from_flags())
-        result = op.process("fit_transform", ["{0} {end}", "hello", "world"])
+        result = op.process(["{0} {end}", "hello", "world"])
         self.assertEqual(result, "hello world")
 
     def test_method_call_with_placeholders2(self):
         # input 0 is the implicit object; the format arg/kwarg reference inputs 1 and 2.
         op = lower_to_physical(MethodCallOp("format", args=[(OperandRef(1),"X")], kwargs={"end": OperandRef(2)}), PlanContext.from_flags())
-        result = op.process("fit_transform", ["{0} {end}", "hello", "world"])
+        result = op.process(["{0} {end}", "hello", "world"])
         self.assertEqual(result, "('hello', 'X') world")
 
     def test_call_op(self):
         op = lower_to_physical(CallOp(func=lambda a, b: a + b, args=(OperandRef(0), OperandRef(1)), kwargs={}), PlanContext.from_flags())
-        result = op.process("fit_transform", [3, 7])
+        result = op.process([3, 7])
         self.assertEqual(result, 10)
 
     def test_getattr_dataframe_op(self):
         op = GetAttrOp(attr_name=["real", "imag"])
         op.output_type = OutputType.FRAME
-        result = op.process("fit_transform", [1 + 2j])
+        result = op.process([1 + 2j])
         self.assertEqual(result, 0.0)
 
     def test_getattr_normal(self):
         op = GetAttrOp(attr_name="real")
-        result = op.process("fit_transform", [3 + 4j])
+        result = op.process([3 + 4j])
         self.assertEqual(result, 3.0)
 
     def test_getitem_with_placeholder(self):
         # input 0 is the container, input 1 is the graph-fed key.
         op = GetItemOp(key=OperandRef(1))
         bind_op(op, PlanContext.from_flags())  # GetItemOp executes via its physical impl
-        result = op.process("fit_transform", [{"x": 42}, "x"])
+        result = op.process([{"x": 42}, "x"])
         self.assertEqual(result, 42)
 
     def test_getitem_with_placeholder_nested_in_tuple_key(self):
@@ -270,17 +270,17 @@ class TestOpProcess(unittest.TestCase):
         df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
         op = GetItemOp(key=(OperandRef(1), ["x"]))
         bind_op(op, PlanContext.from_flags())
-        result = op.process("fit_transform", [df.loc, df["x"] > 1])
+        result = op.process([df.loc, df["x"] > 1])
         pd.testing.assert_frame_equal(df.loc[df["x"] > 1, ["x"]], result)
 
     def test_binop_both_placeholders(self):
         op = BinOp(op=operator.add, left=OperandRef(0), right=OperandRef(1))
-        result = op.process("fit_transform", [10, 20])
+        result = op.process([10, 20])
         self.assertEqual(result, 30)
 
     def test_binop_left_literal(self):
         op = BinOp(op=operator.mul, left=5, right=OperandRef(0))
-        result = op.process("fit_transform", [3])
+        result = op.process([3])
         self.assertEqual(result, 15)
 
 

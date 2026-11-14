@@ -111,7 +111,7 @@ def test_stateless_copies_preserve_selection_time_initialization(frame, monkeypa
     for op in copies:
         assert op.query == initialized[0].query
         assert op.query_params == initialized[0].query_params
-        pd.testing.assert_frame_equal(op.process(op.mode, [frame]), frame[frame["a"] > 0])
+        pd.testing.assert_frame_equal(op.process([frame]), frame[frame["a"] > 0])
 
 
 def test_selected_frame_conversions_are_copied_for_both_row_sets(frame):

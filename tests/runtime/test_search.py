@@ -504,7 +504,7 @@ class PlanComputedSplitterTest(unittest.TestCase):
         root = convert_to_ops(pred, env={"seed": 0})
         mark = next(op for op in topological_iterator(root) if isinstance(op, SplitXOp))
         with self.assertRaisesRegex(RuntimeError, "replaced by the splitting rewrite"):
-            mark.process("fit_transform", [])
+            mark.process([])
         root = add_splitting_op(root)
         validate_dag(root)
         ops = list(topological_iterator(root))

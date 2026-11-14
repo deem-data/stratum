@@ -35,7 +35,7 @@ class ConversionOp(PhysicalOp):
     def accepts_input_lib(cls, op, index: int, lib) -> bool:
         return lib == op.source
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         value = inputs[0]
         if self.target is FrameLib.POLARS:
             return to_polars(value)

@@ -25,7 +25,7 @@ def _operands(op: ConcatOp, inputs: list) -> tuple[list, object]:
 class ConcatExec(ConcatOp, PhysicalOp):
     """Physical base of the frame concats."""
 
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         operands, axis = _operands(self, inputs)
         if isinstance(operands[0], np.ndarray):
             # skrub concatenates arrays too (since 0.10), whatever the frame
@@ -61,6 +61,6 @@ class PolarsConcatOp(ConcatExec):
 
 @physical_impl(of=ArrayConcatOp, backend="numpy")
 class NumpyConcatOp(ArrayConcatOp, PhysicalOp):
-    def process(self, mode: str, inputs: list):
+    def process(self, inputs: list):
         operands, axis = _operands(self, inputs)
         return np.concatenate(operands, axis=axis)
