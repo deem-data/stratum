@@ -191,7 +191,7 @@ def memory_workload(value, mode):
     if mode != "preview":
         data = bytearray(16 * 2**20)
         data[::4096] = b"x" * (len(data) // 4096)
-        sleep(.08)
+        sleep(OP_SECONDS)
     return value
 
 
