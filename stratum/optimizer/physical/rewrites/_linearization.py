@@ -31,7 +31,7 @@ def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None]:
     i = 0
     while stack:
         if stack[-1].is_split_op and len(stack) > 1:
-            # Defer split op: pop something else instead
+            # Schedule another ready operator before the split.
             op = stack.pop(-2)
         else:
             op = stack.pop()

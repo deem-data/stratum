@@ -126,7 +126,7 @@ def _unsupported_string_table_vectorizer():
         cardinality_threshold=5,
         high_cardinality=StringEncoder(
             vectorizer="hashing",
-            analyzer="word",  # word not supported by Rust
+            analyzer="word",  # The Rust adapter does not support word analysis.
             ngram_range=(1, 2),
             n_components=2,
             random_state=0,
@@ -146,7 +146,7 @@ def test_table_vectorizer_pipeline_scores_end_to_end_for_each_selector(
     capfd,
     table_vectorizer,
 ):
-    """Run a realistic DataOps pipeline through both physical selector policies."""
+    """Execute the DataOps pipeline with both implementation-selection policies."""
     with csv_file(make_orders()) as path:
         for selector in ("default", "greedy"):
             pipeline = build_pipeline(path, table_vectorizer)

@@ -182,7 +182,7 @@ def test_cache_eviction_does_not_invalidate_a_planned_hit(csv_path, after_loadin
     assert hits(plan[0])
     if not after_loading:
         cache.clear()
-    # Hits are owned by the plan, so they can run without a cache to write to.
+    # The plan retains cached values independently of scheduler cache admission.
     warm = SequentialScheduler(*plan)
     if after_loading:
         cache.clear()
@@ -292,7 +292,7 @@ def test_cache_and_pool_share_values_with_read_only_consumers(value):
             return len(inputs[0])
 
         sink.process = read
-        # A hit can also run without a cache to write to.
+        # Retained cache hits remain executable with cache admission disabled.
         sched = SequentialScheduler([source, sink], None, reuse_cache=None if warm else cache)
         try:
             with patch.object(_scheduler, "_copy_result", side_effect=AssertionError("copied")):

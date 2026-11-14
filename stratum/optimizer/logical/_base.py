@@ -58,11 +58,10 @@ class OutputType(Enum):
 class IndexEffect(Enum):
     """How an op's output row labels relate to its inputs' (on pandas).
 
-    Index lineage (``physical/_conversion.py``) follows these to tell when two
-    frames share row labels, so that pairing their rows by position (polars)
-    gives what aligning them by label (pandas) does.
+    Index lineage (``physical/_conversion.py``) uses these properties to determine
+    when positional pairing in Polars is equivalent to label alignment in pandas.
     """
-    #: Labels of its own; nothing is assumed about them.
+    #: Output labels have no known relation to input labels.
     NEW = auto()
     #: Its first input's rows, in order, with their labels.
     KEEP = auto()
@@ -75,8 +74,7 @@ class IndexEffect(Enum):
 
 
 def has_default_labels(data) -> bool:
-    """Whether ``data``'s rows carry a fresh ``0..n-1`` RangeIndex (a polars frame
-    has no labels, which reads the same)."""
+    """Whether ``data`` has a ``0..n-1`` RangeIndex or uses Polars row positions."""
     import pandas as pd
     import polars as pl
     if isinstance(data, (pl.DataFrame, pl.Series)):
@@ -100,10 +98,8 @@ def is_frame_like(op) -> bool:
 class OperandRef:
     """Explicit reference to the ``k``-th entry of an :class:`IRNode`'s ``inputs`` list.
 
-    Replaces the old opaque ``DATA_OP_PLACEHOLDER`` sentinel. Instead of relying on
-    the *order* in which placeholders are walked at runtime, an operand now carries
-    the exact index of the input that fills it, so ``process()`` can resolve
-    ``inputs[ref.k]`` directly and rewrites that reorder inputs are checkable.
+    ``process()`` resolves the operand through ``inputs[ref.k]``. Rewrites that
+    reorder inputs must remap these indices; DAG validation checks their bounds.
     """
     __slots__ = ("k",)
 
@@ -157,7 +153,7 @@ def remap_operand_refs(value, mapping: dict):
     single walker shared by CSE edge de-duplication
     (``rewrites._common_subexpression_elimination``) and
     :meth:`IRNode._dedupe_input_refs`, so both renumber refs identically --
-    including refs buried inside a ``ColumnExpr`` field.
+    including refs nested inside a ``ColumnExpr`` field.
     """
     if isinstance(value, OperandRef):
         return OperandRef(mapping[value.k])
@@ -232,7 +228,10 @@ def estimator_key(est: BaseEstimator):
 
 
 class Uncacheable(Exception):
-    """An operator or its configuration cannot be given a safe lineage key."""
+    """An operator lacks a cacheability contract or an encodable configuration.
+
+    Its output cannot be assigned a lineage key. See
+    :mod:`stratum.optimizer._lineage`."""
 
 
 #: Default evaluation mode for fitting and stateless preprocessing.
@@ -243,7 +242,7 @@ class Fitted(NamedTuple):
     """Data output and fitted state returned by a fitting operator.
 
     ``output`` supplies data consumers; a predictor's fit returns ``None``.
-    ``state`` supplies response operators. The scheduler stores live outputs
+    ``state`` supplies inference operators. The scheduler stores live outputs
     in the buffer pool and live fitted states in the state store.
     """
     output: Any
@@ -265,10 +264,9 @@ class IRNode:
     """Structural base for every node in a logical or physical IR DAG.
 
     Carries the DAG edges, name/output-kind metadata, buffer-lifetime
-    bookkeeping and the ``process`` execution hook -- everything shared by the
-    logical and physical layers. Layer-specific behaviour (CSE keys, choice
-    detection, backend selection) lives on the ``Op`` / ``PhysicalOp``
-    subclasses, not here.
+    bookkeeping and the ``process`` execution hook shared by the logical and
+    physical layers. ``Op`` and ``PhysicalOp`` define layer-specific behavior:
+    CSE keys, choice detection and backend selection.
 
     Execution borrows inputs and fitted states read-only, including nested
     objects. An operator that needs to mutate them must copy them itself before
@@ -300,7 +298,7 @@ class IRNode:
     #: visible in the plan.
     _is_physical = False
 
-    #: Default mode before response operators are constructed during planning.
+    #: Default mode before inference operators are constructed during planning.
     fitting_mode = FITTING_MODE
 
     def __init__(self, inputs=None, outputs=None, name=None, is_X=False, is_y=False):
@@ -360,21 +358,23 @@ class IRNode:
         self.output_schema = None
 
     #: Whether the operator produces fitted state for subsequent application.
-    #: Planning creates response operators with explicit fitted-state inputs.
+    #: Planning creates inference operators with explicit fitted-state inputs.
     has_state = False
 
-    #: Opt-in contract: the output is a deterministic function of the inputs and
-    #: lineage_config(). Generic calls and unknown operators remain uncacheable.
+    #: Whether the output is eligible for a reuse-cache lineage key.
+    #: Requires a deterministic function of inputs and ``lineage_config()``;
+    #: generic calls and UDFs do not establish this contract.
     cacheable = False
 
     def lineage_config(self):
-        """Configuration naming this op's output, apart from its inputs.
+        """Operator configuration that determines the output together with its inputs.
 
-        Cacheable ops return their declared ``fields`` as plain values. Operators
-        needing a different encoding override this method; unsupported values are
-        rejected by the lineage encoder. The configuration must include everything
-        that can change the output. Raises :class:`Uncacheable` for ops that have
-        not opted in.
+        The reuse cache digests it into the op's lineage key (see
+        :mod:`stratum.optimizer._lineage`), so it must be complete: two ops with the
+        same class, inputs and config compute the same value. For a cacheable op it
+        is the declared ``fields``, the same contract CSE relies on; ops whose
+        fields are not plain values, or that are deterministic only under some
+        configurations, override this. Raises :class:`Uncacheable`.
         """
         if not self.cacheable:
             raise Uncacheable(f"{type(self).__name__} is not a cacheable operator")
@@ -444,12 +444,11 @@ class IRNode:
     def _dedupe_input_refs(self, old_ref, new_ref):
         """Remove input slot old_ref and redirect its OperandRefs to new_ref.
 
-        ``old_ref`` is always the higher of the two slots (the duplicate we drop)
+        ``old_ref`` must be the higher of the two slots (the removed duplicate)
         and ``new_ref`` the surviving lower slot. Refs pointing at old_ref are
         redirected to new_ref; refs pointing after old_ref shift left by one. The
-        renumbering goes through the shared :func:`remap_operand_refs` walker so
-        refs buried in a ``ColumnExpr`` field (e.g. a SelectionOp predicate) are
-        remapped too, not just refs in plain tuples/lists/dicts.
+        shared :func:`remap_operand_refs` traversal handles nested containers and
+        ``ColumnExpr`` fields, including SelectionOp predicates.
         """
         n = len(self.inputs)
         self.inputs.pop(old_ref)
@@ -466,11 +465,10 @@ class IRNode:
     def consumes_inputs_positionally(self) -> bool:
         """Whether this op addresses its inputs by position rather than OperandRef.
 
-        Such ops (ChoiceOp outcomes, ImplOp's cached ``operand_index``) must never
-        have two input slots collapsed into one by edge de-duplication -- their
-        slots are kept distinct instead. Shared with
-        ``rewrites._common_subexpression_elimination._can_merge`` so the two
-        dedup paths treat the same op types as un-collapsible.
+        Such operators (ChoiceOp outcomes, ImplOp's cached ``operand_index``)
+        require distinct input slots even for repeated producers. Both input
+        replacement and ``rewrites._common_subexpression_elimination._can_merge``
+        use this property to prevent edge deduplication.
         """
         return False
 
@@ -509,11 +507,10 @@ class IRNode:
             in_.replace_output(self, new_output)
 
     def detach(self) -> None:
-        """Take this node out of the graph: drop it from its producers' outputs and
-        clear its own edges. Its consumers are the caller's to rewire, before or after.
+        """Remove this node from its producers' outputs and clear its own edges.
 
-        Producers left without a consumer stay as they are, which is what a rewrite
-        wants while it is about to hand them a new consumer; see ``detach_and_prune``.
+        The caller must rewire its consumers. Preserve producers without consumers
+        so rewrites can reconnect them; ``detach_and_prune`` also removes them.
         """
         for in_ in self.inputs:
             in_.outputs = [out for out in in_.outputs if out is not self]

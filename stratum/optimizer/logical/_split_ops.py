@@ -93,11 +93,10 @@ class SplitOutput(Op):
 class BuildSplitterOp(Op):
     """Build the splitter declared by ``mark_as_X(cv=..., split_kwargs=...)``.
 
-    No data is computed here: the op binds the declared ``cv`` and ``split_kwargs`` into
-    a splitter. Either may hold DataOps (``groups`` for ``GroupKFold`` usually does).
-    They are nodes of the plan, so the splitter is built by it, before the split, rather
-    than by evaluating them separately upfront. It feeds the split op, which keeps it in
-    the pool for the scheduler to cut the folds with.
+    Bind ``cv`` and ``split_kwargs`` to a splitter. Graph-fed arguments, such as
+    ``groups`` for ``GroupKFold``, remain explicit dependencies and execute before
+    splitter construction. The dependency from ``SplitOp`` retains the splitter
+    in the buffer pool for the scheduler to generate folds.
     """
     logical_family = "BuildSplitter"
     fields = ("cv", "split_kwargs")
@@ -116,7 +115,7 @@ class BuildSplitterOp(Op):
 
 
 def _declared_splitter(x_op: Op) -> BuildSplitterOp | None:
-    """The splitter the X mark declares, wired to the operands it reads, or None."""
+    """Build the declared splitter with bound input operands, or return None."""
     if not isinstance(x_op, SplitXOp):
         return None
     impl = x_op.skrub_impl

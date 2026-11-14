@@ -1,9 +1,9 @@
 """NYC housing risk plan on a small, generated three-table lake.
 
-The fixture keeps the task's important shapes: three dated PLUTO releases,
+The fixture preserves the task's data dependencies: three dated PLUTO releases,
 missing BBLs resolved from borough/block/lot, categorical event counts, a
 point-in-time label, and expanding-window CV. It exercises plan extraction
-without requiring the real GCS lake.
+without access to the source GCS dataset.
 """
 
 import io
@@ -141,7 +141,7 @@ def test_nyc_plan_folds_assigns(tmp_path):
 
     assert len(maps) == 16
     assert not generic_assigns
-    # Three maps legitimately read from a different frame (event assembly and
+    # Three maps depend on another frame (event assembly and
     # label alignment); every other assignment is row-local to its source.
     assert (
         sum(

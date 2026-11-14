@@ -33,16 +33,15 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class SearchConfig:
-    """What a plan needs at build time to score the candidates it evaluates.
+    """Compile-time scoring configuration for candidate evaluation.
 
-    Present only when the plan is being built for a search; ``evaluate`` passes None and
-    gets a plan that collects candidates without scoring them.
+    Search plans use this configuration to construct a scoring sink. ``evaluate``
+    passes None and constructs a candidate-collection sink without scoring.
     """
 
     metric: Any
     return_predictions: bool = False
-    #: The metric is the one the plan declares with `.skb.with_scoring()`, so the
-    #: scorer also reads the kwargs declared with it, computed on each test fold.
+    #: Use kwargs from `.skb.with_scoring()`, evaluated on each test fold.
     declared_kwargs: bool = False
 
 
@@ -146,9 +145,8 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
     # Step 1: Convert the Skrub DataOp DAG to the logical IR and apply rewrites.
     root = logical_optimize(dag_root, config, env, search)
     _debug_explain_dag("logical", root)
-
-    # Steps 2 & 3 read the config that drives operator selection once, here, so
-    # execution carries no operator-selection control flow.
+    # Capture implementation-selection settings for physical planning.
+    # Execution uses the implementations bound during planning.
     ctx = PlanContext.from_flags(config)
 
     # Step 2: lower logical ops to physical ops.
@@ -190,7 +188,7 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
     if config.numeric_ops:
         root = extract_numeric_operators(root)
 
-    # Apply CSE on the Op IR *after* extraction, so it can dedup whole specialized
+    # Apply CSE on the Op IR after extraction to deduplicate specialized
     # ops (e.g. two identical mask SelectionOps). Running it earlier would merge a
     # mask's shared sub-expressions into a node with multiple consumers, which then
     # blocks selection folding.
@@ -218,15 +216,13 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
                                projection_pushup=config.projection_pushup)
     _debug_show_graph(root, "relational_rewrite")
 
-    # Last, so every rewrite above sees the plan shape it was written against. A plan
-    # whose choices were not unrolled is not an executable candidate set, so it gets no
-    # terminating operator.
+    # Install the candidate sink after logical rewrites, which operate on the
+    # unrolled choice DAG. Plans without choice unrolling retain their root.
     if config.unroll_choices:
         root = install_candidate_set(root, search)
 
-    # Once more over the final shape, for the ops created since that do not keep
-    # their own schema (the candidate set). Under validate_dag it also checks that
-    # the relational rewrites left every schema they had current.
+    # Propagate schemas through the final DAG, including the candidate sink.
+    # With validate_dag enabled, also check schemas maintained by rewrites.
     if config.propagate_schema:
         propagate_output_schema(root, check=FLAGS.validate_dag)
 

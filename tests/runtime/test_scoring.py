@@ -157,7 +157,7 @@ class ScoringTest(unittest.TestCase):
         np.testing.assert_allclose(ours.results_["scores"], theirs.results_["scores"])
 
     def test_probability_metric_reaches_a_post_processed_plan(self):
-        """The pass runs the response the scorer asked for, so a tail after the
+        """The pass runs the prediction method the scorer asked for, so a tail after the
         predictor sees probabilities and the metric is computed on what the plan
         produced. This is what skrub does, and used to raise here."""
         self.assert_matches_skrub(
@@ -166,7 +166,7 @@ class ScoringTest(unittest.TestCase):
     def test_metric_no_candidate_can_feed_is_refused_before_fitting(self):
         """A probability metric over a regressor is refused when the plan is built, not
         after a fold has been fitted."""
-        with self.assertRaisesRegex(ValueError, "no single response provides"):
+        with self.assertRaisesRegex(ValueError, "no single prediction method is supported"):
             _api.grid_search(self._regression_pipeline(), scoring="neg_log_loss")
 
     def test_native_metrics_match_sklearn(self):
@@ -189,7 +189,7 @@ class ScoringTest(unittest.TestCase):
 
     def test_return_predictions_refuses_a_non_predict_metric(self):
         """The values a `roc_auc` pass produces are probabilities, not predictions."""
-        with self.assertRaisesRegex(ValueError, "responses, not predictions"):
+        with self.assertRaisesRegex(ValueError, "return_predictions=True requires `predict`"):
             _api.grid_search(self._classification_pipeline(), scoring="roc_auc",
                                 return_predictions=True)
 

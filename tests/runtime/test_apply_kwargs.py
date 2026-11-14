@@ -21,8 +21,7 @@ from stratum.frontend._api import grid_search
 class RecordingTransformer(TransformerMixin, BaseEstimator):
     """Records the kwargs each call receives.
 
-    The log lives on the class because the op fits a clone of the estimator it was
-    handed, so per-instance state would not come back to the test.
+    A class-level log records calls across estimator clones created during fitting.
     """
 
     CALLS: list = []
@@ -41,10 +40,10 @@ class RecordingTransformer(TransformerMixin, BaseEstimator):
 
 
 class SplitOffEvalSet(TransformerMixin, BaseEstimator):
-    """Carve an early-stopping set out of the training fold.
+    """Partition the training fold into fitting and early-stopping subsets.
 
-    In predict mode there is no eval set to carve, so the extra keys are None:
-    the fit kwargs that read them are not evaluated in that mode anyway.
+    Prediction returns None for validation data and labels. Fit kwargs that
+    consume these values are not evaluated during prediction.
     """
 
     def fit(self, X, y):
@@ -61,7 +60,7 @@ class SplitOffEvalSet(TransformerMixin, BaseEstimator):
 def _frame(n=200, seed=0):
     rng = np.random.default_rng(seed)
     df = pd.DataFrame({"a": rng.normal(size=n), "b": rng.normal(size=n)})
-    df["w"] = np.where(df["a"] > 0, 100.0, 0.01)  # weights that visibly bend the fit
+    df["w"] = np.where(df["a"] > 0, 100.0, 0.01)  # Nonuniform weights affect the fitted coefficients.
     df["y"] = 2.0 * df["a"] + df["b"] + rng.normal(scale=0.1, size=n)
     return df
 
@@ -103,7 +102,7 @@ class TestFitKwargsReachFit(ApplyKwargsRuntimeTest):
         self.assert_matches_skrub(self._weighted_pipeline(True))
 
     def test_unknown_fit_kwarg_reaches_the_estimator(self):
-        # Proves the kwargs are splatted rather than swallowed somewhere.
+        # Unknown kwargs must reach the estimator and produce its argument error.
         data = st.as_data_op(self.df)
         y = data["y"].skb.mark_as_y()
         X = data.drop(columns=["y", "w"]).skb.mark_as_X()
@@ -139,7 +138,7 @@ class TestKwargsAreRoutedPerMethod(ApplyKwargsRuntimeTest):
 
 
 class TestEvalSetPipeline(ApplyKwargsRuntimeTest):
-    """The reported case: an early-stopping eval set built inside the pipeline."""
+    """Evaluate an early-stopping validation set constructed within the pipeline."""
 
     def _pipeline(self):
         data = st.as_data_op(self.df)

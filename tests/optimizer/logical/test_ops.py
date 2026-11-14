@@ -126,8 +126,8 @@ class TestVariableOp(unittest.TestCase):
         self.assertEqual(cloned.name, "x")
 
     def test_process_raises_must_be_resolved_at_compile_time(self):
-        # Variables are resolved to constants at compile time; a VariableOp that
-        # reaches the runtime is a bug, so process() refuses to run.
+        # Variables require constant substitution before execution.
+        # Reject unresolved VariableOps at runtime.
         op = VariableOp(name="x")
         with self.assertRaises(RuntimeError):
             op.process([])
@@ -350,12 +350,11 @@ class TestOperandBinder(unittest.TestCase):
 
 
 class TestTwoAxisIndexerConversion(unittest.TestCase):
-    """`as_op` binds every DataOp a GetItem key holds, however deeply it is nested.
+    """Bind DataOps nested in GetItem keys to explicit operands.
 
-    `frame.loc[mask, cols]` hands skrub a *tuple* key: the row mask is a DataOp one
-    level down. Binding it only when the key *was itself* a DataOp left the mask with
-    no consumer, so its sub-DAG stayed listed in its producers' outputs while being
-    unreachable from the root -- and the topological walk refuses to walk that.
+    In `frame.loc[mask, cols]`, the row mask is nested in a tuple. Binding only
+    top-level DataOps previously left its sub-DAG unreachable from the root while
+    still referenced by producer edges, causing topological traversal to fail.
     """
 
     def setUp(self):
@@ -379,15 +378,15 @@ class TestTwoAxisIndexerConversion(unittest.TestCase):
         validate_dag(root)
 
     def test_conversion_leaves_no_op_outside_the_dag(self):
-        # The regression: the mask's own `df["x"]` stayed in the source's outputs
-        # while nothing consumed it, which is what `topological_iterator` trips over.
+        # The mask's `df["x"]` previously remained in the source's outputs without
+        # a reachable consumer, violating topological traversal's edge invariant.
         data = st.as_data_op(self.df)
         root = convert_to_ops(data.loc[data["x"] > 1, ["x"]])
         reachable = list(topological_iterator(root))  # raises on a dangling op
         self.assertEqual(len(reachable), len(set(map(id, reachable))))
 
     def test_both_axes_can_be_graph_fed(self):
-        # Nothing in the key is privileged: a mask on each axis binds to its own input.
+        # Masks on both axes bind to separate input operands.
         data = st.as_data_op(self.df)
         root = convert_to_ops(data.loc[data["x"] > 1, data.columns != "y"])
 
@@ -421,7 +420,7 @@ class TestDetach(unittest.TestCase):
         mid.detach()
         self.assertEqual((mid.inputs, mid.outputs), ([], []))
         self.assertEqual(source.outputs, [])
-        # The consumer is the caller's to rewire.
+        # The caller remains responsible for rewiring consumer edges.
         self.assertEqual(sink.inputs, [mid])
 
     def test_detach_and_prune_removes_the_dead_cone(self):
@@ -432,7 +431,7 @@ class TestDetach(unittest.TestCase):
         _chain(shared, other)
         dead_tail.detach_and_prune()
         self.assertEqual(dead.inputs, [])
-        # A producer with another consumer stays, minus the pruned edge.
+        # Preserve a shared producer and remove only the pruned consumer edge.
         self.assertEqual(shared.outputs, [other])
 
     def test_detach_and_prune_handles_a_producer_feeding_two_slots(self):
@@ -497,7 +496,7 @@ class TestEdgeDedup(unittest.TestCase):
         self.assertEqual(op.kwargs, {"k": OperandRef(0)})
 
     def test_replace_input_remaps_column_expr_predicate(self):
-        # A ref buried in a ColumnExpr predicate (MaskSelectionOp) must be renumbered
+        # A ref nested in a ColumnExpr predicate (MaskSelectionOp) must be renumbered
         # too, not just refs in plain tuple/list/dict fields.
         src, leaf = ValueOp(1), ValueOp(2)
         predicate = BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(1)))
@@ -525,8 +524,8 @@ class TestEdgeDedup(unittest.TestCase):
                          [OperandRef(0), OperandRef(1)])
 
     def test_replace_input_keeps_duplicate_slots_for_choice(self):
-        # ChoiceOp consumes inputs by position; a would-be duplicate is kept as a
-        # plain swap rather than collapsed, so the outcome count is preserved.
+        # Positional ChoiceOp inputs retain distinct slots for repeated producers,
+        # preserving the number of outcomes.
         a, b = ValueOp(1), ValueOp(2)
         choice = ChoiceOp(outcome_names=["o1", "o2"], choice_name="c", inputs=[a, b])
         self.assertTrue(choice.consumes_inputs_positionally())

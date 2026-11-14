@@ -210,7 +210,7 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     enc.raw(b"op", f"{cls.__module__}.{cls.__qualname__}".encode())
     lib = getattr(op, "_frame_lib", None)
     enc.encode(None if lib is None else str(lib))
-    # Responses and fitting can share an implementation and configuration.
+    # Inference and fitting can share an implementation and configuration.
     enc.encode(op.mode)
     enc.encode(None if op.state_ref is None else op.state_ref.k)
     enc.encode(op.lineage_config())

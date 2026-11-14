@@ -42,7 +42,7 @@ def test_parameters_name_the_fit():
     assert key(Ridge()) == key(Ridge())
     assert key(Ridge(alpha=1.0)) != key(Ridge(alpha=2.0))
     assert key(Ridge()) != key(LogisticRegression())
-    # How it runs is not what it computes.
+    # Parallelism does not affect the estimator's semantic lineage key.
     assert key(RandomForestClassifier(random_state=0, n_jobs=1)) == key(
         RandomForestClassifier(random_state=0, n_jobs=8))
 
@@ -114,8 +114,10 @@ def model(csv_path, estimator):
 
 
 def estimator_keys(dag):
-    """Each estimator op's key, over stand-in keys for its inputs (what precedes
-    the estimators is keyed by the plan, see test_reuse_planning)."""
+    """Compute estimator lineage keys using synthetic input keys.
+
+    ``test_reuse_planning`` covers upstream lineage within complete plans.
+    """
     plan, _ = optimize(dag, env=get_data(dag))
     keys = []
     for op in plan:

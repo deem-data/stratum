@@ -2,7 +2,7 @@ import sys
 
 import pandas as pd
 import pytest
-from tests.optimizer.physical._execution import response_op
+from tests.optimizer.physical._execution import inference_op
 from sklearn.base import clone
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from skrub import StringEncoder, TableVectorizer, selectors
@@ -190,7 +190,7 @@ def test_fused_stratum_table_vectorizer_fits_and_transforms_with_rust_leaves(cap
         debug_timing=True,
     ):
         fitted = op.process([train])
-        transformed = response_op(op).process([test, fitted.state])
+        transformed = inference_op(op).process([test, fitted.state])
 
     assert "[rust]" in capture_std_out(capfd)
     assert fitted.output.shape[1] == transformed.shape[1]

@@ -4,13 +4,13 @@
   and test copies use the same backend without repeating initialization.
 - Duplicate the plan downstream of the split into train and test copies: fit on
   training rows and evaluate on test rows within one execution per fold.
-- Stateful fitting returns data and fitted state. Response operators read state
+- Stateful fitting returns data and fitted state. Inference operators read state
   through ``state_ref``; transformers fit with ``fit_transform``.
 - Predictors use separate ``fit`` and ``predict`` operators, including before
   the split and in plans without a split.
-- Bind each op's ``mode``. The test copy uses the requested response method,
+- Bind each op's ``mode``. The test copy uses the by the scoring func requested prediction method,
   resolved per estimator, with separate ``eval_mode()`` sources.
-- Retain only each estimator method's required inputs. Responses omit ``y``,
+- Retain only each estimator method's required inputs. Inference omits ``y``,
   fit kwargs and graph-fed hyperparameters. A subsequent dead-code elimination
   pass removes unused branches and training predictions.
 """
@@ -43,7 +43,7 @@ def unroll_train_test(root: IRNode) -> IRNode:
     start = start_time()
     ops = list(topological_iterator(root))
     split = next((op for op in ops if op.is_split_op), None)
-    response = root.response_mode if isinstance(root, ScoreCandidatesOp) else "predict"
+    prediction_method = root.prediction_method if isinstance(root, ScoreCandidatesOp) else "predict"
 
     region = _downstream(split, ops) if split is not None else []
     train = {op: _clone(op) for op in region}
@@ -52,7 +52,7 @@ def unroll_train_test(root: IRNode) -> IRNode:
     for op in region:
         train[op].train = True
         op.train = False
-        op.mode = response
+        op.mode = prediction_method
 
     bound = [node for op in region if op.has_state
              for node in _split_stateful(op, train[op])]
@@ -71,7 +71,7 @@ def unroll_train_test(root: IRNode) -> IRNode:
         if isinstance(op, BaseEstimatorOp):
             _keep_mode_inputs(op)
 
-    _split_eval_mode_sources(ops, set(region), response)
+    _split_eval_mode_sources(ops, set(region), prediction_method)
     log_time("train/test unrolling took", start)
     return root
 
@@ -116,7 +116,7 @@ def _wire_clone(op: IRNode, train: dict) -> None:
 
 
 def _split_stateful(test: IRNode, fit: IRNode) -> list[IRNode]:
-    """Bind fitting and response modes and connect their fitted state.
+    """Bind fitting and inference modes and connect their fitted state.
 
     The test copy consumes state produced by the train copy. For predictors with
     training-output consumers, insert a separate prediction operator on training rows.
@@ -149,7 +149,7 @@ def _add_state_edge(op: IRNode, fit: IRNode) -> None:
     op.inputs.append(fit)
     fit.add_output(op)
     if isinstance(op, BaseEstimatorOp):
-        # Resolve the requested response to a supported method or its fallback.
+        # Resolve the requested prediction method or use the estimator's fallback.
         op.mode = op.effective_mode(op.mode)
     else:
         op.mode = "transform"
@@ -159,8 +159,8 @@ def _keep_mode_inputs(op: BaseEstimatorOp) -> None:
     """Retain the bound method's arguments and prune unreferenced inputs.
 
     Fitting arguments include ``X``, ``y``, column selectors, graph-fed
-    hyperparameters and fitting kwargs. Response arguments are limited to
-    ``X``, fitted state and kwargs for the resolved response method.
+    hyperparameters and fitting kwargs. Inference arguments are limited to
+    ``X``, fitted state and kwargs for the resolved inference method.
     """
     if op.produces_state:
         keep = {op.fit_kwargs_key}
@@ -200,8 +200,9 @@ def _drop_unreferenced_inputs(op: IRNode) -> None:
         in_.outputs = [out for out in in_.outputs if out is not op]
 
 
-def _split_eval_mode_sources(ops: list[IRNode], test_copy: set[IRNode], response: str) -> None:
-    """Clone ``eval_mode()`` sources for the test copy's response mode.
+def _split_eval_mode_sources(ops: list[IRNode], test_copy: set[IRNode],
+                             prediction_method: str) -> None:
+    """Clone ``eval_mode()`` sources for the test copy's prediction method.
 
     The train copy and operators before the split retain the original sources
     in fitting mode.
@@ -213,7 +214,7 @@ def _split_eval_mode_sources(ops: list[IRNode], test_copy: set[IRNode], response
         if not readers:
             continue
         in_test = _clone(source)
-        in_test.mode = response
+        in_test.mode = prediction_method
         in_test.train = False
         for out in readers:
             out.inputs = [in_test if in_ is source else in_ for in_ in out.inputs]

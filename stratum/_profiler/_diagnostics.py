@@ -1,4 +1,4 @@
-"""Optional, versioned run artifacts. No web server or GUI dependency lives here."""
+"""Optional, versioned run artifacts without web-server or GUI dependencies."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -138,7 +138,7 @@ def record_reuse_plan(ops, region, keys, reasons):
 
 @contextmanager
 def job_context(job_id: str):
-    """Attribute the runs exported inside to ``job_id`` (a server job).
+    """Associate runs exported in this context with the server's ``job_id``.
 
     Yields the job's record; ``run_ids`` collects the runs exported for it.
     """
@@ -170,7 +170,7 @@ class RunDiagnostics:
         self.reuse_plan = {}
 
     def attach_reuse_cache(self, cache):
-        """Start the counter interval before this run plans its cache reuse."""
+        """Snapshot cache counters before reuse planning for this run."""
         self.reuse_cache = cache
         self.reuse_stats_before = asdict(cache.stats)
 
@@ -178,7 +178,7 @@ class RunDiagnostics:
         """Cache-wide state plus this run's planning decisions by physical node ID.
 
         Counters cover the run's interval, as in server job reports. Concurrent
-        users of the same cache can contribute to that interval too.
+        cache accesses from other runs can contribute to the same interval.
         """
         report = self.reuse_cache.snapshot(include_entries=True)
         entries = {entry["key"]: entry for entry in report.pop("entry_details")}
@@ -262,7 +262,7 @@ class RunDiagnostics:
 
 @contextmanager
 def diagnostic_run(directory, kind, config):
-    """Export failures too; diagnostics must never change the computation outcome."""
+    """Export completed and failed runs, logging export errors separately."""
     if directory is None:
         yield None
         return

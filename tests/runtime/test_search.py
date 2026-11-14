@@ -20,7 +20,7 @@ import re
 logging.basicConfig(level=logging.INFO)
 
 class CountingKFold(KFold):
-    """KFold that records how often it was asked for splits."""
+    """KFold that counts calls to its split method."""
 
     def __init__(self, n_splits=3):
         super().__init__(n_splits=n_splits)
@@ -118,8 +118,7 @@ class SearchTest(RuntimeTest):
         X2 = X.assign(x_b = X["x"] - 1)
         X = 4 + st.choose_from([X1,X2]).as_data_op()
         pred = X.skb.apply(InputCheckEstimator(), y=y)
-        # InputCheckEstimator has no `score`, so (as under skrub) the metric has to be
-        # named: `scoring=None` would have nothing to fall back on.
+        # InputCheckEstimator has no score method; supply an explicit metric.
         _api.grid_search(pred, scoring="neg_mean_squared_error")
 
     def test_search_error_during_dataop_processing(self):
@@ -272,7 +271,7 @@ class ChoiceSearchTest(unittest.TestCase):
             joined, {"C": {}, "wcol": {"a": "Opt0", "b": "Opt1"}})
 
     def test_independent_choices_join_before_the_predictor(self):
-        # Every grid point scores differently, so a candidate named after another shows.
+        # Distinct scores expose mismatches between candidate names and grid points.
         data = st.var("data", self.df)
         y = data["t"].skb.mark_as_y()
         X = data.drop(columns="t").skb.mark_as_X(cv=KFold(3), split_kwargs={})
@@ -433,14 +432,14 @@ class CrossValidationSplitterTest(unittest.TestCase):
         self.assertGreater(cv.calls, 0)
 
     def test_explicit_cv_overrides_declared_cv(self):
-        """skrub's precedence: an explicit splitter wins over the declared one."""
+        """An explicit splitter takes precedence over the declared splitter."""
         declared = CountingKFold(n_splits=3)
         pred = self._classification_pipeline(cv=declared, split_kwargs={})
         _api.grid_search(pred, cv=StratifiedKFold(n_splits=2), scoring="accuracy")
         self.assertEqual(declared.calls, 0)
 
     def test_declared_split_kwargs_reach_the_splitter(self):
-        """`groups` for GroupKFold travels through split_kwargs."""
+        """Pass GroupKFold's `groups` argument through split_kwargs."""
         groups = np.arange(len(self.df)) % 3
         pred = self._classification_pipeline(cv=GroupKFold(n_splits=3),
                                              split_kwargs={"groups": groups})
@@ -456,7 +455,7 @@ _LOADS = {"n": 0}
 
 
 def _load(seed):
-    """Stands in for an expensive read upstream of both X and the groups."""
+    """Simulate a shared source for X and group labels, recording execution count."""
     _LOADS["n"] += 1
     rng = np.random.default_rng(seed)
     df = pd.DataFrame(rng.normal(size=(300, 3)), columns=list("abc"))
@@ -464,8 +463,8 @@ def _load(seed):
 
 
 class PlanComputedSplitterTest(unittest.TestCase):
-    """Regression tests for issue #225: a splitter declared with DataOps is computed by
-    the plan, so what it reads is computed once, by the scheduler."""
+    """Regression tests for #225: declared splitter dependencies execute once
+    in the plan before fold generation."""
 
     def _plan(self, cv):
         rows = st.var("seed", 0).skb.apply_func(_load)

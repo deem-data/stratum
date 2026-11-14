@@ -79,8 +79,8 @@ class TestBufferPool(unittest.TestCase):
         self.assertEqual(pool.total_size, "2.00 PB")
 
     def test_groupby_is_sized_as_its_underlying_frame(self):
-        # An unfused groupby(...) op puts a GroupBy view in the pool; sizing it
-        # used to raise, which crashed any plan that left one unfused.
+        # Unfused groupby(...) operators materialize GroupBy views in the pool.
+        # Size estimation previously raised for these intermediate values.
         df = pd.DataFrame({"g": ["a", "a", "b"], "v": [1, 2, 3]})
         self.assertEqual(get_size(df), get_size(df.groupby("g")))
         self.assertEqual(get_size(df["v"]), get_size(df.groupby("g")["v"]))
@@ -135,17 +135,17 @@ class TestBufferPool(unittest.TestCase):
         plain.coef_ = np.zeros(1000)
         ridge = MyRidge().fit(np.ones((10, 2)), np.arange(10.))
         ridge.coef_ = np.zeros(1000)
-        # A user state builder is never called, and what holds it is not sized in part.
+        # Custom serialization is not invoked; the containing model has unknown size.
         self.assertEqual(get_size(holding), UNKNOWN_SIZE)
         self.assertEqual(calls, [])
-        # A user class keeping the default, or a library's, is sized as before.
+        # Default or supported inherited serialization remains eligible for sizing.
         self.assertGreater(get_size(plain), 8000)
         self.assertGreater(get_size(ridge), 8000)
 
     def test_unknown_object_sizes(self):
-        # An object we cannot size must not crash the plan that produced it (a
-        # `df.index` intermediate used to). It is counted as UNKNOWN_SIZE instead,
-        # which means the pool under-accounts for it; see the TODO in _object_size.
+        # Unsupported objects, including `df.index` intermediates, use UNKNOWN_SIZE
+        # without failing execution. This underestimates memory consumption;
+        # see the TODO in _object_size.
         class Foo:
             pass
 
@@ -250,8 +250,8 @@ class TestBufferPoolIntegration(RuntimeTest):
         pred = arr_out.skb.apply(DummyRegressor(), y=y)
 
         with self.assertLogs("stratum", level="DEBUG") as logs:
-            # Pin the host memory so the default 0.7 fraction yields the same
-            # ~24 KB budget the old explicit byte flag used to set.
+            # Fix detected host memory so the default 0.7 fraction yields
+            # an approximately 24 KB budget.
             with patch.object(_bp, "_host_memory_bytes", return_value=34286):
                 with config(scheduler=True, DEBUG=True):
                     search = pred.skb.make_grid_search(cv=2, scoring="neg_mean_squared_error")
@@ -314,9 +314,8 @@ class TestLRUEviction(unittest.TestCase):
         self.assertTrue(self.pool.live_variable_map[b].is_spilled)
 
     def test_unspillable_entries_stay_resident(self):
-        # The pool admits objects the serializer has no format for (a CV
-        # splitter, say); evicting one used to crash the plan. It stays in
-        # memory and the next LRU entry is spilled instead.
+        # Unsupported serialization types, such as CV splitters, remain resident.
+        # Eviction continues with the next eligible LRU entry.
         class Opaque:
             pass
 
@@ -328,7 +327,7 @@ class TestLRUEviction(unittest.TestCase):
         self.assertFalse(self.pool.live_variable_map[opaque].is_spilled)
         self.assertFalse(self.pool.live_variable_map[holder].is_spilled)
         self.assertTrue(self.pool.live_variable_map[a].is_spilled)
-        # Only a's spill is on disk: the holder's half-written leaf is cleaned up.
+        # Remove partial spill files after serialization failure; only a remains.
         self.assertEqual(1, len(list(self.spill_root.iterdir())))
         self.pool.put(c, _arr(500))
         self.assertTrue(self.pool.live_variable_map[b].is_spilled)
@@ -387,7 +386,7 @@ class TestLRUEviction(unittest.TestCase):
 
 
 class TestEvictionPolicy(unittest.TestCase):
-    """The pool asks its policy what to spill, and frees what it is asked to."""
+    """Spill selection follows the eviction policy and requested memory target."""
 
     def setUp(self):
         self.spill_root = Path(tempfile.mkdtemp())
@@ -448,7 +447,7 @@ class TestEvictionPolicy(unittest.TestCase):
             pool.put(op, _arr(500))  # 4_000 B each
         pool.pin(a)
         freed = pool.evict(5_000)
-        # a is pinned, so b and c go, which is the first point past 5_000 B.
+        # With a pinned, spilling b and c releases 8_000 B, meeting the 5_000 B target.
         self.assertEqual(freed, 8_000)
         self.assertEqual(pool.memory_usage, 4_000)
         self.assertFalse(pool.live_variable_map[a].is_spilled)

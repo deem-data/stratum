@@ -28,7 +28,7 @@ def _call(method, *args, output_type=OutputType.FRAME, **kwargs) -> MethodCallOp
 
 
 class TestRenameExtraction(unittest.TestCase):
-    """`rename` parses into which labels it remaps, per axis."""
+    """Extract per-axis label mappings from `rename` calls."""
 
     def test_columns_and_index_keywords(self):
         op = make_rename_op(_call("rename", columns={"a": "x"}, index={0: 9}))
@@ -88,7 +88,7 @@ class TestRenameExecution(unittest.TestCase):
         self.assertEqual(["x", "b"], result.columns)
 
     def test_polars_ignores_absent_labels_like_pandas(self):
-        # pandas' default errors="ignore" skips a label that is not there.
+        # pandas' default errors="ignore" skips absent labels.
         with force_polars():
             result = run_op(RenameOp(columns={"a": "x", "zz": "y"}),
                             pl.DataFrame({"a": [1]}))
@@ -112,8 +112,8 @@ class TestResetIndex(unittest.TestCase):
                               ResetIndexOp)
 
     def test_drop_false_and_the_default_are_refused(self):
-        # drop=False promotes the index to a column, changing the schema, and it
-        # is also pandas' default, so it is refused rather than guessed at.
+        # pandas defaults to drop=False, which inserts index columns.
+        # Extraction leaves this schema-changing form opaque.
         self.assertIsNone(make_reset_index_op(_call("reset_index", drop=False)))
         self.assertIsNone(make_reset_index_op(_call("reset_index")))
 
@@ -144,7 +144,7 @@ class TestStructureReadExtraction(unittest.TestCase):
         return optimize(read(frame), OptConfig(dataframe_ops=True))[-1]
 
     def test_shape_of_a_frame_or_series_is_a_scalar_read(self):
-        # A tuple, not a frame: before, the read copied the container's kind.
+        # Shape returns a tuple; its output category must not inherit the container's.
         for kind, read in (("frame", lambda x: x.shape), ("series", lambda x: x["a"].shape)):
             with self.subTest(kind=kind):
                 op = self._read(read)
@@ -153,7 +153,7 @@ class TestStructureReadExtraction(unittest.TestCase):
                 self.assertIs(OutputType.SCALAR, op.output_type)
 
     def test_columns_of_a_frame_is_a_column_names_read(self):
-        # Not a SERIES: `df[df.columns[:2]]` would then read as a row mask.
+        # SERIES would misclassify `df[df.columns[:2]]` as a row selection.
         op = self._read(lambda x: x.columns)
         self.assertIsInstance(op, ColumnNamesOp)
         self.assertIs(OutputType.UNKNOWN, op.output_type)

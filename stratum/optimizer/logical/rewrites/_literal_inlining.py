@@ -52,7 +52,8 @@ def _inline_estimator_params(op: BaseEstimatorOp) -> None:
     params = {name: op.inputs[ref.k].value for name, ref in literals.items()}
     op.estimator.set_params(**params)
     op.original_estimator.set_params(**params)
-    op.supported_modes = frozenset(m for m in op.response_modes if hasattr(op.estimator, m))
+    op.supported_prediction_methods = frozenset(
+        m for m in op.prediction_methods if hasattr(op.estimator, m))
     op.param_refs = {name: ref for name, ref in op.param_refs.items() if name not in literals}
 
     used = {0}  # X is implicit, so it does not appear in the fields below.

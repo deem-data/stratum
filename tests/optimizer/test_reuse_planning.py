@@ -147,7 +147,7 @@ def test_every_split_and_its_descendants_are_excluded():
     ops = list(topological_iterator(root))
     keys = graph_keys(root)
     cache = ReuseCache()
-    # Even entries supplied externally must never make fold-dependent ops hits.
+    # Exclude fold-dependent operators even when matching cache entries exist.
     for op in ops:
         cache.put(keys[op], op.name)
     assert post_split_region(ops) == {split_a, split_b, a, b, root}

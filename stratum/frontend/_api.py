@@ -34,9 +34,9 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
     if declared:
         metric = resolve_declared_scoring(dag)
     elif scoring is None:
-        # A search ranks a set, so every candidate has to be measured the same way.
-        # `.skb.make_grid_search()` still honours scoring=None, by handing the call to
-        # skrub. See docs/adr/0004-a-search-always-names-its-metric.md.
+        # Candidate ranking requires a common metric. `.skb.make_grid_search()`
+        # delegates scoring=None to skrub.
+        # See docs/adr/0004-a-search-always-names-its-metric.md.
         raise ValueError(
             "grid_search requires scoring=. Without it each candidate would be scored by"
             " its own estimator's `score`, so a batch mixing estimator kinds would rank"
@@ -44,19 +44,19 @@ def grid_search(dag: DataOp, cv=None, scoring=None, return_predictions=False, en
             " built with `make_scorer`, or a callable `scorer(estimator, X, y)`."
         )
     t0 = perf_counter()
-    #FIXME: Measure operator execution only if stats is enabled
+    # FIXME: Measure operator execution only if stats is enabled.
     env_extra = env if env else {}
     env = get_data(dag)
     for k, v in env_extra.items():
         env[k] = v
-    # The scorer is plan-time state: it decides what the plan's last operator computes,
-    # and an unusable `scoring=` fails here rather than after a fold has been fitted.
+    # Resolve the scorer before planning to bind the terminal operator's metric
+    # and reject unsupported scoring configurations before execution.
     search = SearchConfig(metric=metric if declared else resolve_scoring(scoring),
                           return_predictions=return_predictions, declared_kwargs=declared)
     # Resolve variables to constants at compile time, so the scheduler runs
     # without an environment.
-    # Without an explicit `cv`, the folds come from the splitter the plan declares with
-    # `mark_as_X(cv=...)`, which the plan computes itself (see BuildSplitterOp).
+    # Without an explicit `cv`, use the splitter declared by `mark_as_X(cv=...)`
+    # and constructed during plan execution (see BuildSplitterOp).
     sched, preds = _execute(dag, env, t0, lambda sched: sched.grid_search(cv), search=search)
 
     return (sched,preds) if return_predictions else sched

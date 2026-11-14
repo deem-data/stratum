@@ -1,16 +1,16 @@
 """Physical predictor operators.
 
-Lowering turns a logical :class:`~stratum.optimizer.logical._ops.PredictorOp`
-wrapping a supported model into an *abstract* physical predictor op -- one per
-model family (random forest, ridge, LightGBM, ...). Implementation selection then
-swaps the abstract op to a concrete impl. Most families currently have only the
+Lowering maps a logical :class:`~stratum.optimizer.logical._ops.PredictorOp`
+for a supported model to an abstract physical operator for its model family
+(random forest, ridge, LightGBM, ...). Implementation selection then binds a
+concrete implementation. Most families currently have only the
 reference implementation. Random forests additionally expose independently
 selectable exact and histogram Rust implementations.
 
-The abstract ops exist so alternative implementations have something to register
-against. A new impl subclasses the abstract op, registers under it, gates itself
-with ``supports`` and swaps the estimator at plan time, the same way
-:class:`~stratum.optimizer.physical._transform_execs.RustStringEncoder` does::
+Abstract operators provide registration points for alternative implementations.
+An implementation subclasses the family, declares feasibility through
+``supports``, and binds its estimator during planning, as in
+:class:`~stratum.optimizer.physical._transform_execs.RustStringEncoder`::
 
     @rust_impl(of=RandomForestOp)
     class RustRandomForest(RandomForestOp):
@@ -24,15 +24,14 @@ with ``supports`` and swaps the estimator at plan time, the same way
             self.estimator = ...
             self.original_estimator = ...
 
-Every reference impl registers under the ``sklearn-skrub`` backend, including
-those for LightGBM, XGBoost and CatBoost: in the registry that backend means
-"run the estimator as given, through its scikit-learn API", which every selector
-already treats as the backend-agnostic fallback.
+Reference implementations register under ``sklearn-skrub``, including LightGBM,
+XGBoost and CatBoost. This backend executes the supplied estimator through its
+scikit-learn-compatible interface.
 
-Lowering is incremental. A predictor with no family below returns ``None`` from
-:func:`lower_predictor`, passes through lowering unchanged, and is bound to
-:class:`PassthroughPredictor`, the ``sklearn-skrub`` impl registered on
-``PredictorOp`` itself, which runs any estimator (scikit-learn or not) as given.
+For predictors without a registered family, :func:`lower_predictor` returns None.
+The logical operator remains unchanged until selection binds
+:class:`PassthroughPredictor`, the generic ``sklearn-skrub`` implementation
+registered for ``PredictorOp``.
 """
 from __future__ import annotations
 
@@ -64,7 +63,7 @@ from stratum.optimizer.physical._registry import rust_impl, sklearn_skrub_impl
 
 class _PredictorExecution(EstimatorExecution, PredictorOp, PhysicalOp):
     # TODO: specialize linear, neighbor and third-party model sizing. Until then
-    # the generic estimate is computed once per fit, never on a response pass.
+    # the generic estimate is computed once per fit, never on an inference pass.
     pass
 
 
@@ -136,8 +135,8 @@ class _RustRandomForestPhysicalOp(RandomForestOp):
     histogram_backend = False
 
     def _measure_retained_state(self, estimator) -> int:
-        # Predictors are not wrapped by Skrub, so the fitted handle is directly
-        # available. EstimatorExecution stores this estimate after fitting.
+        # The native estimator exposes its fitted model handle.
+        # EstimatorExecution stores this estimate after fitting.
         # TODO: return this scalar from native fit without computing model_info's
         # other diagnostics. Include Vec spare capacity and native/Python metadata.
         return rb.forest_model_info(estimator._forest_model_handle_)["model_bytes"]
@@ -355,9 +354,8 @@ _SKLEARN_FAMILIES: dict[type, type[PredictorOp]] = {
     SGDRegressor: SGDOp,
 }
 
-# (module, base class, family). The libraries are optional, so their base classes
-# are looked up in ``sys.modules`` instead of imported: an estimator can only be an
-# instance of a library the user has already imported.
+# (module, base class, family). Resolve optional library classes from loaded
+# modules to avoid importing dependencies solely for family detection.
 _LIBRARY_FAMILIES: tuple[tuple[str, str, type[PredictorOp]], ...] = (
     ("lightgbm", "LGBMModel", LightGBMOp),
     ("xgboost", "XGBModel", XGBoostOp),
@@ -382,8 +380,8 @@ def predictor_family(estimator) -> type[PredictorOp] | None:
 def lower_predictor(op: PredictorOp, ctx) -> PhysicalOp | None:
     """Lower a ``PredictorOp`` to the matching abstract physical predictor.
 
-    Only models with a family above are lowered; anything else returns ``None``
-    and stays a logical ``PredictorOp``.
+    Return None for models without a registered family, preserving the logical
+    ``PredictorOp`` for generic implementation selection.
     """
     family = predictor_family(op.original_estimator)
     if family is None:

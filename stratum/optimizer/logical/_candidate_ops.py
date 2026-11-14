@@ -6,7 +6,7 @@
 - Explicit input edges preserve candidate ordering and expose test-label
   dependencies to buffer-lifetime planning.
 
-Scoring uses the computed responses and test labels directly; see ``_scoring.py``.
+Scoring uses the computed outputs and test labels directly; see ``_scoring.py``.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import polars as pl
 from stratum.optimizer.logical import _schema
 from stratum.optimizer.logical._base import OutputType, _resolve_operand, clone_value
 from stratum.optimizer.logical._ops import Op, OperandRef
-from stratum.optimizer.logical._scoring import Metric, read_response
+from stratum.optimizer.logical._scoring import Metric, read_prediction
 
 import logging
 logger = logging.getLogger(__name__)
@@ -24,13 +24,13 @@ _MAX_LABEL = 50
 
 
 class DeclaredScoringOp(Op):
-    """``pred.skb.with_scoring(...)``: ``pred`` unchanged, plus the scorers it declares.
+    """Annotate ``pred`` with the scorers declared by ``pred.skb.with_scoring(...)``.
 
-    The scorers keep their skrub shape (``{"scoring", "kwargs", "name"}``), with every
-    DataOp in them bound to an operand of this op, so a ``sample_weight`` computed from
-    the data is part of the plan. Like skrub's ``Scoring`` node it passes ``pred``
-    through; the candidate set strips it and, when the search scores with the declared
-    metric, reads the kwargs operands per fold (see ``install_candidate_set``).
+    Scorers retain skrub's ``{"scoring", "kwargs", "name"}`` representation.
+    DataOps in scorer arguments, such as ``sample_weight``, bind to input operands.
+    This operator passes ``pred`` through unchanged. Candidate construction removes
+    the annotation and binds scorer kwargs for per-fold evaluation when using the
+    declared metric (see ``install_candidate_set``).
     """
 
     logical_family = "DeclaredScoring"
@@ -47,7 +47,8 @@ class DeclaredScoringOp(Op):
 class CandidateSetOp(Op):
     """Fan-in over every candidate's output, carrying one label per candidate.
 
-    The first ``len(candidate_names)`` inputs are the candidate tails, in label order.
+    The first ``len(candidate_names)`` inputs are candidate output operators,
+    in label order.
     Subclasses may append further operands and address them by ``OperandRef``.
     """
 
@@ -69,8 +70,7 @@ class CandidateSetOp(Op):
         return self.inputs[:len(self.candidate_names)]
 
     def consumes_inputs_positionally(self) -> bool:
-        # Each candidate is read by position, so two candidates that happen to be the
-        # same operator must still occupy distinct slots.
+        # Positional candidate access requires distinct slots for repeated operators.
         return True
 
     def structure_key(self):
@@ -97,27 +97,27 @@ class ScoreCandidatesOp(CandidateSetOp):
     """Score each candidate against the test fold, one row per candidate.
 
     Inputs include candidate outputs and the test labels addressed by ``y_ref``.
-    ``response_mode`` identifies the response method selected for test rows during
+    ``prediction_method`` identifies the method selected for test rows during
     train/test unrolling. The metric consumes the resulting predictions,
     probabilities or decision-function values directly.
     """
 
     logical_family = "ScoreCandidates"
-    fields = ["candidate_names", "metric", "response_mode", "emit_predictions", "y_ref",
+    fields = ["candidate_names", "metric", "prediction_method", "emit_predictions", "y_ref",
               "kwargs_refs"]
 
     def __init__(self, candidate_names: list[str], metric: Metric,
-                 inputs: list | None = None, response_mode: str = "predict",
+                 inputs: list | None = None, prediction_method: str = "predict",
                  emit_predictions: bool = False, y_ref: OperandRef | None = None,
                  kwargs_refs: list | None = None):
         super().__init__(candidate_names, inputs)
         self.metric = metric
-        self.response_mode = response_mode
+        self.prediction_method = prediction_method
         self.emit_predictions = emit_predictions
         self.output_type = OutputType.FRAME
         self.y_ref = y_ref
-        # One entry per candidate: the kwargs its declared scorer reads, with
-        # OperandRefs for the ones the plan computes on the fold; None for none.
+        # One entry per candidate's scorer kwargs, with OperandRefs for graph-fed
+        # values evaluated per fold; None denotes absent kwargs.
         self.kwargs_refs = kwargs_refs
 
     def propagate_output_schema(self):
@@ -126,8 +126,8 @@ class ScoreCandidatesOp(CandidateSetOp):
         There is one row per candidate. Scoring runs on test rows only;
         the training copy has no candidate set.
         """
-        # candidate_names are strings and Metric returns a float; the values are
-        # whatever the candidate produced (array / frame / series), so untyped.
+        # Candidate names are strings and scores are floats. Prediction values
+        # may be arrays, frames or series, so their dtype remains unknown.
         schema = {"id": pl.String, "scores": pl.Float64}
         if self.emit_predictions:
             schema["vals"] = _schema.UNKNOWN_DTYPE
@@ -135,7 +135,7 @@ class ScoreCandidatesOp(CandidateSetOp):
 
     def clone(self):
         new_op = type(self)(self.candidate_names, self.metric,
-                            response_mode=self.response_mode,
+                            prediction_method=self.prediction_method,
                             emit_predictions=self.emit_predictions, y_ref=self.y_ref,
                             kwargs_refs=clone_value(self.kwargs_refs))
         new_op.was_cloned = True
@@ -148,12 +148,12 @@ class ScoreCandidatesOp(CandidateSetOp):
             produced = inputs[i]
             kwargs = _resolve_operand(self.kwargs_refs[i], inputs) if self.kwargs_refs else None
             try:
-                scores.append(self.metric(y_true, read_response(produced, self.response_mode),
-                                          **(kwargs or {})))
+                scores.append(self.metric(
+                    y_true, read_prediction(produced, self.prediction_method), **(kwargs or {})))
             except Exception as e:
                 raise RuntimeError(
                     f"[scoring] {self.metric!r} failed on candidate {name!r}"
-                    f" reading its {self.response_mode!r} values: {e}"
+                    f" reading its {self.prediction_method!r} values: {e}"
                 ) from e
             ids.append(name)
             values.append(produced)

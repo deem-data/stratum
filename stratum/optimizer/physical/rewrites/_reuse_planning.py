@@ -5,8 +5,8 @@ selected implementation, execution mode and ordered data/state inputs. Reuse
 excludes the split and its descendants, plus sources outside the fitting mode.
 Operators with live state consumers execute even if their data output is cached.
 
-Starting at the root, a hit cuts off the work needed only by that operator. Its
-value is retained by the plan so cache eviction cannot invalidate the plan.
+Starting at the root, a cache hit prunes dependencies with no other consumers.
+The plan retains the cached value so eviction cannot invalidate the plan.
 The scheduler attempts to cache each remaining keyed result except constants,
 subject to the cache budget. The cache and execution share these values by
 reference; operators must treat them as read-only.
@@ -30,7 +30,7 @@ _MISS = object()
 
 
 class CacheHit:
-    """A retained value, handed to the scheduler once and then released here."""
+    """A cached value whose reference transfers to the scheduler once."""
 
     def __init__(self, key: str, value: Any):
         self.key = key
@@ -58,7 +58,7 @@ def post_split_region(ops: list[IRNode]) -> set[IRNode]:
 
 
 def cacheable_region(ops: list[IRNode]) -> set[IRNode]:
-    """Full-data fitting, preprocessing and explicit fitted-state responses.
+    """Full-data fitting, preprocessing and inference with explicit fitted state.
 
     Whether their configuration and inputs can be keyed is checked separately by
     compute_lineage_keys, which also blocks descendants of unkeyed inputs.
@@ -71,8 +71,8 @@ def cacheable_region(ops: list[IRNode]) -> set[IRNode]:
 def apply_reuse_cache(root: IRNode, cache: ReuseCache) -> None:
     """Prune a selected physical DAG in place, retaining root and hit identities.
 
-    Planning must start from an unpruned graph: a previous hit has already lost
-    the input edges needed to compute lineage.
+    Planning requires an unpruned graph: pruning a cache hit removes the input
+    edges needed to compute lineage.
     """
     ops = list(topological_iterator(root))
     if any(op.cache_hit is not None for op in ops):
@@ -111,7 +111,7 @@ def _take_cached(root: IRNode, keys: dict, cache: ReuseCache) -> int:
         # execute unless a downstream cache hit prunes their entire computation.
         if key is not None and not op.has_state_reader():
             # One atomic lookup: an entry can be evicted at any time, and None
-            # is a valid cached result. The returned reference belongs to us.
+            # is a valid cached result. The plan retains the returned reference.
             value = cache.get(key, _MISS)
             if value is not _MISS:
                 op.cache_hit = CacheHit(key, value)
@@ -123,10 +123,10 @@ def _take_cached(root: IRNode, keys: dict, cache: ReuseCache) -> int:
 
 
 def _cut_inputs(op: IRNode) -> None:
-    """Cut this hit's inputs and prune producers left without consumers.
+    """Remove a cache hit's input edges and prune producers without consumers.
 
     Walk iteratively so a hit can prune a long pipeline without recursion.
-    Shared producers stay alive while any surviving consumer needs them.
+    Retain shared producers that have remaining consumers.
     """
     stack = [op]
     while stack:

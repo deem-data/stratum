@@ -1,13 +1,13 @@
-"""Implementation selection: binds each op to a registered physical impl.
+"""Bind operators to registered physical implementations.
 
-Per op: registry candidates -> ``supports`` filter -> selector choice -> bind
-in place (``__class__`` swap, identity preserved) + ``on_impl_selected``.
-Afterwards execution is plain ``op.process``.
+For each operator, filter registry candidates through ``supports``, apply the
+selection policy, and bind the selected class in place. ``on_impl_selected``
+initializes its configuration. Execution dispatches through ``op.process``.
 
 Ops without candidates keep their own ``process``. An op with candidates but
 no bound impl and no ``process`` fails at plan time.
 
-Frame libraries are propagated along edges; mismatches get a ``ConversionOp``
+Frame libraries are propagated along edges; mismatches require a ``ConversionOp``
 (see ``_conversion``).
 
 TODO: Before supporting reselection or moving selection after train/test
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 class ImplementationSelector:
-    """Strategy interface: pick one impl for ``op`` from ``candidates``.
+    """Selection policy for supported implementations of ``op``.
 
     ``candidates`` is already ``supports``-filtered. Returning ``None`` leaves the
     op unbound (valid only for non-abstract ops, which run their own ``process``).
@@ -72,7 +72,7 @@ _GREEDY_RF_PREFERENCES = (
 class PreferenceSelector(ImplementationSelector):
     """Choose an implementation from fixed preference lists.
 
-    The selector is intentionally local to one operator. Candidates have
+    Selection is local to one operator. Candidates have
     already been filtered through ``supports(op, ctx)`` by :func:`bind_op`, so
     this policy only ranks the supported implementations: first by the
     implementation names listed for the op's type, then by backend, and in
@@ -144,23 +144,18 @@ def get_implementation_selector(mode: str) -> ImplementationSelector:
 
 
 class FlagBasedSelector(ImplementationSelector):
-    """Pin every frame op to one named dataframe backend.
+    """Constrain frame operators to a specified dataframe backend.
 
-    Preference order: a Rust kernel when ``ctx.prefer_rust`` (the old
-    ``allow_patch and rust_backend`` gate, decided per op by ``supports``), then
-    the impl matching :attr:`backend`, then a backend-agnostic impl
-    (sklearn/skrub estimators, numpy sources).
+    Prefer a supported Rust kernel when ``ctx.prefer_rust`` is enabled, then an
+    implementation matching :attr:`backend`, then a backend-independent
+    implementation (sklearn/skrub estimators or NumPy sources).
 
-    The backend is constructor state rather than a field on the plan context:
-    it is a selection policy, so the selector that acts on it is the only thing
-    that should carry it. Returning ``None`` when no candidate matches is what
-    makes that pin strict -- an abstract op then survives selection and
-    :func:`_assert_no_abstract_ops` fails the plan, instead of the op silently
-    running on the other backend.
+    The backend constraint is selector state. Return ``None`` when no candidate
+    matches; unresolved abstract operators are rejected before execution.
 
-    Not registered in :data:`_IMPLEMENTATION_SELECTOR_FACTORIES`: a pinned
-    backend is a testing tool (``OptConfig(selector=...)``), not a user-facing
-    mode. Users reach polars through ``implementation_selector="greedy"``.
+    Used for testing through ``OptConfig(selector=...)`` and excluded from
+    :data:`_IMPLEMENTATION_SELECTOR_FACTORIES`. The public ``"greedy"`` policy
+    includes Polars in its backend preferences.
     """
 
     #: Backends whose impls run regardless of the chosen frame backend.
@@ -194,16 +189,13 @@ def bind_op(op: IRNode, ctx: PlanContext,
             selector: ImplementationSelector | None = None) -> IRNode:
     """Resolve a single op to a concrete implementation and bind it in place.
 
-    Looks up the registry candidates for the op's type, filters by
-    ``supports(op, ctx)``, lets the selector choose, and binds the choice by
-    swapping ``op.__class__`` to the impl's concrete class (identity preserved;
-    a logical op that is a pure backend refinement becomes its physical subclass)
-    and running its ``on_impl_selected(ctx)``.
+    Filter registered candidates through ``supports(op, ctx)``, apply the selector,
+    and assign the selected ``op.__class__`` without changing node identity.
+    Initialize the physical implementation with ``on_impl_selected(ctx)``.
 
-    Ops with no candidate are left untouched (un-migrated families / structural
-    ops run their own ``process``). Raises when an op that needs an
-    implementation gets none, either because every backend refused it or because
-    the selector matched none of the ones that did. Returns ``op``.
+    Operators without registered candidates remain unchanged. When candidates
+    exist and the operator requires an implementation, reject the plan if none
+    is selected. Return ``op``.
 
     No conversions are inserted; see :func:`select_implementations`.
     """
@@ -281,12 +273,10 @@ def _no_impl_message(op: IRNode, selector: ImplementationSelector,
 
 
 def _needs_an_impl(op: IRNode) -> bool:
-    """Whether ``op`` would be unrunnable if no implementation were bound.
+    """Whether ``op`` inherits the unimplemented ``IRNode.process`` method.
 
-    The frame families are pure config: they carry no ``process`` of their own, so
-    an unbound one raises a bare NotImplementedError at execution time, far from
-    the decision that caused it. The estimator families do define ``process`` and
-    legitimately run unbound when an optional accelerator refuses them.
+    Such operators require a selected implementation. Operators with their own
+    ``process`` method can retain it when no registered implementation is selected.
     """
     return type(op).process is IRNode.process
 
@@ -296,11 +286,10 @@ def select_implementations(root: IRNode, ctx: PlanContext,
                            selector: ImplementationSelector | None = None) -> IRNode:
     """Resolve every op with registered candidates to a concrete implementation.
 
-    Ops without candidates (un-migrated families and structural ops) are left
-    as-is; they keep executing via their own ``process``. Returns ``root``
-    (selection binds in place, so the root object is unchanged).
+    Operators without candidates retain their existing ``process`` method.
+    Binding preserves node identity, including the returned ``root``.
 
-    Library mismatches get a ``ConversionOp`` (#227). Where polars -> pandas
+    Insert ``ConversionOp`` nodes for library mismatches (#227). Where Polars -> pandas
     would lose index labels, the producer is required to run on pandas;
     selection iterates to a fixpoint over that set.
     """

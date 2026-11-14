@@ -227,14 +227,14 @@ def test_stacking_scores_like_skrub(frame):
     np.testing.assert_allclose(sorted(ours["scores"]), sorted(theirs["mean_test_score"]))
 
 
-def test_the_test_rows_answer_with_the_scorers_response(frame):
+def test_test_rows_use_the_scorers_prediction_method(frame):
     X, y = xy(frame, "c")
     first = X.skb.apply(LogisticRegression(), y=y)
     pred = first.skb.apply_func(lambda p: pd.DataFrame({"p": p})).skb.apply(
         LogisticRegression(), y=y)
     plan, _ = optimize(pred.skb.with_scoring("roc_auc"), search=_search("roc_auc"))
     modes = sorted(op.mode for op in plan if isinstance(op, PredictorOp) and op.state_ref is not None)
-    # The terminal model uses the scorer's response method. The upstream model
+    # The terminal model uses the scorer's prediction method. The upstream model
     # produces predictions as features for both train and test copies.
     assert modes == ["decision_function", "predict", "predict"]
 

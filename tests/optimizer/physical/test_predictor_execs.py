@@ -22,7 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.tree import ExtraTreeClassifier
 
 import stratum as st
-from tests.optimizer.physical._execution import response_op
+from tests.optimizer.physical._execution import inference_op
 from stratum.adapters.tree_classifier import RustRandomForestClassifier
 from stratum.frontend._api import evaluate
 from stratum.optimizer._optimize import optimize
@@ -133,7 +133,7 @@ def test_predictor_lowers_to_its_family(module, name, family, _impl):
 
     assert type(lowered) is family
     assert lowered.is_abstract
-    # Still a PredictorOp for response-mode planning and dead code elimination.
+    # Still a PredictorOp for inference-mode planning and dead code elimination.
     assert isinstance(lowered, PredictorOp)
     assert lowered.estimator is estimator
 
@@ -156,8 +156,8 @@ def test_unsupported_predictor_stays_logical(estimator):
 
 
 def test_pass_through_predictor_renders_its_estimator():
-    """The logical op shows its family; the bound pass-through impl names the
-    estimator, so per-op stats tell pass-through predictors apart."""
+    """Logical labels identify the family; physical labels include the estimator
+    to distinguish predictor configurations in per-operator statistics."""
     op = PredictorOp(estimator=RidgeCV(alphas=[0.1, 1.0]))
     assert str(op) == "Predictor_fit"
 
@@ -187,7 +187,7 @@ def test_any_estimator_passes_through():
     assert str(op) == "PredictorOp_fit(_UserDefinedPredictor())"
     fitted = op.process([X])
     assert fitted.output is None
-    np.testing.assert_array_equal(response_op(op).process([X, fitted.state]),
+    np.testing.assert_array_equal(inference_op(op).process([X, fitted.state]),
                                   np.full(len(X), np.mean(y)))
 
 
@@ -216,8 +216,8 @@ def test_every_selector_binds_the_reference_impl(module, name, family, impl, sel
 
 
 def test_alternative_impl_registers_against_the_family_op():
-    """An alternative random forest registers under RandomForestOp and gates
-    itself with ``supports``; unsupported configs keep the reference impl."""
+    """Register an alternative RandomForestOp implementation with a feasibility
+    predicate; unsupported configurations retain the reference implementation."""
 
     class ClassifierOnlyForest(RandomForestOp):
         is_abstract = False
@@ -326,7 +326,7 @@ def test_lowering_does_not_import_optional_libraries():
 
 
 def test_graph_fed_catboost_parameter_is_only_applied_while_fitting():
-    """A response pass must not mutate the fitted CatBoost estimator."""
+    """An inference pass must not mutate the fitted CatBoost estimator."""
     X, y = make_regression(n_samples=20, n_features=2, random_state=0)
     op = LibCatBoost(
         estimator=_estimator("catboost", "CatBoostRegressor", iterations=1, verbose=0),
@@ -339,7 +339,7 @@ def test_graph_fed_catboost_parameter_is_only_applied_while_fitting():
     fitted = op.process([X, 2])
 
     assert fitted.state.get_params()["iterations"] == 2
-    assert len(response_op(op, 2).process([X, 2, fitted.state])) == len(X)
+    assert len(inference_op(op, 2).process([X, 2, fitted.state])) == len(X)
 
 
 class _RefusesRefitParams(Ridge):
@@ -358,7 +358,7 @@ def test_graph_fed_parameter_is_applied_to_a_fresh_estimator_every_fold():
                      param_refs={"alpha": OperandRef(1)})
 
     fitted = op.process([X, 2.0])
-    response_op(op, 2).process([X, 2.0, fitted.state])
+    inference_op(op, 2).process([X, 2.0, fitted.state])
     fitted = op.process([X, 3.0])
 
     assert fitted.state.alpha == 3.0

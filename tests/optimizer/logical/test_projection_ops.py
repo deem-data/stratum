@@ -254,9 +254,9 @@ class TestColumnSelectorProcess(unittest.TestCase):
         # fit-time resolution is what transforms (SelectCols semantics).
         op = ColumnSelectorOp(selector=selectors.numeric())
         fitted = run_op(op, pd.DataFrame({"a": [1.0], "s": ["x"]}))
-        response = ColumnSelectorOp(selector=selectors.numeric())
-        response.state_ref = OperandRef(1)
-        result = run_op(response, pd.DataFrame({"a": [2.0], "b": [3.0], "s": ["y"]}),
+        inference = ColumnSelectorOp(selector=selectors.numeric())
+        inference.state_ref = OperandRef(1)
+        result = run_op(inference, pd.DataFrame({"a": [2.0], "b": [3.0], "s": ["y"]}),
                         fitted.state, mode="transform")
         self.assertEqual(["a"], list(result.columns))
 

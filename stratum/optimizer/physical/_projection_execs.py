@@ -38,7 +38,7 @@ class PolarsDropOp(DropOp, PhysicalOp):
     def process(self, inputs: list):
         columns, errors = (_resolve_operand(v, inputs) for v in (self.columns, self.errors))
         columns = [columns] if isinstance(columns, str) else list(columns)
-        # pandas' errors="ignore" skips labels that are not there.
+        # Match pandas' errors="ignore" behavior for absent labels.
         return inputs[0].drop(columns, strict=errors == "raise")
 
 

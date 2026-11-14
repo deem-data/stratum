@@ -4,9 +4,9 @@ import copy
 from stratum.optimizer.logical._base import OperandRef
 
 
-def response_op(fit, input_count=1):
-    """Copy a bound estimator for its default response with state appended."""
-    response = copy.copy(fit)
-    response.mode = fit.fallback_mode
-    response.state_ref = OperandRef(input_count)
-    return response
+def inference_op(fit, input_count=1):
+    """Copy a bound estimator for its default inference method with state appended."""
+    inference = copy.copy(fit)
+    inference.mode = fit.fallback_mode
+    inference.state_ref = OperandRef(input_count)
+    return inference

@@ -13,8 +13,7 @@ from polars import DataFrame as PlDataFrame
 from stratum.frontend._pandas_calls import bind_pandas_method
 from stratum.frontend._skrub_graph import _collect_child_data_ops
 from stratum.optimizer.logical import _schema
-# Shared IR foundation. Re-exported below so existing ``from ..._ops import X``
-# call sites (OutputType, OperandRef, is_frame_like, config_key, ...) keep working.
+# Re-export shared IR definitions for compatibility with existing imports.
 from stratum.optimizer.logical._base import (
     IRNode, IndexEffect, OutputType, FRAME_TYPES, FITTING_MODE, Fitted, has_default_labels,
     is_frame_like, OperandRef,
@@ -73,12 +72,11 @@ class Op(IRNode):
 
 
 def substitute_op(op: Op, new_op: Op, keep_kind: bool = False) -> Op:
-    """Put ``new_op`` in ``op``'s place and return it.
+    """Substitute ``new_op`` for ``op`` and return the replacement.
 
-    ``new_op`` takes ``op``'s inputs and outputs, and ``op``'s producers feed it
-    instead; extraction rewires the consumers. ``keep_kind``: ``new_op``
-    produces what ``op``'s receiver (input 0) is, a frame or a series, as a row
-    selection or a column-wise map does.
+    Reuse adjacency lists and redirect producer edges; extraction rewires consumer
+    edges. ``keep_kind`` preserves the receiver's output category (frame or series)
+    for operations such as row selection and column-wise maps.
     """
     new_op.inputs, new_op.outputs = op.inputs, op.outputs
     if keep_kind and op.inputs:
@@ -203,24 +201,23 @@ class VariableOp(Op):
             f"VariableOp({self.name!r}) reached the runtime; variables must be "
             f"resolved to constants at compile time by passing `env` to optimize().")
 
-# Scoring determines the requested test response (see ``ScoreCandidatesOp``).
+# Scoring determines the requested prediction method (see ``ScoreCandidatesOp``).
 # Planning resolves it to a supported estimator method or the fallback method.
-RESPONSE_MODES = frozenset({"predict", "predict_proba", "predict_log_proba",
-                            "decision_function"})
+PREDICTION_METHODS = frozenset({"predict", "predict_proba", "predict_log_proba",
+                              "decision_function"})
 
 
 class BaseEstimatorOp(Op):
     fields = ["estimator", "y", "cols", "exclude_cols", "no_wrap", "allow_reject", "unsupervised", "kwargs", "param_refs",
               "feeds_estimator"]
-    # skrub keys `Apply.kwargs` by the estimator method the kwargs belong to, and
-    # evaluates only the group for the method it is about to call. Subclasses name
-    # the two groups stratum can reach: the one for the fitting call and the one
-    # for the transform/predict call.
+    # Method-specific argument groups for fitting and the default inference method.
+    # Additional supported prediction methods use their own kwargs groups.
     fit_kwargs_key: str | None = None
     call_kwargs_key: str | None = None
-    #: Response methods this kind of op can serve at all. A transformer serves none.
-    response_modes: frozenset = frozenset()
-    #: What it does instead in a response pass it cannot serve.
+    #: Candidate prediction methods for this operator kind; empty for transformers.
+    prediction_methods: frozenset = frozenset()
+    #: Fallback for unsupported prediction methods and outputs consumed by
+    #: another estimator.
     fallback_mode: str = "transform"
     # Row-preserving, and positional on both backends.
     index_effect = IndexEffect.KEEP
@@ -230,10 +227,10 @@ class BaseEstimatorOp(Op):
     def callable_kwargs_keys(cls, estimator) -> frozenset:
         """Return the `.skb.apply()` kwargs groups this operator can pass to methods.
 
-        Include a response group only if the estimator exposes that method.
+        Include a prediction group only if the estimator exposes that method.
         """
         return frozenset({cls.fit_kwargs_key, cls.call_kwargs_key}) | {
-            m for m in cls.response_modes if hasattr(estimator, m)}
+            m for m in cls.prediction_methods if hasattr(estimator, m)}
 
     def __init__(self, estimator: BaseEstimator, y=None, cols=None, exclude_cols=None, no_wrap=False, allow_reject=False, unsupervised=False, kwargs=None, param_refs=None,
                  feeds_estimator=False):
@@ -245,7 +242,7 @@ class BaseEstimatorOp(Op):
         self.original_estimator = clone(self.estimator)
         # X is the implicit primary operand (OperandRef(0)); y/cols/exclude_cols/no_wrap
         # are OperandRefs when fed by the graph, otherwise plain values. param_refs maps
-        # the names of estimator hyper-parameters that are graph-fed to their OperandRef.
+        # graph-fed estimator hyperparameter names to their OperandRefs.
         self.y = y
         self.cols = cols
         self.exclude_cols = exclude_cols
@@ -255,16 +252,16 @@ class BaseEstimatorOp(Op):
         # {method name: kwargs for that method}, as built by `.skb.apply()`. The
         # inner values may contain OperandRefs (a `fit_kwargs` entry can be fed by
         # the graph, e.g. an eval set), so they are resolved per call in
-        # `method_kwargs` rather than stored as ready-to-splat dicts.
+        # `method_kwargs` before keyword argument expansion.
         self.kwargs = kwargs
         self.param_refs = param_refs if param_refs is not None else {}
         # Whether another `.skb.apply()` consumes this op's output. Such an op is not
-        # the last estimator, so it uses its fallback method in response passes.
+        # the last estimator, so it uses its fallback method in inference passes.
         self.feeds_estimator = feeds_estimator
-        # Resolve response methods once during planning. Graph-fed parameters
+        # Resolve prediction methods once during planning. Graph-fed parameters
         # are still unresolved, so availability is checked on the prototype.
-        self.supported_modes = frozenset(m for m in self.response_modes
-                                         if hasattr(self.estimator, m))
+        self.supported_prediction_methods = frozenset(
+            m for m in self.prediction_methods if hasattr(self.estimator, m))
         self.parallelism = os.cpu_count() # TODO: Set this during physical planning.
 
     #: Keyed when the estimator is known and deterministic for its configuration.
@@ -285,13 +282,13 @@ class BaseEstimatorOp(Op):
         return config
 
     def effective_mode(self, mode: str) -> str:
-        """Resolve a requested response method during planning.
+        """Resolve a requested prediction method during planning.
 
-        Unsupported responses and outputs consumed by another estimator use
+        Unsupported prediction methods and outputs consumed by another estimator use
         the fallback: ``transform`` for transformers and ``predict`` for
         predictors, matching skrub's ``Apply``.
         """
-        if mode in self.supported_modes and not self.feeds_estimator:
+        if mode in self.supported_prediction_methods and not self.feeds_estimator:
             return mode
         return self.fallback_mode
 
@@ -301,8 +298,7 @@ class BaseEstimatorOp(Op):
         group = self.kwargs.get(key) if key else None
         if group is None:
             return {}
-        # The whole group can itself be graph-fed (a DataOp evaluating to a dict),
-        # so it is only known to be a dict once resolved.
+        # A graph-fed group must be resolved before validating its mapping type.
         group = _resolve_operand(group, inputs)
         if group is None:
             return {}
@@ -340,21 +336,21 @@ class BaseEstimatorOp(Op):
         assert x is not None, f"X is None for {self}"
         y = (inputs[self.y.k] if isinstance(self.y, OperandRef) else self.y) if fitting else None
         # Clone the unfitted prototype for each fit to isolate fold state.
-        # Response operators borrow the estimator from their fitted-state input.
+        # Inference operators borrow the estimator from their fitted-state input.
         if fitting:
             estm = clone(self.original_estimator)
         else:
             estm = inputs[self.state_ref.k]
         place_holders = {name: inputs[ref.k] for name, ref in self.param_refs.items()}
-        # Graph-fed hyperparameters configure the estimator before fitting. In a
-        # response pass ``estm`` is already fitted, and CatBoost rejects any
+        # Graph-fed hyperparameters configure the estimator before fitting. In an
+        # inference pass ``estm`` is already fitted, and CatBoost rejects any
         # ``set_params`` call at that point (even an empty one).
         if fitting and place_holders:
             estm.set_params(**place_holders)
         cols = _resolve_operand(self.cols, inputs)
         exclude_cols = _resolve_operand(self.exclude_cols, inputs)
         no_wrap = _resolve_operand(self.no_wrap, inputs)
-        # Only fitting evaluates the fit group. Response operators omit it, so
+        # Only fitting evaluates the fit group. Inference operators omit it, so
         # branches used only by fit kwargs do not run on test rows.
         fit_kwargs = self.method_kwargs(self.fit_kwargs_key, inputs) if fitting else {}
         call_kwargs = {} if fitting else self.method_kwargs(mode, inputs)
@@ -387,7 +383,7 @@ class PredictorOp(BaseEstimatorOp):
     # Training predictions execute in a separate operator with a state input.
     fit_kwargs_key = "fit"
     call_kwargs_key = "predict"
-    response_modes = RESPONSE_MODES
+    prediction_methods = PREDICTION_METHODS
     fallback_mode = "predict"
     fitting_mode = "fit"
 
@@ -397,7 +393,7 @@ class PredictorOp(BaseEstimatorOp):
 class TransformerOp(BaseEstimatorOp):
     logical_family = "Transformer"
     # A transformer is fitted through fit_transform(), so (as in skrub) the "fit"
-    # group never applies to one; its response mode is transform().
+    # group never applies to one; its inference method is transform().
     fit_kwargs_key = "fit_transform"
     call_kwargs_key = "transform"
 
@@ -423,12 +419,11 @@ def estimator_parallel_config(n_jobs: int = None):
         return DummyConfigManager()
 
 def estm_supports_polars(estimator):
-    """Whether ``estimator`` -- and every estimator it wraps -- accepts polars input.
+    """Whether the estimator and its nested estimators pass the Polars support check.
 
-    A meta-estimator (a pipeline, a voting ensemble) hands its input to the
-    estimators it wraps, so it supports polars only if they all do: sklearn
-    tries to set ``feature_names_in_`` on a wrapped LightGBM model, which is a
-    read-only property there.
+    Meta-estimators forward inputs to nested estimators, so check named parameters
+    recursively. The module-based check below is conservative for third-party
+    estimators, including LightGBM's read-only ``feature_names_in_`` property.
     """
     if not _supports_polars_itself(estimator):
         return False
@@ -459,7 +454,7 @@ def check_estm_inputs(estimator, mode, x, y):
         from stratum.optimizer.physical._conversion import to_pandas
         x = to_pandas(x)
         if y is not None and mode in (FITTING_MODE, "fit"):
-            # y may already be pandas: the plan converts edges explicitly now.
+            # Explicit edge conversions may already have converted y to pandas.
             y = to_pandas(y)
     return converted, x, y
 
@@ -475,8 +470,8 @@ def process_estimator_task(task_data):
         y_arg = () if unsupervised else (y,)
         estimator.fit(x, *y_arg, **fit_kwargs)
         return None, estimator
-    elif mode in RESPONSE_MODES:
-        # `mode` is already this op's effective mode, so the method is one it serves.
+    elif mode in PREDICTION_METHODS:
+        # The mode has already been resolved to a supported prediction method.
         result = getattr(estimator, mode)(x, **call_kwargs)
         return result, estimator
     else:
@@ -494,7 +489,7 @@ def process_transformer_task(task_data):
             y_arg = () if unsupervised else (y,)
             result = estimator.fit_transform(x, *y_arg, **fit_transform_kwargs)
         elif mode == "transform":
-            # Planning resolves transformer responses to transform.
+            # Planning resolves transformer inference to transform.
             result = estimator.transform(x, **transform_kwargs)
         else:
             raise ValueError(f"Mode {mode} not supported for TransformerOp.")
@@ -520,7 +515,7 @@ class ChoiceOp(Op):
         self.update_name()
 
     def make_outcome_names(self):
-        # TODO find a better way for naming the unnamed choices
+        # TODO: Define a naming policy for choices without explicit names.
         return [", ".join(
                 f"Choice{len(combi) - i - 1}:{value}" if choice_name is None else f"{choice_name}:{value}"
                 for i, (choice_name, value) in enumerate(combi)
@@ -571,10 +566,9 @@ class ValueOp(Op):
 class MethodCallOp(Op):
     fields = ["method_name", "args", "kwargs"]
 
-    #: What is known about the pandas methods that stay recorded calls, by name:
-    #: ``(keeps_kind, keeps_rows)``. ``keeps_kind``: the result is what the
-    #: receiver is, a frame or a series. ``keeps_rows``: it holds the receiver's
-    #: rows, in order, with their labels.
+    #: Properties of pandas methods retained as opaque calls:
+    #: ``(keeps_kind, keeps_rows)``. ``keeps_kind`` preserves the receiver's
+    #: frame/series category; ``keeps_rows`` preserves its row order and labels.
     OPAQUE_METHODS = {
         "where": (True, True), "map": (True, True), "fillna": (True, True),
         "rename": (True, True),
@@ -643,15 +637,14 @@ class GetAttrOp(Op):
 def _elementwise_schema(op: "Op", operands) -> "pl.Schema | None":
     """Output schema of an elementwise ``BinOp``/``UnaryOp`` over frame data.
 
-    Keeps the frame operand's column set; the dtypes come from
-    ``_schema.elementwise_result_dtype``. Unknown when the op doesn't produce
-    frame data, when any frame operand is unknown, or -- for a frame-frame op --
-    when the operands don't carry the same columns, since pandas aligns on column
-    labels and unions them rather than keeping one side's.
+    Preserve the frame operand's column set and infer dtypes through
+    ``_schema.elementwise_result_dtype``. Return None for non-frame results,
+    unknown input schemas or mismatched column labels or order. Pandas aligns
+    differing column labels using their union.
 
     ``operands`` is the op's operand fields (e.g. ``(left, right)``), used only to
-    tell whether *every* operand is a frame-like graph input, which decides
-    whether a per-column dtype list can be assembled at all.
+    determine whether every operand is a frame-like graph input with known
+    per-column dtypes.
     """
     if op.output_type not in FRAME_TYPES:
         return None
@@ -662,8 +655,7 @@ def _elementwise_schema(op: "Op", operands) -> "pl.Schema | None":
     first = frame_schemas[0]
     if any(list(s.keys()) != list(first.keys()) for s in frame_schemas[1:]):
         return None
-    # A constant or non-frame operand contributes a dtype we don't know, so we
-    # can't assemble a complete per-column dtype list for it.
+    # Constant and non-frame operand dtypes are not inferred by this analysis.
     all_operands_are_frames = (
         len(frame_inputs) == len(operands)
         and all(isinstance(o, OperandRef) for o in operands))
@@ -716,7 +708,7 @@ class GetItemOp(Op):
         else:
             self.output_schema = _schema.project_columns(schema, self.key)
 
-    # Execution lives in the physical impls (physical/_getitem_execs.py).
+    # Execution is implemented in physical/_getitem_execs.py.
 
 class BinOp(Op):
     fields = ["op", "left", "right"]

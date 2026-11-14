@@ -13,7 +13,7 @@ def _plan_remove_schedule(ops, split_pos, pinned_ops=None):
 
 
 # ---------------------------------------------------------------------------
-# Remove schedule tests (exercises Scheduler.plan)
+# Last-use release scheduling tests (plan_input_removals).
 # ---------------------------------------------------------------------------
 
 class TestRemoveSchedule(unittest.TestCase):
@@ -43,7 +43,7 @@ class TestRemoveSchedule(unittest.TestCase):
         schedule = _plan_remove_schedule(ops, split_pos=None)
         # A has 2 outputs (B, C). After B: remaining=1, no removal.
         self.assertEqual(schedule[b], [])
-        # After C: A's remaining hits 0 -> remove A
+        # After C: A has no remaining consumers -> remove A.
         self.assertEqual(schedule[c], [a])
         # After D: B and C both have 1 consumer (D), both removed
         self.assertCountEqual(schedule[d], [b, c])
@@ -107,7 +107,7 @@ class TestRemoveSchedule(unittest.TestCase):
         schedule = _plan_remove_schedule(ops, split_pos=2, pinned_ops=[a])
         # After B: A has 2 consumers, remaining=1, not removed (also pinned)
         self.assertEqual(schedule[b], [])
-        # After C: A's remaining hits 0 but pinned -> not removed
+        # After C: A has no remaining consumers but is retained across folds.
         self.assertEqual(schedule[c], [])
 
     def test_state_is_released_apart_from_data(self):

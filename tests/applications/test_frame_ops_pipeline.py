@@ -1,30 +1,21 @@
-"""End-to-end showcase of Stratum's logical abstractions and the physical
-compiling pass, exercised through one realistic supervised pipeline.
+"""End-to-end coverage of logical extraction and physical planning.
 
-A single e-commerce pipeline -- read a CSV, engineer features, encode the
-categoricals, fit a model -- chains everything the recent optimizer work
-introduced into one default-selector pipeline:
+A supervised pipeline over order data exercises the following operators:
 
-* a source **read** ``pd.read_csv`` lowered to a source op;
-* a **mask selection** ``df[predicate]`` that folds a boolean expression tree
+- a source read, ``pd.read_csv``, lowered to a source operator;
+- a selection, ``df[predicate]``, that folds a boolean expression tree
   into one :class:`MaskSelectionOp` (``stratum.optimizer.logical._selection_ops``);
-* a folded **column map** ``df.assign(...)`` -- arithmetic, a ``.dt`` accessor
-  over a parsed date -- collapsing into one :class:`AssignMapOp`
+- a column map, ``df.assign(...)``, with arithmetic and a ``.dt`` accessor
+  over a parsed date, folded into one :class:`AssignMapOp`
   (``stratum.optimizer.logical._map_ops``);
-* a literal **column projection** ``df[[...]]`` -> :class:`ColumnProjectionOp`
-  and two selector-driven ``skb.select(...)`` splits -> :class:`ColumnSelectorOp`
+- a literal column projection, ``df[[...]]``, represented by :class:`ColumnProjectionOp`,
+  and two ``skb.select(...)`` operations represented by :class:`ColumnSelectorOp`
   (``stratum.optimizer.logical._projection_ops``);
-* a **transformer** (:class:`TransformerOp`) with multiple registered physical
-  implementations, where the default chooses the sklearn/skrub implementation,
-  and an **estimator** (:class:`EstimatorOp`) that fits the model.
+- a transformer (:class:`TransformerOp`) with multiple physical implementations,
+  selected by the configured policy, and a predictor (:class:`PredictorOp`).
 
-The tests assert three things:
-
-1. each backend-agnostic *logical* abstraction is recognised;
-2. the *compiling* pass binds the frame abstractions to concrete
-   :class:`PhysicalOp` implementations, and binds the transformer according to
-   the configured implementation selector;
-3. the compiled plan trains and scores end-to-end via ``make_grid_search``.
+The tests verify logical operator extraction, binding to concrete
+:class:`PhysicalOp` implementations, and execution through ``make_grid_search``.
 """
 import pytest
 import pandas as pd
@@ -51,10 +42,11 @@ from stratum.runtime._scheduler import SequentialScheduler
 
 
 def make_orders(n=60):
-    """A seeded, messy order book with a regression target (``satisfaction``).
+    """Generate deterministic order data with a regression target (``satisfaction``).
 
-    Cancelled and zero-quantity rows are noise the filter must drop; the string
-    ``category``/``country`` columns feed the encoder."""
+    The filter excludes cancelled and zero-quantity rows. The string
+    ``category``/``country`` columns are encoder inputs.
+    """
     rng = np.random.RandomState(0)
     return pd.DataFrame({
         "order_id": range(n),
@@ -77,13 +69,13 @@ def build_pipeline(file_path, model=None):
     # (0) READ: the pipeline starts from a CSV on disk, lowered to a source read.
     src = st.as_data_op(file_path).skb.apply_func(pd.read_csv)
 
-    # (1) FILTER: keep completed orders that actually shipped units. The whole
+    # (1) FILTER: retain completed orders with positive quantities. The
     # boolean tree folds into a single MaskSelectionOp predicate.
     active = src[(src["status"] == "completed") & (src["quantity"] > 0)]
     y = active["satisfaction"].skb.mark_as_y()
 
     # (2) MAP: derive numeric features. Arithmetic and a `.dt` accessor over a
-    # parsed date are natively lazy, so they fold into one AssignMapOp.
+    # parsed date are represented lazily and fold into one AssignMapOp.
     order_date = active["order_date"].skb.apply_func(pd.to_datetime)
     featured = active.assign(
         revenue=active["quantity"] * active["unit_price"],
@@ -118,24 +110,19 @@ def _optimize(dag, selector=None, pandas_query=False):
 
 @pytest.fixture(params=["pandas", "polars"])
 def backend(request):
-    """The backend to plan against, as a selector pinned to it.
+    """Return a selector constrained to the parametrized frame backend.
 
-    Yielded as a selector rather than set as a flag: the backend is the
-    selector's own state, so a test that does not thread it into ``optimize``
-    is not testing that backend at all.
+    Tests must pass this selector to ``optimize`` to apply the backend constraint.
     """
     return FlagBasedSelector(backend=request.param)
 
 
 def test_frame_ops_pipeline_plan(backend):
-    """Every logical abstraction is recognised, and the compiling pass binds the
-    frame abstractions to concrete physical implementations -- on either
-    backend, since each frame family has a pandas and a polars impl."""
+    """Extraction and implementation selection support both frame backends."""
     with csv_file(make_orders()) as path:
         ops = _optimize(build_pipeline(path), backend)
 
-    # The frame abstractions each appear and are compiled to a PhysicalOp -- no
-    # abstract frame op survives to execution.
+    # Each expected frame operator has a physical implementation.
     for cls in (SelectionOp, AssignMapOp, ColumnProjectionOp, ColumnSelectorOp):
         matches = [o for o in ops if isinstance(o, cls)]
         assert matches, f"no {cls.__name__} in plan"
@@ -146,7 +133,7 @@ def test_frame_ops_pipeline_plan(backend):
     sel = next(o for o in ops if isinstance(o, SelectionOp))
     assert isinstance(sel, MaskSelectionOp)
 
-    # The learning ops (transformer, estimator) and the concat are present.
+    # The plan retains transformer, predictor and concatenation operators.
     assert any(isinstance(o, TransformerOp) for o in ops)
     assert any(isinstance(o, PredictorOp) for o in ops)
     assert any(isinstance(o, ConcatOp) for o in ops)
@@ -177,11 +164,10 @@ def test_transformer_binds_default_selector():
 
 
 def test_selection_binds_query_impl_under_flag():
-    """The *same* logical ``MaskSelectionOp`` binds to different pandas impls
-    depending on the plan context: boolean-mask indexing by default, the
-    ``DataFrame.query()`` fast path when ``OptConfig.pandas_query`` is on. The
-    choice is a plan-time bind, so no ``pandas_query`` branch survives into
-    execution.
+    """Bind ``MaskSelectionOp`` to the pandas implementation selected by configuration.
+
+    Use boolean-mask indexing by default and ``DataFrame.query()`` when
+    ``OptConfig.pandas_query`` is enabled. Selection occurs during planning.
 
     Pandas-only: the setting has no effect on the polars backend, so this test
     does not use the ``backend`` fixture."""
@@ -200,13 +186,12 @@ def test_selection_binds_query_impl_under_flag():
 
     # Default: boolean-mask indexing.
     assert isinstance(selection_impl(enabled=False), PandasIndexSelectionOp)
-    # pandas_query on: the query() fast path is bound in at plan time.
+    # pandas_query enables binding to the query() implementation during planning.
     assert isinstance(selection_impl(enabled=True), PandasQuerySelectionOp)
 
 
 def test_query_selection_trains_end_to_end():
-    """With ``pandas_query`` on, the query fast path runs through the scheduler
-    and the pipeline still trains and scores end-to-end (pandas backend).
+    """Execute a plan with pandas query selection through training and scoring.
 
     Planned and scheduled directly rather than through ``make_grid_search``:
     ``pandas_query`` is an optimizer-internal setting on ``OptConfig``, and
@@ -222,7 +207,7 @@ def test_query_selection_trains_end_to_end():
             plan, split_pos = optimize_(
                 preds, OptConfig(dataframe_ops=True, pandas_query=True),
                 env=env, search=search)
-        # The query fast path is what is scheduled, not just what was planned.
+        # Execute the plan containing the selected query implementation.
         assert any(type(o).__name__ == "PandasQuerySelectionOp" for o in plan)
         sched = SequentialScheduler(plan, split_pos)
         sched.grid_search(cv=2)
@@ -231,13 +216,11 @@ def test_query_selection_trains_end_to_end():
 
 
 def test_frame_ops_pipeline_grid_search():
-    """The compiled plan trains and scores end-to-end through Stratum's
-    scheduler, driven by ``make_grid_search`` -- the same entry point the other
-    application tests use. ``make_grid_search`` builds its own plan, so this
-    runs on the configured selector (the pandas-first default); the polars route
-    through the scheduler is covered by ``test_selector_pipeline``. The pipeline
-    carries a single candidate (no ``choose_from``), which grid search handles
-    as a one-pipeline search."""
+    """Train and score a single candidate through ``make_grid_search``.
+
+    Planning uses the configured implementation selector, whose default prefers
+    pandas. ``test_selector_pipeline`` covers Polars execution.
+    """
     scorer = make_scorer(r2_score)
     with csv_file(make_orders()) as path:
         preds = build_pipeline(path)

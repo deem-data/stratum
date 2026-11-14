@@ -158,12 +158,12 @@ def test_implicit_x_is_kept_when_also_used_as_a_parameter():
     validate_dag(root)
 
 
-def test_response_methods_reflect_inlined_configuration():
+def test_prediction_methods_reflect_inlined_configuration():
     root = convert_to_ops(features().skb.apply(SVC(probability=st.as_data_op(True))))
 
     literal_inlining(root)
 
-    assert "predict_proba" in root.supported_modes
+    assert "predict_proba" in root.supported_prediction_methods
     assert root.estimator.probability is True
 
 

@@ -42,14 +42,14 @@ def install_candidate_set(root: Op, search: SearchConfig | None) -> Op:
     if search is None or search.metric is None:
         node = CollectCandidatesOp(names)
     else:
-        mode = _response_mode(search.metric, names, candidates)
-        if search.return_predictions and mode != "predict":
+        method = _prediction_method(search.metric, names, candidates)
+        if search.return_predictions and method != "predict":
             raise ValueError(
-                f"return_predictions=True cannot be honoured with scoring="
-                f"{search.metric.name!r}: that metric reads `{mode}`, so the values this"
-                " plan produces are responses, not predictions. Ask for one or the other."
+                "return_predictions=True requires `predict` outputs, but scoring="
+                f"{search.metric.name!r} requires `{method}`. Request scores without"
+                " predictions, or use a metric that reads `predict` outputs."
             )
-        node = ScoreCandidatesOp(names, search.metric, response_mode=mode,
+        node = ScoreCandidatesOp(names, search.metric, prediction_method=method,
                                  emit_predictions=search.return_predictions)
     node.inputs = list(candidates)
     for candidate in candidates:
@@ -125,27 +125,27 @@ def _referenced(value):
             yield from _referenced(v)
 
 
-def _response_mode(metric, names: list[str], candidates: list[Op]) -> str:
-    """Select a response method supported by every candidate in the scoring pass.
+def _prediction_method(metric, names: list[str], candidates: list[Op]) -> str:
+    """Select a prediction method supported by every candidate in the scoring pass.
 
-    - Try the metric's response methods in preference order. For example,
+    - Try the metric's prediction methods in preference order. For example,
       `roc_auc` accepts decision scores or probabilities.
     - Accept `predict` for any candidate, including a precomputed prediction DAG.
-      Other responses require a compatible estimator in each candidate.
-    - Raise when no common response method is available, before executing folds.
+      Other methods require a compatible estimator in each candidate.
+    - Raise when no common prediction method is available, before executing folds.
     """
     estimators = [_last_estimator(c) for c in candidates]
-    for response in metric.response_method:
-        if response == "predict" or all(e is not None and response in e.supported_modes
-                                        for e in estimators):
-            return response
-    wanted = " or ".join(metric.response_method)
+    for method in metric.prediction_methods:
+        if method == "predict" or all(
+                e is not None and method in e.supported_prediction_methods for e in estimators):
+            return method
+    wanted = " or ".join(metric.prediction_methods)
     cannot = [name for name, e in zip(names, estimators)
-              if e is None or not set(metric.response_method) & e.supported_modes]
+              if e is None or not set(metric.prediction_methods) & e.supported_prediction_methods]
     raise ValueError(
-        f"scoring={metric.name!r} reads {wanted}, which no single response provides for"
-        f" every candidate in this plan: {', '.join(cannot)} cannot produce it. Use a"
-        " metric that reads predictions, or a model that provides what this one needs."
+        f"scoring={metric.name!r} reads {wanted}, but no single prediction method is"
+        f" supported by every candidate in this plan: {', '.join(cannot)} cannot provide it."
+        " Use a metric that reads predictions, or a model that provides what this one needs."
     )
 
 

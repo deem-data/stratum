@@ -90,8 +90,8 @@ class PhysicalOp(IRNode):
     def accepts_input_lib(cls, op: IRNode, index: int, lib) -> bool:
         """Whether this impl of ``op`` reads its ``index``-th input as ``lib``.
 
-        Override only when ``process`` really handles another library (and say
-        how), never to admit an input the impl would misread.
+        Overrides must match the input libraries supported by ``process`` and
+        document any additional conversion or dispatch behavior.
         """
         return cls.frame_lib is None or lib == cls.frame_lib
 
@@ -126,14 +126,14 @@ class EstimatorExecution:
 
     Concrete physical implementations can override ``_measure_retained_state``.
     The generic estimator walker remains the fallback for pass-through models
-    and implementations without a dedicated estimate yet.
+    and implementations without a specialized size estimate.
     """
 
     def process(self, inputs: list):
         task_data = self.extract_args_from_inputs(inputs)
         result, estimator = self.get_process_task()(task_data)
         if self.produces_state:
-            # Update the estimate after fitting; response calls do not recompute it.
+            # Update the estimate after fitting; inference calls do not recompute it.
             # Memory accounting must not turn a successful fit into a failure.
             self._retained_state_bytes = UNKNOWN_SIZE
             try:
@@ -145,7 +145,7 @@ class EstimatorExecution:
         return result
 
     def retained_state_size(self) -> int:
-        """Fitted-state bytes recorded by this op, or zero before its first fit."""
+        """Estimated fitted-state size in bytes, or zero before fitting."""
         return getattr(self, "_retained_state_bytes", 0)
 
     def _measure_retained_state(self, estimator) -> int:

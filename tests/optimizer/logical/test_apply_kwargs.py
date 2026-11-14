@@ -138,7 +138,7 @@ class TestUnsupportedKwargs(ApplyKwargsTest):
             convert_to_ops(dag)
         self.assertIn("score", str(ctx.exception))
 
-    def test_response_group_the_estimator_cannot_serve_warns(self):
+    def test_prediction_group_the_estimator_cannot_serve_warns(self):
         """Ridge has no `predict_proba`, so that group is dead -- as it is under skrub."""
         X, y = self._source()
         dag = X.skb.apply(Ridge(), y=y, predict_proba_kwargs={"a": 1})
@@ -146,14 +146,14 @@ class TestUnsupportedKwargs(ApplyKwargsTest):
             convert_to_ops(dag)
         self.assertIn("predict_proba", "\n".join(logs.output))
 
-    def test_response_group_is_bound_when_the_estimator_serves_it(self):
+    def test_prediction_group_is_bound_when_the_estimator_serves_it(self):
         """A `predict_proba` pass splats them, so they are no longer rejected."""
         X, y = self._source()
         dag = X.skb.apply(LogisticRegression(), y=y, predict_proba_kwargs={"a": 1})
         ops = list(topological_iterator(convert_to_ops(dag)))
         op = next(o for o in ops if isinstance(o, PredictorOp))
         self.assertIn("predict_proba", op.kwargs)
-        self.assertIn("predict_proba", op.supported_modes)
+        self.assertIn("predict_proba", op.supported_prediction_methods)
 
     def test_choice_inside_kwargs_raises(self):
         # A choice would have to expand the parameter grid; its DataOp outcomes are

@@ -23,15 +23,12 @@ class ProjectionOp(Op):
 
 
 def drop_targets_columns(kwargs: dict | None) -> bool | None:
-    """Which axis a ``drop(...)`` call removes labels from: True for columns,
-    False for rows (index labels), None when that isn't statically known.
+    """Classify a ``drop(...)`` call: True for columns, False for rows, else None.
 
-    pandas defaults to ``axis=0``, i.e. dropping *rows* by index label.
-    ``index=`` / ``columns=`` name the axis themselves; naming both drops along
-    both axes, which is neither a projection nor a selection, and pandas rejects
-    either one next to an ``axis``, so those calls are left to raise as written.
-    ``axis`` is keyword-only on ``DataFrame.drop``, so it can never arrive
-    positionally.
+    pandas defaults to ``axis=0``, removing rows by index label. ``index=`` and
+    ``columns=`` select an axis explicitly. Calls specifying both axes, combining
+    either with ``axis``, or using an unknown axis remain opaque. ``axis`` is
+    keyword-only on ``DataFrame.drop``.
     """
     kwargs = kwargs or {}
     by_index = kwargs.get("index") is not None
@@ -80,18 +77,18 @@ def make_drop_op(op: MethodCallOp) -> DropOp | None:
     """Parse a column-wise ``DataFrame.drop`` into a :class:`DropOp`.
 
     Extraction has already decided the axis (:func:`drop_targets_columns`), so the
-    labels are either ``columns=`` or ``labels=`` next to a column ``axis``.
-    ``inplace`` and calls pandas would reject stay opaque.
+    labels are supplied by ``columns=`` or by ``labels=`` with a column ``axis``.
+    In-place operations and invalid calls remain opaque.
     """
     call = op.bind_pandas(owner=pd.DataFrame)
     if call is None or call.get("inplace", False) is not False:
         return None
     columns, labels = call.get("columns"), call.get("labels")
     if columns is not None and labels is not None:
-        return None  # pandas rejects labels next to columns=
+        return None  # labels and columns are mutually exclusive here.
     columns = columns if columns is not None else labels
     if columns is None:
-        return None  # pandas requires something to drop
+        return None  # No column labels were supplied.
     return substitute_op(op, DropOp(columns=columns, level=call.get("level"),
                                     errors=call.get("errors", "raise")))
 
@@ -99,9 +96,9 @@ def make_drop_op(op: MethodCallOp) -> DropOp | None:
 class ColumnSelectorOp(ProjectionOp):
     """A column selection by (deferred) skrub selector: keeps rows, restricts columns.
 
-    Produced from ``skb.select(cols)``. Matches ``SelectCols`` semantics: the selector resolves against the schema at
-    fit time and the *stored* column list is reused at predict time (by the
-    physical impls, see ``physical/_projection_execs.py``).
+    Produced from ``skb.select(cols)``. The selector resolves against training
+    data, and the resulting column list is reused for prediction, matching
+    ``SelectCols`` semantics (see ``physical/_projection_execs.py``).
     """
     fields = ["selector"]
     cacheable = True
@@ -128,7 +125,7 @@ class ColumnProjectionOp(ProjectionOp):
     """Column selection by literal name(s): ``df[key]`` where ``key`` is a
     column label or list of labels.
 
-    The specialised, always-column form of a ``df[...]`` indexing: produced from
+    Specializes ``df[...]`` column indexing: produced from
     a :class:`~stratum.optimizer.logical._ops.GetItemOp` whose container is a
     ``FRAME`` and whose key is a literal ``str`` (a single column -> ``SERIES``)
     or ``list[str]`` (a sub-frame -> ``FRAME``). Unlike :class:`ColumnSelectorOp`

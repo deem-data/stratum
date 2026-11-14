@@ -55,7 +55,7 @@ class Scheduler:
         self._shares_cache_values = reuse_cache is not None
 
     def _pool_cache_hits(self, ops: list[Op]) -> None:
-        """Borrow the values retained during reuse planning without copying."""
+        """Register cached values retained during reuse planning in the buffer pool."""
         for op in ops:
             hit = op.cache_hit
             if hit is None:
@@ -110,8 +110,8 @@ class Scheduler:
     def _declared_splitter(self, split_op: SplitOp):
         """The splitter the plan declares, or ``KFold(5)`` if it declares none.
 
-        The pass up to the split has computed it, from operands such as ``groups``
-        that the plan computes anyway (see `BuildSplitterOp`).
+        Pre-split execution computes the splitter and its dependencies, including
+        graph-fed ``groups`` (see ``BuildSplitterOp``).
         """
         if split_op.splitter is None:
             return check_cv(None)
@@ -124,7 +124,7 @@ class Scheduler:
         """Perform cross-validation on the plan, one scored row per candidate per fold.
 
         Each execution of the split and its descendants fits on training rows
-        and scores test-row responses for one fold (see train/test unrolling).
+        and scores test-row outputs for one fold (see train/test unrolling).
         """
         # The split op's inputs are [X, y] (see add_splitting_op). Both are still
         # in the pool after compute_xy because lifetime planning retains them.
@@ -192,8 +192,8 @@ class Scheduler:
         Return the operator after execution or reuse of a cached result.
         """
         if op.cache_hit is not None:
-            # Already loaded into the pool. Reuse planning cut its inputs, so
-            # this op has no work or input removals left to perform.
+            # The cached result is already in the pool. Reuse planning removed
+            # input edges, so execution and input release are unnecessary.
             return op
         logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
 
@@ -213,7 +213,7 @@ class Scheduler:
                     inputs.append(self.pool.pin(in_op))
                     pinned.append(in_op)
 
-            # 2. process operator
+            # 2. Execute the selected operator implementation.
             if obs is not None:
                 token = obs.before(node)
             t1 = perf_counter()

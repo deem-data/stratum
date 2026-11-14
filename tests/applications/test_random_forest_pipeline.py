@@ -92,7 +92,7 @@ def _score_pipeline(selector, capfd):
         scheduler=True,
         rust_backend=True,
         allow_patch=True,
-        explain=False, # set it True to print physical plan
+        explain=False, # Set True to print the physical plan.
         debug_timing=True,
     ):
         captured_output = io.StringIO()

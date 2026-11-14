@@ -77,8 +77,8 @@ def accepts_input(impl_class, op: IRNode, index: int, lib: FrameLib | None) -> b
 def output_lib(impl_class, op: IRNode, libs: list[FrameLib | None]) -> FrameLib | None:
     """Output library of ``op`` run by ``impl_class``.
 
-    UNKNOWN outputs are treated as frames: a spurious conversion is a no-op,
-    a missing one is a runtime error.
+    Treat UNKNOWN outputs as potential frames. Conversion functions preserve
+    non-frame values, while omitted conversions can cause library mismatches.
     """
     if op.output_type not in FRAME_TYPES and op.output_type is not OutputType.UNKNOWN:
         return None

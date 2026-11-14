@@ -23,7 +23,7 @@ from skrub._utils import PassThrough
 from stratum.frontend._skrub_graph import _collect_child_data_ops, build_graph
 from stratum.optimizer.logical._base import OperandRef, rebuild_dict
 from stratum.optimizer.logical._ops import (
-    RESPONSE_MODES, BinOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp, ImplOp,
+    PREDICTION_METHODS, BinOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp, ImplOp,
     MethodCallOp, Op, PredictorOp, SplitXOp, TransformerOp, UnaryOp, ValueOp,
     VariableOp, _getitem_key_name,
 )
@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
     """Convert a Skrub DataOp DAG to stratum's logical IR (Op DAG).
 
-    Single fused topological pass: ``as_op`` builds each op together with its
+    In one topological pass, ``as_op`` builds each op together with its
     de-duplicated ``inputs`` list, operand references, and output edges. Inputs
-    are resolved through ``ids_to_ops`` (keyed by ``id(DataOp)``), which is
-    guaranteed populated because we walk in topological, inputs-first order.
+    are resolved through ``ids_to_ops`` (keyed by ``id(DataOp)``). Topological
+    traversal ensures that producers are converted before their consumers.
     """
     start = start_time()
     children, nodes, parents = get_dataops_graph(dag)
@@ -56,9 +56,8 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
         skrub_op = nodes[node_key]
         impl = skrub_op._skrub_impl
         if isinstance(impl, SubsamplePreviews):
-            # Drop the preview node: route its single input straight to consumers.
-            # Consumers reference this node's DataOp in their fields, so mapping it
-            # to the input op makes them wire to the input op directly.
+            # Eliminate the preview node by binding its DataOp identity to its
+            # input operator. Consumers then reference that operator directly.
             input_key = children.get(node_key, [])[0]
             ids_to_ops[id(skrub_op)] = ids_to_ops[id(nodes[input_key])]
             continue
@@ -72,7 +71,7 @@ def convert_to_ops(dag: DataOp, env: dict = None) -> Op:
 
 
 def topological_traverse(nodes, parents, children):
-    """ Compute a topological order of the DAG in skrub IR. """
+    """Compute a topological order of the skrub IR DAG."""
     # Compute in-degree (number of children for each node)
     indegree = {n: len(children.get(n, [])) for n in nodes}
 
@@ -105,7 +104,7 @@ def _apply_fed_nodes(nodes: dict, parents: dict, order: list) -> set:
     """Return node keys with a downstream `.skb.apply()` consumer.
 
     An Apply feeding another Apply must transform or predict for that consumer
-    during response passes. Determine this dependency from all graph edges,
+    during inference passes. Determine this dependency from all graph edges,
     including estimator parameters. Unlike skrub's evaluation-time check, this
     rule does not depend on traversal order when Apply and non-Apply paths share
     a node.
@@ -128,7 +127,7 @@ class OperandBinder:
 
     Inputs are ordered by their first binding. For ``df.join(other)``,
     :func:`as_op` binds the method receiver (``df``) before its arguments, so
-    ``df`` gets ``OperandRef(0)`` and ``other`` gets ``OperandRef(1)``. Repeated
+    ``df`` binds to ``OperandRef(0)`` and ``other`` to ``OperandRef(1)``. Repeated
     references to the same upstream op reuse its index: for ``x + x``, both
     operands refer to the same input edge.
 
@@ -161,7 +160,7 @@ class OperandBinder:
         """Recursively replace DataOps nested in tuples/lists/dicts with OperandRefs.
 
         The recursion order mirrors ``_collect_child_data_ops`` so operand indices
-        line up with the graph's child order (e.g. ``df.join([df2, df3])`` binds
+        match the graph's child order (e.g. ``df.join([df2, df3])`` binds
         df2 then df3 inside the list argument).
         """
         if isinstance(value, DataOp):
@@ -199,25 +198,23 @@ class OperandBinder:
 def _bind_or_value(binder: OperandBinder, value):
     """Bind a field holding DataOps (-> OperandRefs), constants, or a mix of both.
 
-    Delegates to :meth:`OperandBinder.bind`, which recurses the same containers
-    ``_collect_child_data_ops`` does. Binding has to follow that walk exactly:
-    graph extraction already reported every DataOp it finds -- including ones
-    nested in a tuple, such as the row/column pair of ``df.loc[mask, cols]`` --
-    as a child of this node, so a DataOp left unbound here stays in the DAG with
-    no consumer. Topological traversal rejects that dangling output edge.
+    :meth:`OperandBinder.bind` must traverse the same containers as
+    ``_collect_child_data_ops``, including the tuple in ``df.loc[mask, cols]``.
+    Omitting a dependency discovered during extraction leaves an inconsistent
+    producer-consumer edge, which topological traversal rejects.
     """
     return binder.bind(value)
 
 
 def _bind_operand(binder: OperandBinder, value) -> OperandRef:
-    """Bind ``value`` as an input edge, giving a literal a ``ValueOp`` of its own."""
+    """Bind ``value`` as an input edge, representing literals as ``ValueOp`` nodes."""
     bound = binder.bind(value)
     return bound if isinstance(bound, OperandRef) else binder.ref_op(ValueOp(bound))
 
 
-# Method-argument groups supported during fitting or response evaluation.
+# Method-argument groups supported during fitting or inference.
 # Applicable groups depend on the estimator kind (see BaseEstimatorOp subclasses).
-_EXECUTABLE_KWARGS_KEYS = frozenset({"fit", "fit_transform", "transform"}) | RESPONSE_MODES
+_EXECUTABLE_KWARGS_KEYS = frozenset({"fit", "fit_transform", "transform"}) | PREDICTION_METHODS
 # Groups skrub routes to a method stratum never calls. Ignoring them would change
 # results, so they are rejected. Searches use an explicit metric rather than
 # calling the estimator's `score` method.
@@ -228,9 +225,8 @@ def _bind_apply_kwargs(binder: OperandBinder, estimator_class, estimator,
                        kwargs: dict | None) -> dict:
     """Bind the DataOps nested in an Apply's per-method kwargs to OperandRefs.
 
-    ``.skb.apply()`` always passes all seven method groups, most of them None.
-    Dropping the empty ones keeps the op's config (and therefore its CSE key)
-    down to the groups that carry something.
+    ``.skb.apply()`` supplies per-method argument groups, using None for absent
+    groups. Omit these from the operator configuration and its CSE key.
 
     Bind all remaining groups, including unused groups such as a transformer's
     ``fit`` kwargs. Graph extraction includes their DataOps as dependencies;
@@ -241,8 +237,8 @@ def _bind_apply_kwargs(binder: OperandBinder, estimator_class, estimator,
         if group is None:
             continue
         if any(isinstance(v, (BaseChoice, Match)) for v in _iter_nested(group)):
-            # A choice here would have to expand the parameter grid; its DataOp
-            # outcomes are graph children, so silently keeping it would orphan them.
+            # Choices require parameter-grid expansion and operand binding for
+            # their DataOp outcomes, which this path does not implement.
             raise NotImplementedError(
                 f"A choice inside `{method}_kwargs` of `.skb.apply()` is not "
                 f"supported yet (choice found in {group!r}).")
@@ -274,7 +270,7 @@ def _iter_nested(value):
 
 
 def _has_unbound_parameter(value, named_estimators: set[int]) -> bool:
-    """Find DataOps in containers (list, dict, etx), excluding estimators with named parameters.
+    """Detect nested DataOps that are not exposed as named estimator parameters.
 
     For example, Pipeline exposes its steps through ``get_params()`` as well as
     storing them in a list. Their parameters are bound by their flattened names.
@@ -329,13 +325,12 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimato
     """Build a TransformerOp or PredictorOp for one concrete Apply estimator.
 
     ``estimator`` is ``impl.estimator`` itself, or one outcome of it when the
-    Apply's estimator is a ``Choice``. Each call uses its own binder so every op
-    gets X as OperandRef(0) and its own de-duplicated inputs list.
+    Apply's estimator is a ``Choice``. Each call uses a separate binder with X
+    at OperandRef(0) and a deduplicated input list.
 
-    ``feeds_estimator`` says another Apply consumes this one's output. skrub then
-    fit_transforms and transforms any estimator that can, a predictor included (a
-    KMeans supplies distances to the next estimator), so such an estimator becomes a
-    TransformerOp here.
+    ``feeds_estimator`` indicates a downstream Apply consumer. When the estimator
+    supports transformation, classify it as a TransformerOp for that consumer,
+    including predictors such as KMeans that provide distances as features.
 
     ``choice_ops`` is :func:`as_op`'s: a choice in the Apply's other fields (``y``,
     ``cols``, ...) binds to the one ChoiceOp built for it.
@@ -356,8 +351,8 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict, feeds_estimato
     exclude_cols = _bind_or_value(binder, impl.exclude_cols)
     no_wrap = _bind_or_value(binder, impl.no_wrap)
     kwargs = _bind_apply_kwargs(binder, estimator_class, estimator, impl.kwargs)
-    # Bind the original DataOp identities before cloning. Each converted op gets
-    # its own estimator so rewrites can update its parameters independently.
+    # Bind original DataOp identities before cloning. Separate estimator instances
+    # allow rewrites to update each operator's parameters independently.
     op = estimator_class(
         estimator=clone(estimator),
         y=y,
@@ -381,17 +376,16 @@ def _outcome_display(estimator) -> str:
     return type(estimator).__name__
 
 
-# skrub resolves choices nested in these exact types, not in their subclasses (it
-# would not know how to rebuild one), so neither does the expansion below.
+# Match skrub's choice resolution for these exact container types; subclasses
+# require separate reconstruction rules.
 _CHOICE_CONTAINERS = (list, tuple, set, frozenset)
 
 
 def _iter_choices(value):
     """Yield every choice (or ``Match``) in ``value`` that skrub would resolve.
 
-    Walks what skrub's evaluation walks: a choice's outcomes, an estimator's
-    parameters, and the built-in containers. DataOps are not entered: they are
-    graph nodes, converted on their own.
+    Traverse choice outcomes, estimator parameters and built-in containers,
+    matching skrub's evaluation. DataOps are converted separately as graph nodes.
     """
     if isinstance(value, Match):
         yield value
@@ -430,7 +424,7 @@ def _outcome_label(outcome, index: int, estimator_slot: bool) -> str:
     if outcome is None or isinstance(outcome, (Number, str)):
         return str(outcome)
     name = getattr(outcome, "__name__", None)  # functions and classes
-    # Anything else gets the positional label Value(Choice) outcomes get.
+    # Use the positional label convention of Value(Choice) for unnamed values.
     return name if isinstance(name, str) else f"Opt{index}"
 
 
@@ -450,8 +444,8 @@ def _expand_choice_outcomes(choice, outcomes, outcome_names, chosen: dict,
                 f"DataOp outcomes are not supported (choice {choice.name!r}).")
         named = outcome_names is not None
         label = outcome_names[i] if named else _outcome_label(outcome, i, estimator_slot)
-        # An unnamed nested choice is described by its own outcomes; the leaf always
-        # contributes, so every grid point gets a name.
+        # Unnamed nested choices use their outcome labels. Leaf labels ensure
+        # that each grid point has a name.
         prefix = [] if isinstance(outcome, BaseChoice) and not named else [(choice.name, label)]
         for path, concrete, now_chosen in _expand_choices(outcome, {**chosen, key: i},
                                                           estimator_slot):
@@ -473,8 +467,8 @@ def _expand_choices(value, chosen: dict, estimator_slot: bool):
 
     ``name_path`` is a list of ``(choice_name, outcome_label)`` pairs, ChoiceOp's
     internal ``outcome_names`` format. ``chosen`` maps ``id(choice)`` to the outcome
-    fixed for it so far on this grid point. The grid is conditional, as skrub's: a
-    choice nested in an outcome only varies when that outcome is taken.
+    selected for the current grid point. As in skrub, nested choices vary only
+    when their containing outcome is selected.
     """
     if isinstance(value, Match):
         raise NotImplementedError(
@@ -510,10 +504,10 @@ def _expand_choices(value, chosen: dict, estimator_slot: bool):
 def _expand_estimator_choices(estimator) -> list[tuple[list, object]]:
     """Expand every choice in an Apply's estimator into ``(name_path, estimator)`` leaves.
 
-    The choices may be the estimator itself (possibly nesting further choices) or sit
-    in its parameters at any depth, e.g. ``LogisticRegression(C=choose_from(...))`` or
-    a ``Pipeline`` step. All of them collapse into one flat list of concrete
-    estimators, one per point of the parameter grid skrub would search. An
+    Choices may select the estimator or occur in nested parameters, e.g.
+    ``LogisticRegression(C=choose_from(...))`` or a ``Pipeline`` step.
+    Expansion produces a flat list of concrete estimators, one per point of
+    the parameter grid skrub would search. An
     intermediate (nested) choice only contributes to the path when its outcome is
     named; a leaf always contributes its outcome name or a label for its value.
     """
@@ -521,15 +515,12 @@ def _expand_estimator_choices(estimator) -> list[tuple[list, object]]:
 
 
 def check_choices_not_shared(data_ops) -> None:
-    """Refuse a choice object used both in an Apply's estimator and anywhere else.
+    """Reject choice sharing across an Apply's estimator and other operator fields.
 
-    skrub keys a choice by identity, so one ``choose_from`` used in two places is a
-    single grid dimension: both uses always take the same outcome. Conversion gives
-    every choice outside an Apply's estimator one ChoiceOp, shared by all its uses
-    (see :func:`_choice_op`), so those keep skrub's grid. The choices of an Apply's
-    estimator are instead expanded with that Apply alone, which would search a use
-    elsewhere independently, a different grid, so this is refused rather than
-    silently diverging from skrub.
+    Choice identity defines a grid dimension: all uses select the same outcome.
+    Choices outside estimator fields share a ChoiceOp (see :func:`_choice_op`).
+    Estimator choices expand independently within each Apply. Reject sharing
+    across these scopes because independent expansion changes the search grid.
     """
     owners = {}  # id(choice) -> (owner key, DataOp first found using it)
     for data_op in data_ops:
@@ -616,24 +607,24 @@ def _identity(value):
 def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_estimator: bool = False,
           choice_ops: dict | None = None) -> Op:
     """Convert a single skrub DataOp into an Op, building its de-duplicated
-    ``inputs`` list and operand references in one canonical field walk.
+    ``inputs`` list and operand references in a deterministic field traversal.
 
     ``ids_to_ops`` maps ``id(DataOp) -> Op`` and must already contain every input
-    of ``data_op`` (guaranteed by converting in topological order). Output edges
-    are wired here too: each input op gets ``data_op``'s Op added to its outputs.
+    of ``data_op``, as ensured by topological conversion. Register the converted
+    operator as a consumer of each input operator.
 
     ``env`` is the runtime environment (variable name -> value), when known at
     compile time. A ``Var`` whose name is bound in ``env`` is then resolved to a
-    constant ``ValueOp`` instead of a ``VariableOp``, so the scheduler needs no
-    environment to feed it at runtime.
+    constant ``ValueOp`` instead of a ``VariableOp``, eliminating runtime
+    environment lookup.
 
-    ``feeds_estimator`` says another Apply consumes ``data_op``'s value (see
+    ``feeds_estimator`` indicates that another Apply consumes ``data_op``'s value (see
     ``_apply_estimator_op``).
 
     ``choice_ops`` maps ``id(choice) -> ChoiceOp`` across one conversion, so that
     every use of a choice outside an Apply's estimator -- a ``Value(Choice)`` node
     or a choice nested in an op's arguments -- binds to one shared ChoiceOp (see
-    :func:`_choice_op`). Left ``None``, the choices of this op get fresh ones.
+    :func:`_choice_op`). When ``None``, create a choice mapping local to this call.
     """
     if choice_ops is None:
         choice_ops = {}
@@ -646,8 +637,8 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_esti
     return_op = None
 
     if isinstance(impl, Value):
-        # A choice (or a container holding one) becomes the choice's shared ChoiceOp,
-        # anything else a ValueOp.
+        # Bind choices through shared ChoiceOps; resolve containers through
+        # _outcome_op and represent constants as ValueOps.
         return_op = _outcome_op(impl.value, ids_to_ops, choice_ops)
     elif isinstance(impl, CallMethod):
         binder.ref(impl.obj)  # implicit primary operand -> OperandRef(0)
@@ -684,14 +675,9 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_esti
         return_op.inputs = binder.inputs
     elif isinstance(impl, Apply):
         if _contains_choice(impl.estimator):
-            # The choices in an estimator -- the estimator itself, or ones nested in
-            # its parameters -- expand to a ChoiceOp over one estimator op per grid
-            # point (mirroring Value(Choice) above), so choice unrolling and grid
-            # search work over the alternatives and every op after conversion holds
-            # concrete parameters. All of them are flattened into a single ChoiceOp;
-            # the leaf name paths use ChoiceOp's combi format so they concatenate
-            # correctly if choice_unrolling later combines this choice with a
-            # downstream one.
+            # Expand estimator choices into one ChoiceOp with an estimator
+            # operator per grid point. Outcome paths use ChoiceOp's name format
+            # so subsequent unrolling can compose them with downstream choices.
             leaves = _expand_estimator_choices(impl.estimator)
             outcome_ops = [_apply_estimator_op(impl, est, ids_to_ops, feeds_estimator, choice_ops)
                            for _, est in leaves]
@@ -712,8 +698,7 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_esti
         return_op.inputs = binder.inputs
     elif isinstance(impl, Var):
         if env is not None and impl.name in env:
-            # Resolve the variable to a compile-time constant; the runtime no
-            # longer needs the environment to feed it.
+            # Constant substitution eliminates runtime environment lookup.
             return_op = ValueOp(env[impl.name])
         elif env is not None and impl.becomes_default and impl.value is not NULL:
             # `skrub.var(name, value, becomes_default=True)`: an environment that
@@ -728,7 +713,7 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_esti
         return_op.inputs = binder.inputs
     elif isinstance(impl, Concat):
         from stratum.optimizer.logical._dataframe_ops import ConcatOp
-        # Every operand is an input edge; a literal one (an array) gets a ValueOp.
+        # Represent every operand as an input edge, using ValueOps for literals.
         operands = [_bind_operand(binder, o) for o in (impl.first, *impl.others)]
         axis = _bind_or_value(binder, impl.axis)
         return_op = ConcatOp(operands=operands, axis=axis)
@@ -742,7 +727,7 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_esti
         return_op = ImplOp(skrub_impl=impl, name=data_op.__skrub_short_repr__())
         return_op.inputs = binder.inputs
 
-    # Wire output edges: every input op gets this op added to its outputs (deduped).
+    # Register the converted operator as a consumer of each input.
     for in_op in return_op.inputs:
         in_op.add_output(return_op)
 

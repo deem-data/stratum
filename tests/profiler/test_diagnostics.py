@@ -1,4 +1,4 @@
-"""Pin identity, CV accounting, and the filesystem boundary consumed by the GUI."""
+"""Verify operator identity, CV accounting and diagnostic artifacts consumed by the GUI."""
 import json
 
 import pandas as pd

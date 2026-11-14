@@ -1,14 +1,14 @@
-"""Score candidates from the responses already computed by their plans.
+"""Score candidates from the outputs already computed by their plans.
 
 - A :class:`Metric` calls ``sign * fn(y_true, values, **kwargs)``.
-- scikit-learn scorers additionally invoke an estimator response method and
-  inspect estimator metadata. Stratum selects a response method during planning
+- scikit-learn scorers additionally invoke an estimator prediction method and
+  inspect estimator metadata. Stratum selects a prediction method during planning
   and passes its results directly to the metric through ``ScoreCandidatesOp``.
 - :data:`_NATIVE` contains Stratum's metric implementations. Other names resolve
   through scikit-learn's registered scorers, extracting the function, sign,
-  response methods, and keyword arguments.
+  prediction methods, and keyword arguments.
 
-Compatibility depends on both the metric function and response conversion;
+Compatibility depends on both the metric function and prediction conversion;
 native implementations need equivalence tests against scikit-learn.
 """
 from __future__ import annotations
@@ -24,21 +24,21 @@ from sklearn.metrics import get_scorer
 import logging
 logger = logging.getLogger(__name__)
 
-_PROBABILITY_RESPONSES = ("predict_proba", "predict_log_proba")
+_PROBABILITY_METHODS = ("predict_proba", "predict_log_proba")
 
 
 @dataclass(frozen=True)
 class Metric:
     """A metric and everything needed to call it on a fold's values.
 
-    ``response_method`` lists what the metric can read, best first, the way
+    ``prediction_methods`` lists what the metric can read, best first, the way
     scikit-learn's scorers declare alternatives (``roc_auc`` takes a decision function
     or probabilities). The plan picks one of them at build time.
     """
 
     name: str
     fn: Callable[..., float]
-    response_method: tuple[str, ...] = ("predict",)
+    prediction_methods: tuple[str, ...] = ("predict",)
     kwargs: Mapping[str, Any] = field(default_factory=dict)
     #: +1 when the metric is already a utility, -1 for a `neg_*` loss.
     sign: int = 1
@@ -54,13 +54,13 @@ class Metric:
         return f"Metric({self.name!r}, via={self.source})"
 
 
-def read_response(values, response_mode: str):
-    """Convert a two-column probability response to its second column.
+def read_prediction(values, prediction_method: str):
+    """Convert a two-column probability array to its second column.
 
     This assumes the second column represents the metric's positive class.
-    Other response shapes and non-probability responses are returned unchanged.
+    Other shapes and outputs from non-probability methods are returned unchanged.
     """
-    if response_mode not in _PROBABILITY_RESPONSES:
+    if prediction_method not in _PROBABILITY_METHODS:
         return values
     # TODO: Select the probability column using the metric's pos_label and
     # estimator classes; column 1 is incorrect when the first class is positive.
@@ -215,7 +215,7 @@ def _from_sklearn_name(name: str) -> Metric:
 def _decompose(scorer, name: str | None = None) -> Metric:
     """Reduce a scikit-learn scorer to the metric it wraps.
 
-    Read the scorer's metric function, response methods, kwargs, and sign without
+    Read the scorer's metric function, prediction methods, kwargs, and sign without
     invoking an estimator. These are scikit-learn internals and may change between
     versions. A missing metric function is rejected; the other fields have defaults.
     """
@@ -226,13 +226,13 @@ def _decompose(scorer, name: str | None = None) -> Metric:
             " reduce to a metric `f(y_true, values)`. Implement it in"
             " `stratum/optimizer/logical/_scoring.py::_NATIVE`, or pass a metric directly."
         )
-    response = getattr(scorer, "_response_method", "predict") or "predict"
-    if isinstance(response, str):
-        response = (response,)
+    methods = getattr(scorer, "_response_method", "predict") or "predict"
+    if isinstance(methods, str):
+        methods = (methods,)
     return Metric(
         name=name or getattr(fn, "__name__", repr(scorer)),
         fn=fn,
-        response_method=tuple(response),
+        prediction_methods=tuple(methods),
         kwargs=dict(getattr(scorer, "_kwargs", {}) or {}),
         sign=int(getattr(scorer, "_sign", 1)),
     )
@@ -252,8 +252,8 @@ def _from_callable(scoring: Callable) -> Metric:
             f"scoring={scoring.__name__!r} looks like a scikit-learn scorer"
             " `f(estimator, X, y)`. Stratum scores a candidate from the values its plan"
             " produced and has no estimator to pass one: give a metric"
-            " `f(y_true, y_pred)` instead, or `make_scorer(...)` to choose the response"
-            " it reads."
+            " `f(y_true, y_pred)` instead, or `make_scorer(...)` to choose the prediction"
+            " method it reads."
         )
     return Metric(name=getattr(scoring, "__name__", "callable"), fn=scoring,
                   source="callable")
