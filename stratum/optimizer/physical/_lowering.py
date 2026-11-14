@@ -53,6 +53,10 @@ def install_lowered(old: Op, new: PhysicalOp, root: IRNode) -> IRNode:
     new.outputs = old.outputs
     new.is_X = old.is_X
     new.is_y = old.is_y
+    # Preserve execution metadata if a caller supplies a bound operator.
+    new.train = old.train
+    new.state_ref = old.state_ref
+    new.mode = old.mode
     if new.output_type is OutputType.UNKNOWN:
         new.output_type = old.output_type
     if new.output_schema is None:

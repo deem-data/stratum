@@ -19,7 +19,7 @@ class TestExplainLinearPlan(unittest.TestCase):
         X = X + 33
 
         # Let the optimizer construct the graph and linearize it
-        ops, split_pos, _ = optimize(X)
+        ops, split_pos = optimize(X)
         self.assertIsNone(split_pos)
 
         # Append an external op to the inputs of the first op to test the ?[Op] formatting path
@@ -54,7 +54,7 @@ class TestExplainLinearPlan(unittest.TestCase):
         pred = x.skb.apply(DummyRegressor(), y=y)
 
         # Let the optimizer construct the graph and linearize it
-        ops, split_pos, _ = optimize(pred)
+        ops, split_pos = optimize(pred)
         self.assertIsNotNone(split_pos)
 
         captured_output = io.StringIO()

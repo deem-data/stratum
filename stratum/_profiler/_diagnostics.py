@@ -54,27 +54,26 @@ class NodeTiming:
         }
 
 
-def plan_snapshot(name, ops, split_pos=None, recompute_ops=()):
+def plan_snapshot(name, ops, split_pos=None):
     """Use plan-local positions as IDs; freeze labels before further IR mutations."""
     ids = {op: i for i, op in enumerate(ops)}
-    recompute = set(recompute_ops)
     return {
         "name": name, "split_pos": split_pos,
         "nodes": [{
             "id": i, "label": str(op), "implementation": type(op).__name__,
             "inputs": [ids[inp] for inp in op.inputs],
             "output_type": op.output_type.name,
-            "dead_in_fit": op.dead_in_fit, "recompute": op in recompute,
+            "train": op.train, "mode": op.mode,
         } for i, op in enumerate(ops)],
     }
 
 
-def capture_plan(name, ops, split_pos=None, recompute_ops=()):
+def capture_plan(name, ops, split_pos=None):
     """Only traverse when runtime diagnostics or in-memory capture is enabled."""
     plans = _plan_capture.get()
     if plans is not None:
         ops = list(ops)
-        snapshot = plan_snapshot(name, ops, split_pos, recompute_ops)
+        snapshot = plan_snapshot(name, ops, split_pos)
         plans.append(snapshot)
         if _capture_svg.get():
             from stratum._profiler._graph import graph_svg, op_graph
@@ -83,7 +82,7 @@ def capture_plan(name, ops, split_pos=None, recompute_ops=()):
     run = _active_run.get()
     if run is not None:
         try:
-            run.plans.append(plan_snapshot(name, list(ops), split_pos, recompute_ops))
+            run.plans.append(plan_snapshot(name, list(ops), split_pos))
         except Exception:
             logger.warning("Could not capture diagnostics plan %s", name, exc_info=True)
 

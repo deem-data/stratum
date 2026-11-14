@@ -168,7 +168,7 @@ def test_real_service_tracks_cpu_memory_and_reaps_process():
     busy, idle = BusyOp(), IdleOp()
     with hardware_run(True, .02) as tracker:
         assert tracker.error is None, tracker.error
-        sched = SequentialScheduler([busy, idle], None, [])
+        sched = SequentialScheduler([busy, idle], None)
         observe(sched, tracker, collect_node_timings=False)
         sched.process_op(busy)
         sched.process_op(idle)

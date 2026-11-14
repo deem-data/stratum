@@ -2,9 +2,10 @@ import unittest
 
 from tests.runtime.runtime_test_utils import _make_linear_dag, _make_diamond_dag, _make_op
 from stratum.optimizer.physical.rewrites._lifetime_planning import plan_input_removals
+from stratum.optimizer.logical._base import OperandRef
 
 
-def _plan_remove_schedule(ops, split_pos, flagged_ops, pinned_ops=None):
+def _plan_remove_schedule(ops, split_pos, pinned_ops=None):
     """Run plan_input_removals and return the computed remove_after dict."""
     pinned = set(pinned_ops) if pinned_ops else set()
     plan_input_removals(ops, pinned)
@@ -19,7 +20,7 @@ class TestRemoveSchedule(unittest.TestCase):
 
     def test_linear_no_split(self):
         ops = _make_linear_dag()  # A -> B -> C
-        schedule = _plan_remove_schedule(ops, split_pos=None, flagged_ops=[])
+        schedule = _plan_remove_schedule(ops, split_pos=None)
         # After B processes: A's single consumer (B) is done -> remove A
         self.assertEqual(schedule[ops[1]], [ops[0]])
         # After C processes: B's single consumer (C) is done -> remove B
@@ -30,7 +31,7 @@ class TestRemoveSchedule(unittest.TestCase):
     def test_linear_with_split_pinned(self):
         ops = _make_linear_dag()  # A -> B -> C
         # Split at B (pos=1). A is pinned (feeds B which is post-split).
-        schedule = _plan_remove_schedule(ops, split_pos=1, flagged_ops=[], pinned_ops=[ops[0]])
+        schedule = _plan_remove_schedule(ops, split_pos=1, pinned_ops=[ops[0]])
         # After B: A is pinned, so NOT removed
         self.assertEqual(schedule[ops[1]], [])
         # After C: B removed (not pinned, single consumer done)
@@ -39,7 +40,7 @@ class TestRemoveSchedule(unittest.TestCase):
     def test_diamond_no_split(self):
         a, b, c, d = _make_diamond_dag()  # A -> {B, C} -> D
         ops = [a, b, c, d]
-        schedule = _plan_remove_schedule(ops, split_pos=None, flagged_ops=[])
+        schedule = _plan_remove_schedule(ops, split_pos=None)
         # A has 2 outputs (B, C). After B: remaining=1, no removal.
         self.assertEqual(schedule[b], [])
         # After C: A's remaining hits 0 -> remove A
@@ -53,23 +54,13 @@ class TestRemoveSchedule(unittest.TestCase):
         # A feeds B (post-split) and C (pre-split) -> A is pinned.
         # C feeds D (post-split) -> C is pinned.
         ops = [a, c, b, d]
-        schedule = _plan_remove_schedule(ops, split_pos=2, flagged_ops=[], pinned_ops=[a, c])
+        schedule = _plan_remove_schedule(ops, split_pos=2, pinned_ops=[a, c])
         # After C: A is pinned, not removed
         self.assertEqual(schedule[c], [])
         # After B: A is pinned, not removed
         self.assertEqual(schedule[b], [])
         # After D: B removed (not pinned), C pinned (not removed)
         self.assertEqual(schedule[d], [b])
-
-    def test_flagged_ops_not_pinned(self):
-        ops = _make_linear_dag()  # A, B, C
-        # Split at C (pos=2), A is flagged (re-executed, not pinned).
-        # B feeds C (post-split) -> B is pinned.
-        schedule = _plan_remove_schedule(ops, split_pos=2, flagged_ops=[ops[0]], pinned_ops=[ops[1]])
-        # After B: A removed (not pinned, single consumer done)
-        self.assertEqual(schedule[ops[1]], [ops[0]])
-        # After C: B is pinned, not removed
-        self.assertEqual(schedule[ops[2]], [])
 
     def test_complex_dag_with_non_descendant_branches(self):
         """DAG: A -> B (split), A -> C, C -> E, E -> D, B -> D
@@ -93,7 +84,7 @@ class TestRemoveSchedule(unittest.TestCase):
         ops = [a, c, e, b, d]
         # A feeds B (post-split) -> pinned. E feeds D (post-split) -> pinned.
         # C only feeds E (pre-split) -> not pinned.
-        schedule = _plan_remove_schedule(ops, split_pos=3, flagged_ops=[], pinned_ops=[a, e])
+        schedule = _plan_remove_schedule(ops, split_pos=3, pinned_ops=[a, e])
         # After C: A is pinned, not removed
         self.assertEqual(schedule[c], [])
         # After E: C removed (single consumer done, not pinned)
@@ -113,11 +104,33 @@ class TestRemoveSchedule(unittest.TestCase):
         c.inputs = [a]
         ops = [a, b, c]
         # Split at pos=2 (C is post-split). A feeds C -> pinned.
-        schedule = _plan_remove_schedule(ops, split_pos=2, flagged_ops=[], pinned_ops=[a])
+        schedule = _plan_remove_schedule(ops, split_pos=2, pinned_ops=[a])
         # After B: A has 2 consumers, remaining=1, not removed (also pinned)
         self.assertEqual(schedule[b], [])
         # After C: A's remaining hits 0 but pinned -> not removed
         self.assertEqual(schedule[c], [])
+
+    def test_state_is_released_apart_from_data(self):
+        """Release a fit operator's data and state independently at their last uses."""
+        x = _make_op("X")
+        fit = _make_op("T_fit")
+        after = _make_op("after_fit")
+        predict = _make_op("T_predict")
+        sink = _make_op("sink")
+        fit.mode, predict.mode = "fit_transform", "transform"
+        x.outputs = [fit, predict]
+        fit.inputs, fit.outputs = [x], [predict, after]
+        after.inputs, after.outputs = [fit], [sink]
+        predict.inputs, predict.outputs = [x, fit], [sink]
+        predict.state_ref = OperandRef(1)
+        sink.inputs = [after, predict]
+        ops = [x, fit, predict, after, sink]
+        schedule = _plan_remove_schedule(ops, split_pos=None)
+        # Prediction is the last state use. Retain the data output for `after`.
+        self.assertEqual(schedule[predict], [x])
+        self.assertEqual(predict.release_state_after, [fit])
+        self.assertEqual(schedule[after], [fit])
+        self.assertEqual(after.release_state_after, [])
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ def _predictor_for(selector, *, criterion="gini"):
                    num_threads=2,
                    scheduler=True):
         ops, *_ = optimize(_pipeline(criterion=criterion))
-    (predictor,) = [op for op in ops if isinstance(op, PredictorOp)]
+    (predictor,) = [op for op in ops if isinstance(op, PredictorOp) and op.produces_state]
     return predictor, ops
 
 

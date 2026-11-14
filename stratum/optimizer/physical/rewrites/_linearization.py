@@ -1,21 +1,14 @@
 from __future__ import annotations
 
-from skrub._data_ops._data_ops import EvalMode
-from stratum.optimizer.logical._dataframe_ops import SplitOp
 from stratum.optimizer._op_utils import compute_graph_node_indegree
-from stratum.optimizer.logical._ops import ImplOp, Op
+from stratum.optimizer.logical._ops import Op
 from stratum.utils._utils import start_time, log_time
 
 import logging
 logger = logging.getLogger(__name__)
 
 
-def is_recomputed(op: Op) -> bool:
-    """Whether this operator is recomputed each pass regardless of plan position."""
-    return isinstance(op, ImplOp) and isinstance(op.skrub_impl, EvalMode)
-
-
-def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None, list[Op]]:
+def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None]:
     """Topologically sort a DAG and enforce the split invariant.
 
     Use Kahn's algorithm with a stack of ready operators. When the split
@@ -28,13 +21,11 @@ def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None, list[Op]]:
     Returns:
         linearized_dag: Linearized list of ops with the split invariant.
         split_pos: Index of the SplitOp in linearized_dag, or None if absent.
-        flagged_ops: Ops flagged for recomputation (ImplOps with EvalMode).
     """
     start = start_time()
     indegree, sources = compute_graph_node_indegree(dag_sink)
 
     linearized_ops = []
-    flagged_ops = []
     stack = list(sources)
     split_pos = None
     i = 0
@@ -47,8 +38,6 @@ def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None, list[Op]]:
 
         if op.is_split_op:
             split_pos = i
-        if is_recomputed(op):
-            flagged_ops.append(op)
 
         linearized_ops.append(op)
         for out_op in op.outputs:
@@ -63,4 +52,4 @@ def linearize_dag(dag_sink: Op) -> tuple[list[Op], int | None, list[Op]]:
         i += 1
 
     log_time("linearization took", start)
-    return linearized_ops, split_pos, flagged_ops
+    return linearized_ops, split_pos

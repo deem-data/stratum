@@ -1,8 +1,8 @@
 """Shared IR foundation for both the logical and physical operator layers.
 
-``IRNode`` holds everything the two layers have in common: the DAG edge
-structure (``inputs``/``outputs`` and the wiring helpers), the buffer-lifetime
-bookkeeping (``remove_after``), the split marker, and the ``process`` execution
+``IRNode`` defines the shared DAG structure (``inputs``/``outputs`` and edge
+updates), lifetime metadata (``remove_after``/``release_state_after``),
+the split marker, and the ``process`` execution
 hook. The logical layer subclasses it as :class:`~stratum.optimizer.logical._ops.Op`
 and the physical layer as
 :class:`~stratum.optimizer.physical._physical_ops.PhysicalOp`.
@@ -15,6 +15,7 @@ structure keys, choice handling, and backend selection. Operand references
 from __future__ import annotations
 import copy
 from enum import Enum, auto
+from typing import Any, NamedTuple
 
 from sklearn.base import BaseEstimator
 from skrub._data_ops._data_ops import DataOp
@@ -234,6 +235,23 @@ class Uncacheable(Exception):
     """An operator or its configuration cannot be given a safe lineage key."""
 
 
+#: Default evaluation mode for fitting and stateless preprocessing.
+FITTING_MODE = "fit_transform"
+
+
+class Fitted(NamedTuple):
+    """Data output and fitted state returned by a fitting operator.
+
+    ``output`` supplies data consumers; a predictor's fit returns ``None``.
+    ``state`` supplies response operators. The scheduler stores live outputs
+    in the buffer pool and live fitted states in the state store.
+    """
+    output: Any
+    state: Any
+    #: Estimated state size in bytes; None delegates measurement to the scheduler.
+    size: int | None = None
+
+
 def clone_value(value):
     if isinstance(value, dict):
         return rebuild_dict(value, ((k, clone_value(v)) for k, v in value.items()))
@@ -282,6 +300,9 @@ class IRNode:
     #: visible in the plan.
     _is_physical = False
 
+    #: Default mode before response operators are constructed during planning.
+    fitting_mode = FITTING_MODE
+
     def __init__(self, inputs=None, outputs=None, name=None, is_X=False, is_y=False):
         self.name = name
         self.outputs = outputs if outputs is not None else []
@@ -295,14 +316,37 @@ class IRNode:
         self.is_split_op = False
         self.was_cloned = False
         self.remove_after: list[IRNode] = []
-        #: Marked by dead code elimination; not executed during the fitting pass.
-        self.dead_in_fit = False
+        self.release_state_after: list[IRNode] = []
+        #: Train/test copy membership; None for work outside the copied branches.
+        self.train: bool | None = None
+        self.state_ref: OperandRef | None = None
+        #: Bound during planning; execution does not resolve or override it.
+        self.mode: str = self.fitting_mode
         #: Set by reuse planning: admit this result under its lineage key.
         self.cache_key: str | None = None
         #: A retained cached value replaces execution; the op then has no inputs.
         #: See physical.rewrites._reuse_planning.CacheHit for the one-time
         #: handoff to the scheduler.
         self.cache_hit = None
+
+    @property
+    def produces_state(self) -> bool:
+        """Whether execution returns data and fitted state in a :class:`Fitted`."""
+        return self.has_state and self.mode in ("fit", FITTING_MODE)
+
+    def reads_state(self, k: int) -> bool:
+        """Whether input ``k`` is a fitted-state dependency."""
+        return self.state_ref is not None and self.state_ref.k == k
+
+    def has_data_reader(self) -> bool:
+        """Whether this operator has a data-output consumer."""
+        return any(in_op is self and not out.reads_state(k)
+                   for out in self.outputs for k, in_op in enumerate(out.inputs))
+
+    def has_state_reader(self) -> bool:
+        """Whether this operator has a fitted-state consumer."""
+        return any(out.reads_state(k) and in_op is self
+                   for out in self.outputs for k, in_op in enumerate(out.inputs))
 
     def propagate_output_schema(self):
         """Default rule for the schema-propagation pass: the output is unknown.
@@ -314,6 +358,10 @@ class IRNode:
         ``PhysicalOp``, not an ``Op``).
         """
         self.output_schema = None
+
+    #: Whether the operator produces fitted state for subsequent application.
+    #: Planning creates response operators with explicit fitted-state inputs.
+    has_state = False
 
     #: Opt-in contract: the output is a deterministic function of the inputs and
     #: lineage_config(). Generic calls and unknown operators remain uncacheable.
@@ -335,6 +383,10 @@ class IRNode:
     def to_str_helper(self):
         class_name = (self.__class__.__name__ if self._is_physical
                       else self.logical_family or self.__class__.__name__)
+        if self.has_state:
+            class_name = f"{class_name}_{self.mode}"
+        if self.train is not None:
+            class_name += "_train" if self.train else "_test"
         is_df = " [df]" if not self._is_physical and self.output_type is OutputType.FRAME else ""
         name = f"({self.name})" if self.name and len(self.name) > 0 else ""
         # truncate name if it is too long
@@ -408,6 +460,8 @@ class IRNode:
             new_value = remap_operand_refs(value, mapping)
             if new_value is not value:
                 setattr(self, field, new_value)
+        if self.state_ref is not None:
+            self.state_ref = remap_operand_refs(self.state_ref, mapping)
 
     def consumes_inputs_positionally(self) -> bool:
         """Whether this op addresses its inputs by position rather than OperandRef.
@@ -490,6 +544,7 @@ class IRNode:
         return new_op
 
     def process(self, mode: str, inputs: list):
+        """Execute the bound mode with borrowed data and fitted-state inputs."""
         raise NotImplementedError(f"Processing of {self.__class__.__name__} objects is not implemented yet. Please implement it.")
 
     def check_kwargs(self, kwargs):

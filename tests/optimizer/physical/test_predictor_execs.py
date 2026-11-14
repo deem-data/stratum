@@ -22,6 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.tree import ExtraTreeClassifier
 
 import stratum as st
+from tests.optimizer.physical._execution import response_op
 from stratum.adapters.tree_classifier import RustRandomForestClassifier
 from stratum.frontend._api import evaluate
 from stratum.optimizer._optimize import optimize
@@ -158,12 +159,12 @@ def test_pass_through_predictor_renders_its_estimator():
     """The logical op shows its family; the bound pass-through impl names the
     estimator, so per-op stats tell pass-through predictors apart."""
     op = PredictorOp(estimator=RidgeCV(alphas=[0.1, 1.0]))
-    assert str(op) == "Predictor"
+    assert str(op) == "Predictor_fit"
 
     select_implementations(op, _ctx())
 
     assert type(op) is PassthroughPredictor
-    assert str(op) == "PredictorOp(RidgeCV(alphas=[0.1, 1.0]))"
+    assert str(op) == "PredictorOp_fit(RidgeCV(alphas=[0.1, 1.0]))"
 
 
 class _UserDefinedPredictor(RegressorMixin, BaseEstimator):
@@ -183,8 +184,10 @@ def test_any_estimator_passes_through():
     select_implementations(op, _ctx())
 
     assert type(op) is PassthroughPredictor
-    assert str(op) == "PredictorOp(_UserDefinedPredictor())"
-    np.testing.assert_array_equal(op.process("fit_transform", [X]),
+    assert str(op) == "PredictorOp_fit(_UserDefinedPredictor())"
+    fitted = op.process(op.mode, [X])
+    assert fitted.output is None
+    np.testing.assert_array_equal(response_op(op).process(op.fallback_mode, [X, fitted.state]),
                                   np.full(len(X), np.mean(y)))
 
 
@@ -333,10 +336,10 @@ def test_graph_fed_catboost_parameter_is_only_applied_while_fitting():
         param_refs={"iterations": OperandRef(1)},
     )
 
-    op.process("fit_transform", [X, 2])
+    fitted = op.process(op.mode, [X, 2])
 
-    assert op.estimator.get_params()["iterations"] == 2
-    assert len(op.process("predict", [X, 2])) == len(X)
+    assert fitted.state.get_params()["iterations"] == 2
+    assert len(response_op(op, 2).process(op.fallback_mode, [X, 2, fitted.state])) == len(X)
 
 
 class _RefusesRefitParams(Ridge):
@@ -354,11 +357,11 @@ def test_graph_fed_parameter_is_applied_to_a_fresh_estimator_every_fold():
     op = PredictorOp(estimator=_RefusesRefitParams(), y=y, cols=All(), no_wrap=True,
                      param_refs={"alpha": OperandRef(1)})
 
-    op.process("fit_transform", [X, 2.0])
-    op.process("predict", [X, 2.0])
-    op.process("fit_transform", [X, 3.0])
+    fitted = op.process(op.mode, [X, 2.0])
+    response_op(op, 2).process(op.fallback_mode, [X, 2.0, fitted.state])
+    fitted = op.process(op.mode, [X, 3.0])
 
-    assert op.estimator.alpha == 3.0
+    assert fitted.state.alpha == 3.0
     # The prototype the fits are cloned from is never fitted itself.
     assert not hasattr(op.original_estimator, "coef_")
 
@@ -436,9 +439,11 @@ def test_plan_predicts_like_skrub(task, module, name, params, impl):
 
     ops, *_ = optimize(pred)
     predictors = [op for op in ops if isinstance(op, PredictorOp)]
-    assert len(predictors) == 1
-    assert type(predictors[0]) is impl
-    assert isinstance(predictors[0], PhysicalOp)
+    # Fitted on the training rows, applied to the test rows: one stage each.
+    assert sorted(op.mode for op in predictors) == ["fit", "predict"]
+    for op in predictors:
+        assert type(op) is impl
+        assert isinstance(op, PhysicalOp)
 
     seed, test_size = 42, 0.2
     preds = evaluate(pred, seed=seed, test_size=test_size)

@@ -116,10 +116,10 @@ def model(csv_path, estimator):
 def estimator_keys(dag):
     """Each estimator op's key, over stand-in keys for its inputs (what precedes
     the estimators is keyed by the plan, see test_reuse_planning)."""
-    plan, _, _ = optimize(dag, env=get_data(dag))
+    plan, _ = optimize(dag, env=get_data(dag))
     keys = []
     for op in plan:
-        if isinstance(op, BaseEstimatorOp):
+        if isinstance(op, BaseEstimatorOp) and op.produces_state:
             try:
                 keys.append(lineage_key(op, [f"input{k}" for k in range(len(op.inputs))]))
             except Uncacheable:

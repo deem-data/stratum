@@ -2,6 +2,7 @@ import sys
 
 import pandas as pd
 import pytest
+from tests.optimizer.physical._execution import response_op
 from sklearn.base import clone
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from skrub import StringEncoder, TableVectorizer, selectors
@@ -188,14 +189,14 @@ def test_fused_stratum_table_vectorizer_fits_and_transforms_with_rust_leaves(cap
         allow_patch=False,
         debug_timing=True,
     ):
-        fitted = op.process("fit_transform", [train])
-        transformed = op.process("predict", [test])
+        fitted = op.process(op.mode, [train])
+        transformed = response_op(op).process(op.fallback_mode, [test, fitted.state])
 
     assert "[rust]" in capture_std_out(capfd)
-    assert fitted.shape[1] == transformed.shape[1]
-    assert list(fitted.columns) == list(transformed.columns)
-    assert isinstance(op.estimator.transformers_["low"], RustyOneHotEncoder)
-    assert isinstance(op.estimator.transformers_["high"], RustyStringEncoder)
-    assert op.estimator.transformers_["low"]._supported_params
-    assert op.estimator.transformers_["low"]._stratum_force_rust
-    assert op.estimator.transformers_["high"]._stratum_force_rust
+    assert fitted.output.shape[1] == transformed.shape[1]
+    assert list(fitted.output.columns) == list(transformed.columns)
+    assert isinstance(fitted.state.transformers_["low"], RustyOneHotEncoder)
+    assert isinstance(fitted.state.transformers_["high"], RustyStringEncoder)
+    assert fitted.state.transformers_["low"]._supported_params
+    assert fitted.state.transformers_["low"]._stratum_force_rust
+    assert fitted.state.transformers_["high"]._stratum_force_rust

@@ -1,7 +1,7 @@
 """Train/test split operators and their insertion into the plan.
 
 ``add_splitting_op`` connects the marked features (``X``) and targets (``y``)
-to a shared ``SplitOp``. The scheduler supplies training or test row indices,
+to a shared ``SplitOp``. The scheduler supplies training and test row indices,
 which the operator applies to both inputs. ``SplitOutput`` nodes expose the
 resulting feature and target subsets separately to downstream operators.
 
@@ -22,6 +22,13 @@ import numpy as np
 
 
 class SplitOp(Op):
+    """Partition ``X`` and ``y`` into a fold's training and test subsets.
+
+    ``indices`` is the fold's ``(train, test)`` row positions, set by the scheduler
+    before each run of the plan after the split. The output is the tuple
+    ``(X_train, y_train, X_test, y_test)``. Each :class:`SplitOutput` operator
+    extracts one component.
+    """
     logical_family = "Split"
 
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
@@ -39,40 +46,49 @@ class SplitOp(Op):
         return self.inputs[2] if len(self.inputs) > 2 else None
 
     def process(self, mode: str, inputs: list):
-        # we need to handle both pandas and polars dfs
-        x = inputs[0]
-        y = inputs[1]
-        if isinstance(x, pd.DataFrame):
-            return (x.iloc[self.indices], y.iloc[self.indices])
-        elif isinstance(x, pl.DataFrame):
-            return (x[self.indices], y[self.indices])
-        elif isinstance(x, np.ndarray):
-            return (x[self.indices], y[self.indices])
-        else:
-            raise ValueError(f"Unsupported dataframe type: {type(x)}")
+        x, y = inputs[0], inputs[1]
+        train, test = self.indices
+        return (*_take(x, y, train), *_take(x, y, test))
+
+
+def _take(x, y, rows) -> tuple:
+    # Row positions require iloc on pandas and direct indexing on Polars/NumPy.
+    if isinstance(x, pd.DataFrame):
+        return x.iloc[rows], y.iloc[rows]
+    elif isinstance(x, (pl.DataFrame, np.ndarray)):
+        return x[rows], y[rows]
+    else:
+        raise ValueError(f"Unsupported dataframe type: {type(x)}")
 
 
 class SplitOutput(Op):
-    def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, ):
-        name = "X" if is_x else "y"
+    """``X`` or ``y`` of the training or the test rows of a fold."""
+
+    def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, train=False):
+        name = ("X" if is_x else "y") + ("_train" if train else "_test")
         super().__init__(name=name, is_X=False, is_y=False, inputs=inputs, outputs=outputs)
         self.is_x = is_x
+        self.train = train
         self.output_type = OutputType.FRAME
 
+    def clone(self):
+        """Clone the output selection, preserving its train/test assignment.
+
+        Train/test unrolling separately sets ``train=True`` on the training copy.
+        """
+        new_op = SplitOutput(is_x=self.is_x, train=self.train)
+        new_op.was_cloned = True
+        return new_op
+
     def propagate_output_schema(self):
-        # Subsetting rows keeps the columns. The SplitOp itself is an (X, y)
-        # fan-out with no schema of its own, so read past it to the matching input
-        # (inputs[0] = X, inputs[1] = y, per add_splitting_op).
+        # Row selection preserves columns. Propagate the schema from the matching
+        # SplitOp input: inputs[0] is X and inputs[1] is y.
         split_op = self.inputs[0]
         src = split_op.inputs[0 if self.is_x else 1]
         self.output_schema = src.output_schema
 
     def process(self, mode: str, inputs: list):
-        if self.is_x:
-            return inputs[0][0]
-        else:
-            return inputs[0][1]
-
+        return inputs[0][(0 if self.train else 2) + (0 if self.is_x else 1)]
 
 class BuildSplitterOp(Op):
     """Build the splitter declared by ``mark_as_X(cv=..., split_kwargs=...)``.

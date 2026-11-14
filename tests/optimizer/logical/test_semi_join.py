@@ -28,8 +28,7 @@ def _ctx():
 def _run(ops):
     pool = {}
     for op in ops:
-        pool[id(op)] = op.process("fit_transform",
-                                  [pool[id(i)] for i in op.inputs])
+        pool[id(op)] = op.process("fit_transform", [pool[id(i)] for i in op.inputs])
     return pool[id(ops[-1])]
 
 

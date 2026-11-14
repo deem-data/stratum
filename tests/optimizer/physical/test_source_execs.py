@@ -30,7 +30,7 @@ from stratum.optimizer.physical._source_execs import (
     PandasReadParquet, PolarsInMemoryFrame, PolarsReadCSV, PolarsReadParquet,
     _POLARS_CSV_TRANSLATORS, _POLARS_PARQUET_TRANSLATORS, _polars_cloud_path,
     _translate_storage_options)
-from stratum.runtime._buffer_pool import BufferPool
+from stratum.runtime._scheduler import SequentialScheduler
 from tests._helpers import csv_file, npy_file, parquet_file
 
 
@@ -39,13 +39,13 @@ def polars_conf(**kwargs):
     return OptConfig(selector=FlagBasedSelector(backend="polars"), **kwargs)
 
 
-def run_plan(ops, mode="fit_transform"):
-    """Execute a linearized plan through a fresh BufferPool; return the sink value."""
-    pool = BufferPool()
-    for op in ops:
-        inputs = [pool.pin(key) for key in op.inputs]
-        pool.put(op, op.process(mode, inputs))
-    return pool.pin(ops[-1])
+def run_plan(ops):
+    """Execute a full-data plan with separate data and fitted-state storage."""
+    scheduler = SequentialScheduler(ops, None)
+    try:
+        return scheduler.compute(ops)
+    finally:
+        scheduler._finish()
 
 
 class TestSourceImplSelection(unittest.TestCase):

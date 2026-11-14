@@ -126,13 +126,15 @@ class SearchTest(RuntimeTest):
         data = st.as_data_op(self.df)
         X = data[["x", "datetime"]].skb.mark_as_X()
         y = data["y"].skb.mark_as_y()
-        y = y.skb.apply_func(lambda a, m: (a, print(m))[0] if m != 'predict' else int("grr"), st.eval_mode())
-        pred = X.skb.apply(DummyRegressor(), y=y)
+        # Place the failing call on the prediction path; fit-only dependencies
+        # are pruned from the test copy.
+        pred = X.skb.apply(DummyRegressor(), y=y).skb.apply_func(
+            lambda a, m: a if m != 'predict' else int("grr"), st.eval_mode())
         try:
             _api.grid_search(pred, scoring="neg_mean_squared_error")
             self.fail("Expected RunTimeError")
         except RuntimeError as e:
-            self.assertTrue(e.args[0].startswith("[predict] Error processing 'CallExec(<lambda>)': invalid literal for int() with base 10: 'grr'"))
+            self.assertTrue(e.args[0].startswith("[predict] Error processing 'CallExec_test(<lambda>)': invalid literal for int() with base 10: 'grr'"))
 
 
 
@@ -162,9 +164,10 @@ class SearchTest(RuntimeTest):
         self.assertIn("share of all operator processing time", out)
         self.assertIn("serialize/deserialize times are included in Execution", out)
         self.assertIn("%", out.split("Heavy hitters")[1])
-        row = next(line for line in out.splitlines() if "CallExec(<lambda>)" in line)
+        row = next(line for line in out.splitlines()
+                   if re.search(r"CallExec_(train|test)\(<lambda>\)", line))
         fields = row.split()
-        self.assertEqual(fields[1], "10")          # invocation count
+        self.assertEqual(fields[1], "5")  # five folds, with train/test counted separately
         self.assertTrue(fields[-1].endswith("%"))
 
 

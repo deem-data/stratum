@@ -9,6 +9,10 @@ no bound impl and no ``process`` fails at plan time.
 
 Frame libraries are propagated along edges; mismatches get a ``ConversionOp``
 (see ``_conversion``).
+
+TODO: Before supporting reselection or moving selection after train/test
+unrolling, account for fitted-state compatibility, adapted estimator prototypes
+and conversions inserted by an earlier selection.
 """
 from __future__ import annotations
 
@@ -351,7 +355,8 @@ def _plan_selection(ops, ctx, registry, selector,
             plan.new_pandas_required.add(id(op))
         in_libs = []
         for k, producer in enumerate(op.inputs):
-            lib = plan.libs.get(id(producer))
+            # State edges do not inherit the producer's data-output frame library.
+            lib = None if op.reads_state(k) else plan.libs.get(id(producer))
             if lib is not None and not accepts_input(bound_cls, op, k, lib):
                 lib = lib.other
                 _enforce_input_lib(plan, producer, op, k, lib, pandas_required, index_memo)
@@ -373,7 +378,8 @@ def _requires_label_alignment(op: IRNode, index_memo: dict) -> bool:
     """Whether polars' positional pairing differs from pandas' label alignment."""
     if op.aligns_by_label is not None:
         return op.aligns_by_label
-    frames = [i for i in op.inputs if i.output_type in FRAME_TYPES]
+    frames = [i for k, i in enumerate(op.inputs)
+              if i.output_type in FRAME_TYPES and not op.reads_state(k)]
     return len({index_origin(i, index_memo) for i in frames}) > 1
 
 

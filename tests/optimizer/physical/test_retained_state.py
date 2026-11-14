@@ -25,6 +25,7 @@ from stratum.optimizer.physical._predictor_execs import (
 from stratum.optimizer.physical._transform_execs import PassthroughTransformer
 from stratum.runtime import _object_size
 from stratum.runtime._object_size import UNKNOWN_SIZE
+from tests.optimizer.physical._execution import response_op
 
 
 @pytest.fixture
@@ -60,17 +61,19 @@ def test_size_is_refreshed_only_when_fitting(data, transformer, no_wrap):
     assert op.retained_state_size() == 0
 
     with patch.object(op, "_measure_retained_state", wraps=op._measure_retained_state) as measure:
-        result = op.process("fit_transform", [X])
+        fitted = op.process(op.mode, [X])
+        response = response_op(op)
+        expected = getattr(fitted.state, response.mode)(X)
         first_size = op.retained_state_size()
         assert first_size > UNKNOWN_SIZE
         for _ in range(3):
             assert op.retained_state_size() == first_size
-            np.testing.assert_allclose(op.process("predict", [X]), result)
+            np.testing.assert_allclose(response.process(response.mode, [X, fitted.state]), expected)
         assert measure.call_count == 1
 
         # A new fold replaces the fitted state and its estimate.
         op.y = y[:100]
-        op.process("fit_transform", [X.iloc[:100].copy()])
+        op.process(op.mode, [X.iloc[:100].copy()])
         assert measure.call_count == 2
         if not transformer:
             assert UNKNOWN_SIZE < op.retained_state_size() < first_size
@@ -84,8 +87,8 @@ def test_size_is_refreshed_only_when_fitting(data, transformer, no_wrap):
 def test_sklearn_tree_storage_is_included(data, impl, estimator, no_generic_sizing):
     X, y = data
     op = impl(estimator=estimator, y=y, cols=All(), no_wrap=True)
-    op.process("fit_transform", [X])
-    trees = getattr(op.estimator, "estimators_", [op.estimator])
+    fitted = op.process(op.mode, [X])
+    trees = getattr(fitted.state, "estimators_", [fitted.state])
     native_bytes = sum(
         sum(arr.nbytes for arr in tree.tree_.__getstate__().values()
             if isinstance(arr, np.ndarray))
@@ -107,7 +110,9 @@ def test_rust_forest_native_size_is_read_once_per_fit(data, impl, no_wrap, no_ge
                                     rust_backend=True, allow_patch=True))
     native_info = rb.forest_model_info
     with patch.object(rb, "forest_model_info", wraps=native_info) as measure:
-        result = op.process("fit_transform", [X])
+        fitted = op.process(op.mode, [X])
+        response = response_op(op)
+        expected = fitted.state.predict(X)
         assert measure.call_count == 1
         handle = measure.call_args.args[0]
         native_bytes = native_info(handle)["model_bytes"]
@@ -117,11 +122,11 @@ def test_rust_forest_native_size_is_read_once_per_fit(data, impl, no_wrap, no_ge
 
         for _ in range(3):
             assert op.retained_state_size() == size
-            np.testing.assert_array_equal(op.process("predict", [X]), result)
+            np.testing.assert_array_equal(response.process(response.mode, [X, fitted.state]), expected)
         assert measure.call_count == 1
 
         op.y = y[:100]
-        op.process("fit_transform", [X.iloc[:100]])
+        op.process(op.mode, [X.iloc[:100]])
         assert measure.call_count == 2
         assert UNKNOWN_SIZE < op.retained_state_size() < size
 
@@ -129,9 +134,10 @@ def test_rust_forest_native_size_is_read_once_per_fit(data, impl, no_wrap, no_ge
 def test_failed_measurement_does_not_break_fit_or_keep_previous_size(data):
     X, y = data
     op = SklearnKNeighbors(estimator=KNeighborsClassifier(), y=y, cols=All(), no_wrap=True)
-    op.process("fit_transform", [X])
+    op.process(op.mode, [X])
     assert op.retained_state_size() > UNKNOWN_SIZE
     with patch.object(op, "_measure_retained_state", side_effect=RuntimeError("no estimate")):
-        result = op.process("fit_transform", [X])
+        fitted = op.process(op.mode, [X])
     assert op.retained_state_size() == UNKNOWN_SIZE
-    np.testing.assert_array_equal(op.process("predict", [X]), result)
+    response = response_op(op)
+    np.testing.assert_array_equal(response.process(response.mode, [X, fitted.state]), fitted.state.predict(X))

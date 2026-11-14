@@ -74,28 +74,29 @@ def _sklearn_tree_size(tree: Tree) -> int:
 
 
 class _SklearnForestState:
-    def _measure_retained_state(self) -> int:
+    def _measure_retained_state(self, estimator) -> int:
         # TODO: include Python metadata and auxiliary fitted arrays.
-        return sum(_sklearn_tree_size(tree.tree_) for tree in self.estimator.estimators_)
+        return sum(_sklearn_tree_size(tree.tree_) for tree in estimator.estimators_)
 
 
 # --- Pass-through ------------------------------------------------------------
 @sklearn_skrub_impl(of=PredictorOp)
 class PassthroughPredictor(_PredictorExecution):
-    """Impl for any predictor without a family -- scikit-learn, third-party or
-    user-defined -- that runs the estimator as-is, much like a UDF.
+    """Execute a predictor without a specialized physical operator family.
 
-    Renders as ``PredictorOp(<estimator>)`` so per-op stats keep pass-through
-    predictors apart; the logical op still renders as its ``Predictor`` family.
+    Supports scikit-learn, third-party and user-defined estimators through the
+    predictor interface. Labels include the estimator configuration and execution
+    mode and train/test membership to distinguish per-operator statistics.
     """
     is_abstract = False
 
     def to_str_helper(self):
-        _, _, is_df = super().to_str_helper()
+        label, _, is_df = super().to_str_helper()
         estimator = " ".join(str(self.original_estimator).split())
         if len(estimator) > 50:
             estimator = estimator[:50] + "..."
-        return "PredictorOp", f"({estimator})", is_df
+        label = label.replace(type(self).__name__, "PredictorOp", 1)
+        return label, f"({estimator})", is_df
 
 
 # --- Random forest -----------------------------------------------------------
@@ -134,12 +135,12 @@ class _RustRandomForestPhysicalOp(RandomForestOp):
     is_abstract = True
     histogram_backend = False
 
-    def _measure_retained_state(self) -> int:
+    def _measure_retained_state(self, estimator) -> int:
         # Predictors are not wrapped by Skrub, so the fitted handle is directly
         # available. EstimatorExecution stores this estimate after fitting.
         # TODO: return this scalar from native fit without computing model_info's
         # other diagnostics. Include Vec spare capacity and native/Python metadata.
-        return rb.forest_model_info(self.estimator._forest_model_handle_)["model_bytes"]
+        return rb.forest_model_info(estimator._forest_model_handle_)["model_bytes"]
 
     @classmethod
     def supports(cls, op: RandomForestOp, ctx: Any) -> bool:
@@ -198,9 +199,9 @@ class SklearnDecisionTree(DecisionTreeOp):
     """Reference impl: runs the scikit-learn decision tree as-is."""
     is_abstract = False
 
-    def _measure_retained_state(self) -> int:
+    def _measure_retained_state(self, estimator) -> int:
         # TODO: include Python metadata and auxiliary fitted arrays.
-        return _sklearn_tree_size(self.estimator.tree_)
+        return _sklearn_tree_size(estimator.tree_)
 
 
 # --- Histogram gradient boosting ----------------------------------------------

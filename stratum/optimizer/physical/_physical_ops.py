@@ -19,8 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from stratum.optimizer.logical._base import IRNode
-from stratum.optimizer.logical._ops import FITTING_MODE
+from stratum.optimizer.logical._base import IRNode, Fitted
 from stratum.runtime._object_size import UNKNOWN_SIZE, get_size_estimator
 
 import logging
@@ -70,9 +69,10 @@ class PhysicalOp(IRNode):
     # --- Runtime state -----------------------------------------------------
 
     def retained_state_size(self) -> int:
-        """Estimated bytes held by the operator between executions.
+        """Cached estimate of this operator's most recently fitted state.
 
         Excludes output buffers and temporary execution memory (``exec_mem``).
+        The runtime state store owns explicit state and tracks its lifetime.
         Stateful implementations record their estimate when building the state,
         so reading it here does not traverse or serialize a fitted model.
         """
@@ -113,11 +113,11 @@ class PhysicalOp(IRNode):
         pass
 
     def clone(self):
-        # Choice unrolling clones logical subgraphs before lowering.
-        # Reject cloning here to enforce that phase ordering.
+        # Logical cloning reconstructs an op from its fields. Physical unrolling
+        # copies bound configuration instead, preserving selection-time setup.
         raise TypeError(
-            f"{type(self).__name__} is a physical op and must not be cloned; "
-            f"cloning happens in the logical phase, before lowering.")
+            f"{type(self).__name__} is a physical op; "
+            f"copy its bound configuration instead of reconstructing it.")
 
 
 class EstimatorExecution:
@@ -131,21 +131,22 @@ class EstimatorExecution:
 
     def process(self, mode: str, inputs: list):
         task_data = self.extract_args_from_inputs(mode, inputs)
-        result, self.estimator = self.get_process_task()(task_data)
-        if mode == FITTING_MODE:
-            # Replace the previous fold's estimate; response passes only read it.
+        result, estimator = self.get_process_task()(task_data)
+        if self.produces_state:
+            # Update the estimate after fitting; response calls do not recompute it.
             # Memory accounting must not turn a successful fit into a failure.
             self._retained_state_bytes = UNKNOWN_SIZE
             try:
-                self._retained_state_bytes = int(self._measure_retained_state())
+                self._retained_state_bytes = int(self._measure_retained_state(estimator))
             except Exception:
                 logger.debug("Could not size fitted state of %s", type(self).__name__,
                              exc_info=True)
+            return Fitted(result, estimator, self._retained_state_bytes)
         return result
 
     def retained_state_size(self) -> int:
         """Fitted-state bytes recorded by this op, or zero before its first fit."""
         return getattr(self, "_retained_state_bytes", 0)
 
-    def _measure_retained_state(self) -> int:
-        return get_size_estimator(self.estimator)
+    def _measure_retained_state(self, estimator) -> int:
+        return get_size_estimator(estimator)

@@ -237,8 +237,8 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"x": range(5)})
         op = PolarsSampleSelectionOp(frac=0.5, seed=7)
 
-        first = op.process("fit_transform", [frame])
-        second = op.process("fit_transform", [frame])
+        first = op.process("fit", [frame])
+        second = op.process("fit", [frame])
 
         self.assertEqual(2, first.height)
         assert_polars_frame_equal(first, second)
@@ -247,7 +247,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"x": range(3)})
         op = PolarsSampleSelectionOp(n=8, with_replacement=True, seed=7)
 
-        result = op.process("fit_transform", [frame])
+        result = op.process("fit", [frame])
 
         self.assertEqual(8, result.height)
 
@@ -255,7 +255,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame(schema={"x": pl.Int64})
         op = PolarsSampleSelectionOp(frac=0.0, seed=7)
 
-        result = op.process("fit_transform", [frame])
+        result = op.process("fit", [frame])
 
         assert_polars_frame_equal(result, frame)
 
@@ -263,7 +263,7 @@ class TestPolarsSampleSelectionOp(unittest.TestCase):
         frame = pl.DataFrame({"x": [42]})
         op = PolarsSampleSelectionOp(seed=7)
 
-        result = op.process("fit_transform", [frame])
+        result = op.process("fit", [frame])
 
         assert_polars_frame_equal(result, frame)
 

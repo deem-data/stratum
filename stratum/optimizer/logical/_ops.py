@@ -16,7 +16,8 @@ from stratum.optimizer.logical import _schema
 # Shared IR foundation. Re-exported below so existing ``from ..._ops import X``
 # call sites (OutputType, OperandRef, is_frame_like, config_key, ...) keep working.
 from stratum.optimizer.logical._base import (
-    IRNode, IndexEffect, OutputType, FRAME_TYPES, has_default_labels, is_frame_like, OperandRef,
+    IRNode, IndexEffect, OutputType, FRAME_TYPES, FITTING_MODE, Fitted, has_default_labels,
+    is_frame_like, OperandRef,
     _resolve_operand, _resolve_args, _resolve_kwargs, remap_operand_refs,
     config_key, estimator_key, clone_value, rebuild_dict,
     _ALL_SELECTOR_KEY, _GRAPH_PARAM_KEY,
@@ -135,7 +136,8 @@ class ImplOp(Op):
         return SimpleNamespace(**{field: replace_dataop(getattr(self.skrub_impl, field)) for field in self.skrub_impl._fields})
 
     def process(self, mode: str, inputs: list):
-        if hasattr(self.skrub_impl, "eval"):
+        impl = self.skrub_impl
+        if hasattr(impl, "eval"):
             # An eval method combines dependency requests with computation.
             # Resume its generator with the corresponding computed inputs.
             # Indices are assigned in yield order (de-duplicating repeated DataOps), matching the
@@ -144,7 +146,7 @@ class ImplOp(Op):
             last_yield = None
             # Variables are resolved to constants at compile time, so the skrub
             # impl needs no environment -- its inputs arrive via the generator.
-            gen = self.skrub_impl.eval(mode=mode, environment={})
+            gen = impl.eval(mode=mode, environment={})
             while True:
                 try:
                     last_yield = gen.send(last_yield)
@@ -155,7 +157,7 @@ class ImplOp(Op):
                     last_yield = inputs[k]
         else:
             ns = self.replace_fields_with_values(inputs)
-            return self.skrub_impl.compute(ns, mode, {})
+            return impl.compute(ns, mode, {})
 
 
 class SplitXOp(Op):
@@ -201,10 +203,8 @@ class VariableOp(Op):
             f"VariableOp({self.name!r}) reached the runtime; variables must be "
             f"resolved to constants at compile time by passing `env` to optimize().")
 
-# A plan execution's ``mode`` is the estimator method it calls, as it is in skrub.
-# ``fit_transform`` fits; the rest are response methods, and which one a pass uses is
-# the scorer's to decide (see ``ScoreCandidatesOp``).
-FITTING_MODE = "fit_transform"
+# Scoring determines the requested test response (see ``ScoreCandidatesOp``).
+# Planning resolves it to a supported estimator method or the fallback method.
 RESPONSE_MODES = frozenset({"predict", "predict_proba", "predict_log_proba",
                             "decision_function"})
 
@@ -269,6 +269,8 @@ class BaseEstimatorOp(Op):
 
     #: Keyed when the estimator is known and deterministic for its configuration.
     cacheable = True
+    #: Fitted state consists of the estimator produced during training.
+    has_state = True
 
     def lineage_config(self):
         """Encode the unfitted prototype cloned by each fitting pass."""
@@ -283,13 +285,13 @@ class BaseEstimatorOp(Op):
         return config
 
     def effective_mode(self, mode: str) -> str:
-        """The method ``mode`` actually calls on this op's estimator.
+        """Resolve a requested response method during planning.
 
-        An op that cannot serve the requested response falls back the way skrub's
-        ``Apply`` does: a transformer transforms, a predictor predicts. So does one
-        that feeds another estimator, whatever responses it could serve.
+        Unsupported responses and outputs consumed by another estimator use
+        the fallback: ``transform`` for transformers and ``predict`` for
+        predictors, matching skrub's ``Apply``.
         """
-        if mode == FITTING_MODE or (mode in self.supported_modes and not self.feeds_estimator):
+        if mode in self.supported_modes and not self.feeds_estimator:
             return mode
         return self.fallback_mode
 
@@ -332,15 +334,16 @@ class BaseEstimatorOp(Op):
         Worker-process execution requires the estimator and argument values
         themselves to support serialization.
         """
-        mode = self.effective_mode(mode)
-        fitting = mode == FITTING_MODE
+        fitting = self.produces_state
         x = inputs[0]
         assert x is not None, f"X is None for {self}"
         y = (inputs[self.y.k] if isinstance(self.y, OperandRef) else self.y) if fitting else None
-        # Every fit starts from an unfitted clone, as in skrub. Fitting the prototype
-        # itself would leave it fitted for the next fold, and CatBoost refuses the
-        # `set_params` below on a fitted model.
-        estm = clone(self.original_estimator) if fitting else self.estimator
+        # Clone the unfitted prototype for each fit to isolate fold state.
+        # Response operators borrow the estimator from their fitted-state input.
+        if fitting:
+            estm = clone(self.original_estimator)
+        else:
+            estm = inputs[self.state_ref.k]
         place_holders = {name: inputs[ref.k] for name, ref in self.param_refs.items()}
         # Graph-fed hyperparameters configure the estimator before fitting. In a
         # response pass ``estm`` is already fitted, and CatBoost rejects any
@@ -350,15 +353,10 @@ class BaseEstimatorOp(Op):
         cols = _resolve_operand(self.cols, inputs)
         exclude_cols = _resolve_operand(self.exclude_cols, inputs)
         no_wrap = _resolve_operand(self.no_wrap, inputs)
-        # A response pass never fits, so (like skrub) the fit group is left unevaluated.
-        # Note the difference from skrub: skrub also never *computes* what that group
-        # references, while our plan is eager, so a sub-DAG feeding only fit kwargs
-        # still runs in predict mode and must support it (a transformer extracting
-        # an eval set from training data can return placeholders in predict mode).
+        # Only fitting evaluates the fit group. Response operators omit it, so
+        # branches used only by fit kwargs do not run on test rows.
         fit_kwargs = self.method_kwargs(self.fit_kwargs_key, inputs) if fitting else {}
-        # The call group belongs to the method about to run, so a `predict_proba` pass
-        # gets the `predict_proba` group. The fitting pass makes this kind's own call.
-        call_kwargs = self.method_kwargs(self.call_kwargs_key if fitting else mode, inputs)
+        call_kwargs = {} if fitting else self.method_kwargs(mode, inputs)
         return (
             estm,
             x,
@@ -374,22 +372,23 @@ class BaseEstimatorOp(Op):
         )
 
     def process(self, mode: str, inputs: list):
-        # we use a separate function to process the estimator to allow reuse for multiprocessing
+        # A separate task function supports local and worker-process execution.
         task_data = self.extract_args_from_inputs(mode, inputs)
         process_task = self.get_process_task()
-        result, self.estimator = process_task(task_data)
-        return result
+        result, estimator = process_task(task_data)
+        return Fitted(result, estimator) if self.produces_state else result
 
     def get_process_task(self):
         raise NotImplementedError(f"get_process_task must be implemented in {self.__class__.__name__}")
 
 class PredictorOp(BaseEstimatorOp):
     logical_family = "Predictor"
-    # fit_transform mode calls fit() then predict(); predict mode only predict().
+    # Training predictions execute in a separate operator with a state input.
     fit_kwargs_key = "fit"
     call_kwargs_key = "predict"
     response_modes = RESPONSE_MODES
     fallback_mode = "predict"
+    fitting_mode = "fit"
 
     def get_process_task(self):
         return process_estimator_task
@@ -397,7 +396,7 @@ class PredictorOp(BaseEstimatorOp):
 class TransformerOp(BaseEstimatorOp):
     logical_family = "Transformer"
     # A transformer is fitted through fit_transform(), so (as in skrub) the "fit"
-    # group never applies to one; predict mode calls transform().
+    # group never applies to one; its response mode is transform().
     fit_kwargs_key = "fit_transform"
     call_kwargs_key = "transform"
 
@@ -458,7 +457,7 @@ def check_estm_inputs(estimator, mode, x, y):
         logger.debug(f"Predictor {estimator.__class__.__name__} does not support Polars DataFrame. Converting to Pandas DataFrame.")
         from stratum.optimizer.physical._conversion import to_pandas
         x = to_pandas(x)
-        if y is not None and mode == "fit_transform":
+        if y is not None and mode in (FITTING_MODE, "fit"):
             # y may already be pandas: the plan converts edges explicitly now.
             y = to_pandas(y)
     return converted, x, y
@@ -468,14 +467,13 @@ def process_estimator_task(task_data):
     (estimator, x, y, cols, exclude_cols, no_wrap, allow_reject, unsupervised, kwargs, mode, parallelism) = task_data
     fit_kwargs, call_kwargs = kwargs
     _, x, y = check_estm_inputs(estimator, mode, x, y)
-    if mode == FITTING_MODE:
+    if mode == "fit":
+        # Training predictions, when required, execute in a separate operator.
         estimator = _wrap_estimator(estimator, cols, exclude_cols=exclude_cols, no_wrap=no_wrap,
                                     allow_reject=allow_reject, X=x)
         y_arg = () if unsupervised else (y,)
         estimator.fit(x, *y_arg, **fit_kwargs)
-        result = estimator.predict(x, **call_kwargs)
-        # Return both result and fitted estimator (in case of multi-processing)
-        return result, estimator
+        return None, estimator
     elif mode in RESPONSE_MODES:
         # `mode` is already this op's effective mode, so the method is one it serves.
         result = getattr(estimator, mode)(x, **call_kwargs)
@@ -495,8 +493,7 @@ def process_transformer_task(task_data):
             y_arg = () if unsupervised else (y,)
             result = estimator.fit_transform(x, *y_arg, **fit_transform_kwargs)
         elif mode == "transform":
-            # A transformer serves no response method, so every response pass reaches
-            # it as `transform` (see `BaseEstimatorOp.effective_mode`).
+            # Planning resolves transformer responses to transform.
             result = estimator.transform(x, **transform_kwargs)
         else:
             raise ValueError(f"Mode {mode} not supported for TransformerOp.")

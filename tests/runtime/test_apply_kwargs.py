@@ -1,11 +1,11 @@
 """Execution of an Apply's per-method kwargs.
 
-skrub keys ``.skb.apply()``'s kwargs by the method they belong to and evaluates
-only the group for the method it is about to call. These tests pin both halves of
-that: the kwargs reach the right call, and the fit group is left alone in predict
-mode.
+skrub associates ``.skb.apply()`` kwargs with estimator methods. These tests
+verify argument dispatch and the exclusion of fit-only dependencies from
+prediction.
 """
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -162,12 +162,18 @@ class TestEvalSetPipeline(ApplyKwargsRuntimeTest):
     def test_early_stopping_actually_triggers(self):
         # If the eval set never arrived, LightGBM would run all 200 rounds.
         pipeline = self._pipeline()
-        sched = grid_search(pipeline, cv=2, scoring=self.SCORING)
-        estimators = [op.estimator for op in sched.linearized_dag
-                      if isinstance(getattr(op, "estimator", None), LGBMRegressor)]
-        self.assertTrue(estimators)
-        for est in estimators:
-            self.assertLess(est.best_iteration_, 200)
+        iterations = []
+        fit = LGBMRegressor.fit
+
+        def recording(estimator, *args, **kwargs):
+            result = fit(estimator, *args, **kwargs)
+            iterations.append(estimator.best_iteration_)
+            return result
+
+        with patch.object(LGBMRegressor, "fit", recording):
+            grid_search(pipeline, cv=2, scoring=self.SCORING)
+        self.assertEqual(len(iterations), 2)
+        self.assertTrue(all(0 < n < 200 for n in iterations))
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from skrub.selectors._base import make_selector
 
-from stratum.optimizer.logical._base import _resolve_kwargs, _resolve_operand
+from stratum.optimizer.logical._base import Fitted, _resolve_kwargs, _resolve_operand
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, DropOp)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
@@ -58,36 +58,34 @@ def resolve_selector_columns(frame, selector) -> list[str]:
 
 
 class ColumnSelectorExec(ColumnSelectorOp, PhysicalOp):
-    """Physical base: resolve the (deferred) selector at fit time and reuse the
-    stored column list at predict time -- backend-agnostic; only the final
-    indexing differs per backend."""
+    """Resolve a deferred selector during fitting and reuse its selected columns.
 
-    def on_impl_selected(self, ctx) -> None:
-        # Initialize the column list for resolution during fitting.
-        self.selected_columns = None
+    ``fit_transform`` returns the resolved column list as fitted state;
+    ``transform`` consumes it through the state edge.
+    Backend implementations define column indexing through ``_select``.
+    """
 
-    def _resolved_columns(self, frame, mode: str):
-        if mode == "fit_transform":
-            self.selected_columns = resolve_selector_columns(frame, self.selector)
-        elif self.selected_columns is None:
-            raise RuntimeError(
-                f"{self} was asked to transform before the selector was resolved; "
-                f"run fit_transform first.")
-        return self.selected_columns
+    def process(self, mode: str, inputs: list):
+        frame = inputs[0]
+        if self.produces_state:
+            columns = resolve_selector_columns(frame, self.selector)
+            return Fitted(self._select(frame, columns), columns)
+        return self._select(frame, inputs[self.state_ref.k])
+
+    def _select(self, frame, columns: list):
+        raise NotImplementedError
 
 
 @physical_impl(of=ColumnSelectorOp, backend="pandas")
 class PandasColumnSelectorOp(ColumnSelectorExec):
-    def process(self, mode: str, inputs: list):
-        frame = inputs[0]
-        return frame[self._resolved_columns(frame, mode)]
+    def _select(self, frame, columns: list):
+        return frame[columns]
 
 
 @physical_impl(of=ColumnSelectorOp, backend="polars")
 class PolarsColumnSelectorOp(ColumnSelectorExec):
-    def process(self, mode: str, inputs: list):
-        frame = inputs[0]
-        return frame.select(self._resolved_columns(frame, mode))
+    def _select(self, frame, columns: list):
+        return frame.select(columns)
 
 
 # --- ColumnProjectionOp (df["a"] / df[["a", "b"]]) ----------------------------

@@ -16,7 +16,7 @@ from stratum.optimizer.logical._ops import (
     GetAttrOp, GetItemOp, ImplOp, MethodCallOp, Op, ValueOp,
     VariableOp, check_estm_inputs, estimator_parallel_config,
     estm_supports_polars, process_estimator_task, process_transformer_task,
-    remap_operand_refs,
+    remap_operand_refs, PredictorOp,
 )
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp
@@ -63,14 +63,12 @@ class TestOpCloning(unittest.TestCase):
         choice = st.choose_from([pred], name="choice").as_data_op()
         ops, *_ = optimize_(choice.empty)
 
-        # ops[0] is the physical source op; physical ops are never cloned.
+        # ops[0] is the physical source op; logical cloning cannot reconstruct it.
         with self.assertRaises(TypeError):
             ops[0].clone()
 
-        # Cloning is a logical-phase operation (choice unrolling): logical ops
-        # clone with their config preserved. In the optimized plan above these
-        # have been swapped to physical impls, which refuse cloning (as asserted
-        # for ops[0]).
+        # clone() reconstructs logical ops from their configuration. Physical
+        # unrolling copies the bound configuration instead.
         udf = ApplyUDFOp(args=(1,), kwargs={"axis": 1})
         self.assertEqual(((1,), {"axis": 1}), (udf.clone().args, udf.clone().kwargs))
         self.assertEqual({"b": 1}, AssignOp(kwargs={"b": 1}).clone().kwargs)
@@ -78,18 +76,20 @@ class TestOpCloning(unittest.TestCase):
         getitem = GetItemOp(key="a")
         self.assertEqual("a", getitem.clone().key)
 
-        cloned = ops[3].clone()
-        self.assertIsNot(ops[3].estimator, cloned.estimator)
+        predictor = next(op for op in ops if isinstance(op, PredictorOp))
+        cloned = predictor.clone()
+        self.assertIsNot(predictor.estimator, cloned.estimator)
 
         logical_call = CallOp(func=lambda x: x, args=(OperandRef(0),), kwargs={})
         cloned = logical_call.clone()
         self.assertEqual(logical_call.func, cloned.func)
         self.assertEqual(logical_call.args, cloned.args)
         with self.assertRaises(TypeError):
-            ops[4].clone()
+            next(op for op in ops if isinstance(op, CallOp)).clone()
 
-        cloned = ops[5].clone()
-        self.assertEqual(ops[5].attr_name, cloned.attr_name)
+        attr = next(op for op in ops if isinstance(op, GetAttrOp))
+        cloned = attr.clone()
+        self.assertEqual(attr.attr_name, cloned.attr_name)
 
     def test_replace_non_existing_input(self):
         op = Op(outputs=[1], inputs=[2])
@@ -134,6 +134,11 @@ class TestVariableOp(unittest.TestCase):
 
 
 class TestImplOp(unittest.TestCase):
+    def test_conversion_rejects_freeze_after_fit(self):
+        data = st.as_data_op(42).skb.freeze_after_fit()
+        with self.assertRaisesRegex(NotImplementedError, r"freeze_after_fit\(\).*not supported"):
+            convert_to_ops(data)
+
     def test_clone(self):
         cls = type("FakeImpl", (), {
             "__init__": lambda self, a=None, b=None: (setattr(self, 'a', a), setattr(self, 'b', b)) and None,

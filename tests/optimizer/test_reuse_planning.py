@@ -12,7 +12,7 @@ import stratum as st
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer.physical.rewrites._lifetime_planning import compute_pinned_ops
 from stratum.optimizer._lineage import compute_lineage_keys
-from stratum.optimizer.physical.rewrites._linearization import is_recomputed, linearize_dag
+from stratum.optimizer.physical.rewrites._linearization import linearize_dag
 from stratum.optimizer._op_utils import topological_iterator, validate_dag, validate_operands
 from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.physical.rewrites._reuse_planning import (
@@ -160,13 +160,14 @@ def test_every_split_and_its_descendants_are_excluded():
     assert all(op.cache_key is None for op in ops)
 
 
-def test_recomputed_ops_and_their_dependents_are_never_reused():
-    # Opt in explicitly to prove the region restriction is independent of config.
+def test_non_fitting_sources_and_their_dependents_are_not_reused_before_the_split():
+    # Explicit cacheability must not override the execution-mode restriction.
     class KeyedMode(ImplOp):
         fields = []
         cacheable = True
 
     mode = KeyedMode("mode", EvalMode())
+    mode.mode = "predict"
     dependent = KeyedOp("dependent", mode)
     independent = KeyedOp("independent")
     root = KeyedOp("root", dependent, independent, cacheable=False)
@@ -178,11 +179,10 @@ def test_recomputed_ops_and_their_dependents_are_never_reused():
 
     apply_reuse_cache(root, cache)
 
-    assert is_recomputed(mode) and mode not in cacheable_region(ops)
+    assert mode not in cacheable_region(ops)
     assert mode.cache_hit is None and dependent.cache_hit is None
     assert mode.cache_key is None and dependent.cache_key is None
     assert hits(ops) == [independent]
-    assert linearize_dag(root)[2] == [mode]
 
 
 def test_constants_are_keyed_but_not_admitted():
@@ -301,8 +301,8 @@ def plan_for(dag, cache=None, backend="pandas"):
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_cold_cache_flags_only_eligible_ops_before_the_split(csv_path, backend):
     cache = ReuseCache()
-    plan, split_pos, flagged = plan_for(model(csv_path), cache, backend)
-    assert split_pos is not None and not flagged and not hits(plan)
+    plan, split_pos = plan_for(model(csv_path), cache, backend)
+    assert split_pos is not None and not hits(plan)
     assert cacheable_region(plan) == set(plan[:split_pos])
     keys = compute_lineage_keys(plan, cacheable_region(plan))
     expected = {op for op in plan if keys[op] is not None and not isinstance(op, ValueOp)}
@@ -313,17 +313,17 @@ def test_cold_cache_flags_only_eligible_ops_before_the_split(csv_path, backend):
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_optimizer_preserves_split_inputs_and_pins_hits(csv_path, backend):
     cache = ReuseCache()
-    plan, split_pos, _ = plan_for(model(csv_path), cache, backend)
+    plan, split_pos = plan_for(model(csv_path), cache, backend)
     x_op = plan[split_pos].inputs[0]
     cache.put(x_op.cache_key, "X-result")
-    warm, split_pos, flagged = plan_for(model(csv_path), cache, backend)
+    warm, split_pos = plan_for(model(csv_path), cache, backend)
     [hit] = hits(warm)
     split = warm[split_pos]
     assert type(hit) is type(x_op) and str(hit) == str(x_op)
     assert split.inputs[0] is hit and hit.outputs == [split] and hit.inputs == []
     assert split.inputs[1].cache_hit is None
     assert hit.cache_key is None and hit.cache_hit.key == x_op.cache_key
-    assert hit in compute_pinned_ops(warm, split_pos, flagged)
+    assert hit in compute_pinned_ops(warm, split_pos)
     assert all(hit not in op.remove_after for op in warm)
     assert_graph(warm[-1], warm)
 
@@ -331,17 +331,17 @@ def test_optimizer_preserves_split_inputs_and_pins_hits(csv_path, backend):
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_a_whole_plan_hit_becomes_a_single_source(csv_path, backend):
     cache = ReuseCache()
-    plan, _, _ = plan_for(features(csv_path), cache, backend)
+    plan, _ = plan_for(features(csv_path), cache, backend)
     assert cacheable_region(plan) == set(plan)
     cache.put(plan[-1].cache_key, "features")
-    warm, split_pos, flagged = plan_for(features(csv_path), cache, backend)
-    assert len(warm) == 1 and split_pos is None and flagged == []
+    warm, split_pos = plan_for(features(csv_path), cache, backend)
+    assert len(warm) == 1 and split_pos is None
     assert warm[0].remove_after == [] and warm[0].cache_hit.take() == "features"
 
 
 def test_changing_the_backend_or_configuration_invalidates_the_hit(csv_path):
     cache = ReuseCache()
-    plan, _, _ = plan_for(features(csv_path), cache)
+    plan, _ = plan_for(features(csv_path), cache)
     cache.put(plan[-1].cache_key, "features")
     assert hits(plan_for(features(csv_path), cache)[0])
     assert not hits(plan_for(features(csv_path), cache, backend="polars")[0])
@@ -353,14 +353,14 @@ def test_changing_the_backend_or_configuration_invalidates_the_hit(csv_path):
 
 def test_a_model_edit_keeps_reuse_before_the_split(csv_path):
     cache = ReuseCache()
-    plan, split_pos, _ = plan_for(model(csv_path), cache)
+    plan, split_pos = plan_for(model(csv_path), cache)
     x_op = plan[split_pos].inputs[0]
     cache.put(x_op.cache_key, "X-result")
-    edited, split_pos, _ = plan_for(model(csv_path, alpha=2.0), cache)
+    edited, split_pos = plan_for(model(csv_path, alpha=2.0), cache)
     assert edited[split_pos].inputs[0].cache_hit.key == x_op.cache_key
     assert all(op.cache_key is None and op.cache_hit is None for op in edited[split_pos:])
 
 
 def test_without_an_explicit_cache_the_optimizer_does_not_plan_reuse(csv_path):
-    plan, _, _ = plan_for(features(csv_path))
+    plan, _ = plan_for(features(csv_path))
     assert all(op.cache_key is None and op.cache_hit is None for op in plan)

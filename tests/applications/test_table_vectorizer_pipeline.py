@@ -160,7 +160,8 @@ def test_table_vectorizer_pipeline_scores_end_to_end_for_each_selector(
             ):
                 ops, *_ = optimize(pipeline, env=pipeline.skb.get_data())
 
-                table_ops = [op for op in ops if isinstance(op, TableVectorizerOp)]
+                table_ops = [op for op in ops
+                             if isinstance(op, TableVectorizerOp) and op.produces_state]
                 assert len(table_ops) == 1
                 table_op = table_ops[0]
                 supports_low = supports_rust_one_hot_encoder(

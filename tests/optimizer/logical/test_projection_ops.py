@@ -245,37 +245,26 @@ class TestColumnSelectorProcess(unittest.TestCase):
     def test_fit_resolves_and_selects_pandas(self):
         op = ColumnSelectorOp(selector=selectors.numeric())
         result = run_op(op, pd.DataFrame({"a": [1.0], "s": ["x"]}))
-        self.assertEqual(["a"], list(result.columns))
-        self.assertEqual(["a"], op.selected_columns)
+        self.assertEqual(["a"], list(result.output.columns))
+        self.assertEqual(["a"], result.state)
+        self.assertFalse(hasattr(op, "selected_columns"))
 
     def test_predict_reuses_stored_columns(self):
         # A new numeric column appearing at predict time is NOT picked up: the
         # fit-time resolution is what transforms (SelectCols semantics).
         op = ColumnSelectorOp(selector=selectors.numeric())
-        run_op(op, pd.DataFrame({"a": [1.0], "s": ["x"]}))
-        result = run_op(op, pd.DataFrame({"a": [2.0], "b": [3.0], "s": ["y"]}),
-                        mode="predict")
+        fitted = run_op(op, pd.DataFrame({"a": [1.0], "s": ["x"]}))
+        response = ColumnSelectorOp(selector=selectors.numeric())
+        response.state_ref = OperandRef(1)
+        result = run_op(response, pd.DataFrame({"a": [2.0], "b": [3.0], "s": ["y"]}),
+                        fitted.state, mode="transform")
         self.assertEqual(["a"], list(result.columns))
-
-    def test_predict_before_fit_raises(self):
-        op = ColumnSelectorOp(selector=selectors.numeric())
-        with self.assertRaises(RuntimeError):
-            run_op(op, pd.DataFrame({"a": [1.0]}), mode="predict")
 
     def test_polars(self):
         op = ColumnSelectorOp(selector=selectors.numeric())
         with force_polars():
             result = run_op(op, pl.DataFrame({"a": [1.0], "s": ["x"]}))
-        self.assertEqual(["a"], result.columns)
-
-    def test_clone_resets_resolution(self):
-        # Cloning happens in the logical phase (choice unrolling), before impl
-        # selection; a cloned ColumnSelectorOp is a fresh logical op that carries
-        # no resolved column list.
-        op = ColumnSelectorOp(selector=selectors.numeric())
-        op.selected_columns = ["a"]  # even if the original were somehow resolved
-        self.assertIsNone(getattr(op.clone(), "selected_columns", None))
-
+        self.assertEqual(["a"], result.output.columns)
 
 class TestDropTargetsColumns(unittest.TestCase):
     """Which axis a ``drop`` call works on decides its logical family."""

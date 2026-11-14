@@ -71,8 +71,9 @@ def test_count_vectorizer_pipeline_selects_and_scores_both_backends(monkeypatch,
         ):  # Set True to print the physical plan.
             pipeline = _pipeline()
             ops, *_ = optimize(pipeline, env=pipeline.skb.get_data())
-            (vectorizer,) = [op for op in ops if isinstance(op, CountVectorizerOp)]
-            assert type(vectorizer) is expected
+            vectorizers = [op for op in ops if isinstance(op, CountVectorizerOp)]
+            assert sorted(op.mode for op in vectorizers) == ["fit_transform", "transform"]
+            assert all(type(op) is expected for op in vectorizers)
             captured_output = io.StringIO()
             with redirect_stdout(captured_output):
                 search = pipeline.skb.make_grid_search(

@@ -1024,7 +1024,7 @@ class TestPowByOne(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertIs(out[1].type, NumericOpType.LOG)
         self.assertIs(out[2].type, NumericOpType.SQUARE)
-        self.assertEqual(out[2].process("fit", [out[1].process("fit", [out[0].value])]),
+        self.assertEqual(out[2].process(out[2].mode, [out[1].process("fit", [out[0].value])]),
                          np.log(2.0) ** 2)
 
     def test_self_multiply_cubed_only_folds_once(self):
@@ -1051,7 +1051,7 @@ class TestPowByOne(unittest.TestCase):
         out, *_ = optimize(df * df)
         self.assertIs(out[-1].type, NumericOpType.SQUARE)
         # A frame source lowers to an in-memory source op, so read it via process().
-        result = out[-1].process("fit", [out[0].process("fit", [])])
+        result = out[-1].process(out[-1].mode, [out[0].process("fit", [])])
         assert_frame_equal(result, pd.DataFrame({"a": [1.0, 4.0], "b": [9.0, 16.0]}))
 
     def test_other_self_operations_not_rewritten(self):
@@ -1117,7 +1117,7 @@ class TestPowByOne(unittest.TestCase):
         out, *_ = optimize((df * df) + 3)
         self.assertEqual(len(out), 3)
         self.assertEqual(out[1].type, NumericOpType.SQUARE)
-        self.assertEqual(out[2].process("fit", [out[1].process("fit", [out[0].value])]), 28)
+        self.assertEqual(out[2].process(out[2].mode, [out[1].process("fit", [out[0].value])]), 28)
 
     def test_self_multiply_then_sqrt_is_abs(self):
         """sqrt(x * x) → sqrt(square(x)) → abs(x): composes with sqrt_square."""

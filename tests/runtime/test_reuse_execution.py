@@ -5,12 +5,14 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+from sklearn.linear_model import Ridge
 
 import stratum as st
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import OptConfig, SearchConfig, optimize
 from stratum.optimizer.physical.rewrites._reuse_planning import CacheHit
 from stratum.optimizer.logical._scoring import resolve_scoring
+from stratum.optimizer.logical._ops import PredictorOp
 from stratum.optimizer.physical._impl_selection import FlagBasedSelector
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.runtime import _buffer_pool, _scheduler
@@ -57,6 +59,7 @@ def assert_equal(actual, expected):
 
 def assert_released(scheduler, directory):
     assert scheduler.pool.active_count == 0 and scheduler.pool.memory_usage == 0
+    assert not scheduler.state_store
     assert not directory.exists() or not list(directory.iterdir())
 
 
@@ -128,6 +131,47 @@ def test_model_edits_reuse_features_and_fit_the_new_model(csv_path):
     changed = scheduler_for(model(csv_path, alpha=2.0), cache)
     assert hits(changed.linearized_dag)
     assert_equal(changed.evaluate(), expected)
+
+
+def test_full_data_predictions_are_cached_without_caching_fitted_state(csv_path):
+    def pipeline():
+        data = features(csv_path)
+        return data[["a", "b"]].skb.apply(Ridge(), y=data["y"], no_wrap=True)
+
+    cache = ReuseCache()
+    cold = scheduler_for(pipeline(), cache)
+    assert cold.pos_split_op is None
+    fit, predict = [op for op in cold.linearized_dag if isinstance(op, PredictorOp)]
+    assert fit.mode == "fit" and fit.cache_key is None
+    assert predict.mode == "predict" and predict.cache_key is not None
+    expected = cold.evaluate()
+
+    warm = scheduler_for(pipeline(), cache)
+    assert not any(op.produces_state for op in warm.linearized_dag)
+    assert hits(warm.linearized_dag)
+    assert_equal(warm.evaluate(), expected)
+
+
+def test_a_cached_fit_output_does_not_replace_required_state(csv_path):
+    from sklearn.preprocessing import StandardScaler
+    from stratum.optimizer._lineage import compute_lineage_keys
+    from stratum.optimizer.physical.rewrites._reuse_planning import apply_reuse_cache, cacheable_region
+    from stratum.optimizer.physical.rewrites._lifetime_planning import plan_input_removals
+    from stratum.optimizer.physical.rewrites._linearization import linearize_dag
+
+    data = features(csv_path)
+    dag = data[["a", "b"]].skb.apply(StandardScaler()).skb.apply(Ridge(), y=data["y"])
+    plan, split_pos = plan_for(dag)
+    fit = next(op for op in plan if isinstance(op, PredictorOp) and op.produces_state)
+    cache = ReuseCache()
+    keys = compute_lineage_keys(plan, cacheable_region(plan))
+    cache.put(keys[fit], None)
+    apply_reuse_cache(plan[-1], cache)
+    assert fit.cache_hit is None and fit.cache_key is None
+    plan, split_pos = linearize_dag(plan[-1])
+    plan_input_removals(plan, set())
+    actual = SequentialScheduler(plan, split_pos, reuse_cache=cache).evaluate()
+    assert_equal(actual, scheduler_for(dag).evaluate())
 
 
 @pytest.mark.parametrize("after_loading", [False, True])
@@ -249,7 +293,7 @@ def test_cache_and_pool_share_values_with_read_only_consumers(value):
 
         sink.process = read
         # A hit can also run without a cache to write to.
-        sched = SequentialScheduler([source, sink], None, [], reuse_cache=None if warm else cache)
+        sched = SequentialScheduler([source, sink], None, reuse_cache=None if warm else cache)
         try:
             with patch.object(_scheduler, "_copy_result", side_effect=AssertionError("copied")):
                 sched.process_op(source)
@@ -264,21 +308,21 @@ def test_cache_and_pool_share_values_with_read_only_consumers(value):
 
 def test_execution_without_reuse_returns_its_original_result():
     value = np.arange(3)
-    assert SequentialScheduler([ResultOp(value)], None, []).evaluate() is value
+    assert SequentialScheduler([ResultOp(value)], None).evaluate() is value
 
 
 def test_nested_results_are_isolated_when_returned_to_callers():
     value = {"arrays": [np.arange(3)], "options": {"x": [1, 2]}}
     expected = {"arrays": [np.arange(3)], "options": {"x": [1, 2]}}
     cache = ReuseCache()
-    cold = SequentialScheduler([ResultOp(value, "nested")], None, [], reuse_cache=cache)
+    cold = SequentialScheduler([ResultOp(value, "nested")], None, reuse_cache=cache)
     result = cold.evaluate()
     result["arrays"][0][:] = -1
     result["options"]["x"].append(3)
     for _ in range(2):
         op = ResultOp(None)
         op.cache_hit = CacheHit("nested", cache.get("nested"))
-        actual = SequentialScheduler([op], None, []).evaluate()
+        actual = SequentialScheduler([op], None).evaluate()
         assert_equal(actual["arrays"][0], expected["arrays"][0])
         assert actual["options"] == expected["options"]
         actual["arrays"][0][:] = -1
@@ -287,10 +331,10 @@ def test_nested_results_are_isolated_when_returned_to_callers():
 
 def test_a_cached_none_is_consumed_without_execution():
     cache = ReuseCache()
-    assert SequentialScheduler([ResultOp(None, "none")], None, [], reuse_cache=cache).evaluate() is None
+    assert SequentialScheduler([ResultOp(None, "none")], None, reuse_cache=cache).evaluate() is None
     op = ResultOp("must not execute")
     op.cache_hit = CacheHit("none", cache.get("none"))
-    assert SequentialScheduler([op], None, []).evaluate() is None
+    assert SequentialScheduler([op], None).evaluate() is None
 
 
 @pytest.mark.parametrize("kind", ["frame", "series", "array", "nested-frame",
@@ -318,13 +362,13 @@ def test_mutable_objects_inside_values_cannot_change_the_cache(kind):
         value[:] = [[1], [2]]
         cell = lambda result: result[0]
     cache = ReuseCache()
-    cold = SequentialScheduler([ResultOp(value, "objects")], None, [], reuse_cache=cache)
+    cold = SequentialScheduler([ResultOp(value, "objects")], None, reuse_cache=cache)
     cell(cold.evaluate()).append(99)
     assert cell(cache.get("objects")) == [1]
     for _ in range(2):
         op = ResultOp(None)
         op.cache_hit = CacheHit("objects", cache.get("objects"))
-        warm = SequentialScheduler([op], None, []).evaluate()
+        warm = SequentialScheduler([op], None).evaluate()
         assert cell(warm) == [1]
         cell(warm).append(99)
     assert cell(cache.get("objects")) == [1]
@@ -334,7 +378,7 @@ def test_grid_search_detaches_predictions_stored_in_object_cells():
     value = np.arange(3)
     table = pl.DataFrame({"id": ["candidate"],
                           "vals": pl.Series("vals", [value], dtype=pl.Object)})
-    sched = SequentialScheduler([], None, [], reuse_cache=ReuseCache())
+    sched = SequentialScheduler([], None, reuse_cache=ReuseCache())
     sched._grid_search = Mock(return_value=[table])
     result = sched.grid_search()[0]
     np.testing.assert_array_equal(result["vals"][0], value)
@@ -345,7 +389,7 @@ def test_grid_search_detaches_predictions_stored_in_object_cells():
 def test_admission_never_reloads_a_spilled_output(spill_directory):
     cache = ReuseCache()
     op = ResultOp(np.arange(10), "array")
-    sched = SequentialScheduler([op], None, [], reuse_cache=cache)
+    sched = SequentialScheduler([op], None, reuse_cache=cache)
     sched.pool.memory_budget = 1
     with patch.object(_buffer_pool, "deserialize_object", side_effect=AssertionError("reloaded")):
         sched.process_op(op)
@@ -391,5 +435,5 @@ def test_constructor_failure_cleans_up_hits_already_loaded(spill_directory, monk
     consumed.cache_hit.take()
     monkeypatch.setattr(_buffer_pool, "_resolve_memory_budget", lambda fraction: 1)
     with pytest.raises(RuntimeError, match="already consumed"):
-        SequentialScheduler([first, consumed], None, [])
+        SequentialScheduler([first, consumed], None)
     assert not list(spill_directory.iterdir())

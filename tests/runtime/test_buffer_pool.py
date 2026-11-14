@@ -257,7 +257,8 @@ class TestBufferPoolIntegration(RuntimeTest):
                     search = pred.skb.make_grid_search(cv=2, scoring="neg_mean_squared_error")
         self.assertIsNotNone(search)
         evictions = [line for line in logs.output if "Evicted" in line]
-        self.assertEqual(len(evictions), 12, msg="\n".join(logs.output))
+        # A fold holds its training and its test rows' buffers in one pass.
+        self.assertEqual(len(evictions), 16, msg="\n".join(logs.output))
 
 
 class TestLRUEviction(unittest.TestCase):

@@ -14,7 +14,7 @@ from sklearn.base import BaseEstimator
 from skrub._data_ops._choosing import BaseChoice, Choice, DiscretizedNumericChoice, Match
 from skrub._data_ops._data_ops import (
     Apply, BinOp as SkrubBinOp, Call, CallMethod, Concat, DataOp, GetAttr,
-    GetItem, Scoring, SplitX, UnaryOp as SkrubUnaryOp, Value, Var,
+    FreezeAfterFit, GetItem, Scoring, SplitX, UnaryOp as SkrubUnaryOp, Value, Var,
 )
 from skrub._data_ops._subsampling import SubsamplePreviews
 from skrub._data_ops._utils import NULL
@@ -215,8 +215,8 @@ def _bind_operand(binder: OperandBinder, value) -> OperandRef:
     return bound if isinstance(bound, OperandRef) else binder.ref_op(ValueOp(bound))
 
 
-# Method groups reachable from stratum's two execution modes: which of the two a
-# group belongs to depends on the estimator kind (see BaseEstimatorOp subclasses).
+# Method-argument groups supported during fitting or response evaluation.
+# Applicable groups depend on the estimator kind (see BaseEstimatorOp subclasses).
 _EXECUTABLE_KWARGS_KEYS = frozenset({"fit", "fit_transform", "transform"}) | RESPONSE_MODES
 # Groups skrub routes to a method stratum never calls. Ignoring them would change
 # results, so they are rejected. Searches use an explicit metric rather than
@@ -232,12 +232,9 @@ def _bind_apply_kwargs(binder: OperandBinder, estimator_class, estimator,
     Dropping the empty ones keeps the op's config (and therefore its CSE key)
     down to the groups that carry something.
 
-    Every remaining group is bound, including one this estimator kind will never
-    call (a transformer is fitted through ``fit_transform``, so its ``fit`` group
-    is dead in skrub too). Graph extraction already reported the DataOps inside
-    each group as children of the Apply node, so a group left unbound leaves those
-    ops in the DAG with no consumer. Topological traversal rejects those
-    dangling output edges.
+    Bind all remaining groups, including unused groups such as a transformer's
+    ``fit`` kwargs. Graph extraction includes their DataOps as dependencies;
+    binding preserves edge consistency until stage-specific input pruning.
     """
     bound = {}
     for method, group in (kwargs or {}).items():
@@ -736,6 +733,8 @@ def as_op(data_op: DataOp, ids_to_ops: dict, env: dict | None = None, feeds_esti
         axis = _bind_or_value(binder, impl.axis)
         return_op = ConcatOp(operands=operands, axis=axis)
         return_op.inputs = binder.inputs
+    elif isinstance(impl, FreezeAfterFit):
+        raise NotImplementedError("`.skb.freeze_after_fit()` is not supported by stratum.")
     else:
         for field_name in impl._fields:
             for child in _collect_child_data_ops(getattr(impl, field_name)):

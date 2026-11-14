@@ -97,7 +97,7 @@ def test_remaining_parameter_y_and_kwargs_refs_are_renumbered():
     assert root.y == OperandRef(2)
     assert root.kwargs["fit"]["sample_weight"] == OperandRef(3)
     frame = pd.DataFrame({"a": [1.0, 2.0, 4.0]})
-    args = root.extract_args_from_inputs("fit_transform", [frame, False, frame["a"], np.ones(3)])
+    args = root.extract_args_from_inputs(root.mode, [frame, False, frame["a"], np.ones(3)])
     assert args[0].alpha == 2.0 and args[0].fit_intercept is False
     validate_dag(root)
 

@@ -59,10 +59,12 @@ def test_standard_scaler_pipeline_selects_and_scores_both_backends(monkeypatch, 
         ):  # Set True to print the physical plan.
             pipeline = _pipeline(wrapped)
             ops, *_ = optimize(pipeline, env=pipeline.skb.get_data())
-            (scaler,) = [op for op in ops if isinstance(op, StandardScalerOp)]
-            assert type(scaler) is expected
-            if selector == "greedy":
-                assert scaler.original_estimator._stratum_worker_budget == 2
+            scalers = [op for op in ops if isinstance(op, StandardScalerOp)]
+            assert sorted(op.mode for op in scalers) == ["fit_transform", "transform"]
+            for scaler in scalers:
+                assert type(scaler) is expected
+                if selector == "greedy":
+                    assert scaler.original_estimator._stratum_worker_budget == 2
             captured_output = io.StringIO()
             with redirect_stdout(captured_output):
                 search = pipeline.skb.make_grid_search(

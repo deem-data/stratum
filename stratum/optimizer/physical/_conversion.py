@@ -100,6 +100,7 @@ def _index_origin(op: IRNode, memo: dict):
 
 def _common_origin(op: IRNode, memo: dict):
     """Elementwise op: differing origins align on a label union (new origin)."""
-    origins = {index_origin(i, memo) for i in op.inputs
-               if i.output_type in FRAME_TYPES or i.output_type.name == "UNKNOWN"}
+    origins = {index_origin(i, memo) for k, i in enumerate(op.inputs)
+               if (i.output_type in FRAME_TYPES or i.output_type.name == "UNKNOWN")
+               and not op.reads_state(k)}
     return origins.pop() if len(origins) == 1 else id(op)

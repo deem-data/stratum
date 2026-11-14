@@ -81,10 +81,9 @@ def _execute(dag, env, t0, execute, search=None):
             profiler.reuse_cache_attached(cache)
         profiler.optimization_started()
     optimize_start = perf_counter()
-    linearized_dag, split_pos, flagged_ops = optimize(dag, env=env, search=search,
-                                                    reuse_cache=cache)
+    linearized_dag, split_pos = optimize(dag, env=env, search=search, reuse_cache=cache)
     optimize_end = perf_counter()
-    sched = SequentialScheduler(linearized_dag, split_pos, flagged_ops, FLAGS.stats, t0=t0,
+    sched = SequentialScheduler(linearized_dag, split_pos, FLAGS.stats, t0=t0,
                                 reuse_cache=cache)
     if profiling:
         profiler.execution_started(sched)

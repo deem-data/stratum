@@ -1,8 +1,9 @@
 """Stable lineage keys for operator results.
 
 A lineage key hashes an op's concrete implementation class, output frame library,
-configuration and input keys in operand order. Unlike the identity-based structure
-keys used by CSE, it is stable across processes with the same code and libraries.
+execution mode, configuration, state-input position and input keys in operand
+order. Unlike CSE's identity-based structure keys, it is stable across processes
+with the same code and libraries.
 
 An op opts in with ``cacheable = True`` and supplies plain configuration values
 through ``IRNode.lineage_config()``. Unsupported operators or values raise
@@ -209,6 +210,9 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     enc.raw(b"op", f"{cls.__module__}.{cls.__qualname__}".encode())
     lib = getattr(op, "_frame_lib", None)
     enc.encode(None if lib is None else str(lib))
+    # Responses and fitting can share an implementation and configuration.
+    enc.encode(op.mode)
+    enc.encode(None if op.state_ref is None else op.state_ref.k)
     enc.encode(op.lineage_config())
     enc._str(str(len(input_keys)))
     for key in input_keys:

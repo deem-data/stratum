@@ -14,7 +14,7 @@ import polars as pl
 
 from stratum.optimizer.logical import _schema
 from stratum.optimizer.logical._base import OutputType, _resolve_operand, clone_value
-from stratum.optimizer.logical._ops import FITTING_MODE, Op, OperandRef
+from stratum.optimizer.logical._ops import Op, OperandRef
 from stratum.optimizer.logical._scoring import Metric, read_response
 
 import logging
@@ -96,10 +96,10 @@ class CollectCandidatesOp(CandidateSetOp):
 class ScoreCandidatesOp(CandidateSetOp):
     """Score each candidate against the test fold, one row per candidate.
 
-    Inputs are the candidate tails followed by the fold's ``y``, as ``mark_as_y``
-    produced it, addressed by ``y_ref``. ``response_mode`` is the method the pass ran, so
-    it names what the candidate values are -- predictions, probabilities, or a decision
-    function -- and the metric reads them directly.
+    Inputs include candidate outputs and the test labels addressed by ``y_ref``.
+    ``response_mode`` identifies the response method selected for test rows during
+    train/test unrolling. The metric consumes the resulting predictions,
+    probabilities or decision-function values directly.
     """
 
     logical_family = "ScoreCandidates"
@@ -123,8 +123,8 @@ class ScoreCandidatesOp(CandidateSetOp):
     def propagate_output_schema(self):
         """Describe scoring results: candidate name, score, and optional predictions.
 
-        There is one row per candidate. During fitting, ``process`` returns
-        ``None`` because scoring uses held-out test data.
+        There is one row per candidate. Scoring runs on test rows only;
+        the training copy has no candidate set.
         """
         # candidate_names are strings and Metric returns a float; the values are
         # whatever the candidate produced (array / frame / series), so untyped.
@@ -142,9 +142,6 @@ class ScoreCandidatesOp(CandidateSetOp):
         return new_op
 
     def process(self, mode: str, inputs: list):
-        if mode == FITTING_MODE:
-            # Score held-out test data only; the fitting pass has no score output.
-            return None
         y_true = inputs[self.y_ref.k]
         ids, scores, values = [], [], []
         for i, name in enumerate(self.candidate_names):

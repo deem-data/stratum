@@ -43,4 +43,4 @@ def test_generic_transformer_lowers_in_place():
     lowered.output_type = OutputType.FRAME
     assert " [df]" not in str(lowered)
     result = lowered.process("fit_transform", [pd.DataFrame({"x": [1.0, 2.0]})])
-    assert result.shape == (2, 1)
+    assert result.output.shape == (2, 1)

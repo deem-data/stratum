@@ -15,7 +15,8 @@ from ._explain import explain_linear_plan
 from .logical.rewrites._algebraic_rewrites import algebraic_rewrites, AlgebraicRewritesConfig
 from .logical.rewrites._relational_rewrites import relational_rewrites
 from .physical.rewrites._linearization import linearize_dag
-from .physical.rewrites._dead_code_elimination import mark_dead_ops_during_fit
+from .physical.rewrites._train_test_unrolling import unroll_train_test
+from .physical.rewrites._dead_code_elimination import eliminate_dead_code
 from .physical.rewrites._lifetime_planning import compute_pinned_ops, plan_input_removals
 from .physical.rewrites._reuse_planning import apply_reuse_cache
 from .physical._plan_context import PlanContext
@@ -120,8 +121,7 @@ def _debug_validate_dag(root: Op):
 
 def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
              search: SearchConfig | None = None, reuse_cache: "ReuseCache | None" = None):
-    """Entry point for the optimizer. Runs the three planning phases and returns
-    the linearized physical plan ``(linearized_dag, split_pos, flagged_ops)``.
+    """Runs the three planning phases and returns ``(linearized_dag, split_pos)``.
 
     The steps are:
 
@@ -129,10 +129,10 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
        IR and run all backend-agnostic rewrites (extraction, CSE, choice
        unrolling, algebraic rewrites).
     2. :func:`~stratum.optimizer.physical._lowering.lower_to_physical` -- lower
-       logical ops to physical ops (one logical op may become several).
-    3. :func:`physical_optimize` -- select a concrete implementation per
-       physical op, optionally prune work found in ``reuse_cache``, then linearize
-       and plan intermediate lifetimes.
+       logical operators to registered physical operator families.
+    3. :func:`physical_optimize` -- select implementations, unroll train/test,
+       eliminate dead code and optionally prune work found in ``reuse_cache``,
+       then linearize and plan intermediate lifetimes.
 
     ``env`` (variable name -> value), when supplied, lets the converter resolve
     variables to compile-time constants (ValueOps) instead of VariableOps. ``search``,
@@ -159,10 +159,14 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
 
     # Step 3: physical optimization (implementation selection + linearization).
     # TODO: May need physical-level rewrites before or after operator selection
-    result = physical_optimize(root, ctx, selector=config.selector, reuse_cache=reuse_cache)
+    selector = config.selector
+    if selector is None:
+        selector = get_implementation_selector(ctx.implementation_selector)
+    linearized_dag, split_pos = physical_optimize(
+        root, ctx, selector=selector, reuse_cache=reuse_cache)
 
     log_time("Optimization took in total", start)
-    return result
+    return linearized_dag, split_pos
 
 
 def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
@@ -234,18 +238,26 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 def physical_optimize(root: Op, ctx: PlanContext, registry=None,
                       selector: ImplementationSelector | None = None,
                       reuse_cache: "ReuseCache | None" = None):
-    """Step 3: select implementations, plan reuse, then linearize and plan lifetimes.
-    Implementation selection resolves each op with registered candidates to a
-    concrete implementation (consulting the default PhysicalRegistry unless one
-    is injected). An explicit cache supplies hits and admission keys before
-    linearization, so lifetime planning and dead code elimination see the
-    pruned graph."""
+    """Select implementations, unroll train/test, eliminate dead code, then plan
+    reuse, execution order and lifetimes.
+
+    Unrolling copies selected implementations so train and test stages share the
+    same backend. An explicit cache supplies hits and admission keys before
+    linearization, so lifetime planning sees the pruned graph.
+    """
 
     # TODO: add physical rewrites here (or afterwards)
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
     root = select_implementations(root, ctx, registry=registry, selector=selector)
+    # TODO: Revisit this order when stage-specific costs justify independent
+    # train/test implementation choices. Selection after unrolling must enforce
+    # fitted-state compatibility; fold recompilation needs stable stage identities
+    # to attribute profiling measurements across compilations.
+    root = unroll_train_test(root)
+    root = eliminate_dead_code(root)
     _debug_validate_dag(root)
+    _debug_show_graph(root, "train_test_unrolled")
     if reuse_cache is not None:
         apply_reuse_cache(root, reuse_cache)
         _debug_validate_dag(root)
@@ -253,15 +265,14 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
     # Parallel execution planning could also run here, before linearization.
 
     # Linearize and plan intermediate retention and releases.
-    linearized_dag, split_pos, flagged_ops = linearize_dag(root)
-    pinned_ops = compute_pinned_ops(linearized_dag, split_pos, flagged_ops)
+    linearized_dag, split_pos = linearize_dag(root)
+    pinned_ops = compute_pinned_ops(linearized_dag, split_pos)
     plan_input_removals(linearized_dag, pinned_ops)
-    mark_dead_ops_during_fit(linearized_dag, split_pos, flagged_ops)
 
     if diagnostics_enabled():
-        capture_plan("physical_impl", linearized_dag, split_pos, flagged_ops)
+        capture_plan("physical_impl", linearized_dag, split_pos)
     _debug_explain_linear_plan("physical_impl", linearized_dag, split_pos)
-    return linearized_dag, split_pos, flagged_ops
+    return linearized_dag, split_pos
 
 
 def run_op_cse_pass(root: Op) -> Op:

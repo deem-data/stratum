@@ -1,8 +1,9 @@
 """Reuse cached results before the split and flag eligible results for admission.
 
 Runs after implementation selection and before linearization. Keys cover the
-selected implementation and its ordered inputs. The split and its descendants,
-plus operators recomputed each pass, cannot supply reusable results here.
+selected implementation, execution mode and ordered data/state inputs. Reuse
+excludes the split and its descendants, plus sources outside the fitting mode.
+Operators with live state consumers execute even if their data output is cached.
 
 Starting at the root, a hit cuts off the work needed only by that operator. Its
 value is retained by the plan so cache eviction cannot invalidate the plan.
@@ -17,9 +18,8 @@ from typing import TYPE_CHECKING, Any
 
 from stratum._profiler._diagnostics import current_diagnostics, record_reuse_plan
 from stratum.optimizer._lineage import compute_lineage_keys
-from stratum.optimizer.physical.rewrites._linearization import is_recomputed
 from stratum.optimizer._op_utils import topological_iterator
-from stratum.optimizer.logical._base import IRNode
+from stratum.optimizer.logical._base import FITTING_MODE, IRNode
 from stratum.optimizer.logical._ops import ValueOp
 
 if TYPE_CHECKING:
@@ -58,13 +58,14 @@ def post_split_region(ops: list[IRNode]) -> set[IRNode]:
 
 
 def cacheable_region(ops: list[IRNode]) -> set[IRNode]:
-    """Operators outside the split region that are not recomputed each pass.
+    """Full-data fitting, preprocessing and explicit fitted-state responses.
 
     Whether their configuration and inputs can be keyed is checked separately by
     compute_lineage_keys, which also blocks descendants of unkeyed inputs.
     """
     post_split = post_split_region(ops)
-    return {op for op in ops if op not in post_split and not is_recomputed(op)}
+    return {op for op in ops if op not in post_split
+            and (op.mode in ("fit", FITTING_MODE) or op.state_ref is not None)}
 
 
 def apply_reuse_cache(root: IRNode, cache: ReuseCache) -> None:
@@ -87,7 +88,7 @@ def apply_reuse_cache(root: IRNode, cache: ReuseCache) -> None:
     remaining = list(topological_iterator(root))
     for op in remaining:
         if (keys.get(op) is not None and op.cache_hit is None
-                and not isinstance(op, ValueOp)):
+                and not isinstance(op, ValueOp) and not op.has_state_reader()):
             op.cache_key = keys[op]
             admitted += 1
     if reasons is not None:
@@ -106,7 +107,9 @@ def _take_cached(root: IRNode, keys: dict, cache: ReuseCache) -> int:
             continue
         seen.add(op)
         key = keys.get(op)
-        if key is not None:
+        # The cache contains data outputs, not fitted state. State producers must
+        # execute unless a downstream cache hit prunes their entire computation.
+        if key is not None and not op.has_state_reader():
             # One atomic lookup: an entry can be evicted at any time, and None
             # is a valid cached result. The returned reference belongs to us.
             value = cache.get(key, _MISS)
