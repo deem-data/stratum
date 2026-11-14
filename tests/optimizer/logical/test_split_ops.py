@@ -8,9 +8,7 @@ from .test_dataframe_ops import _inp, _inputs_for
 
 class TestSplitOp(unittest.TestCase):
     def _make(self, x, y, indices):
-        op = SplitOp(inputs=[_inp(x), _inp(y)])
-        op.indices = indices
-        return op
+        return SplitOp(inputs=[_inp(x), _inp(y), _inp(indices)])
 
     def test_polars(self):
         op = self._make(pl.DataFrame({"a": [10, 20, 30]}),

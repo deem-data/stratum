@@ -258,7 +258,8 @@ class TestBufferPoolIntegration(RuntimeTest):
         self.assertIsNotNone(search)
         evictions = [line for line in logs.output if "Evicted" in line]
         # A fold holds its training and its test rows' buffers in one pass.
-        self.assertEqual(len(evictions), 16, msg="\n".join(logs.output))
+        # Its index pair is released as soon as the split has produced those rows.
+        self.assertEqual(len(evictions), 12, msg="\n".join(logs.output))
 
 
 class TestLRUEviction(unittest.TestCase):

@@ -16,7 +16,7 @@ from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.logical._candidate_ops import CollectCandidatesOp
 from stratum.optimizer.logical._ops import BaseEstimatorOp, ImplOp, PredictorOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
-from stratum.optimizer.logical._split_ops import SplitOutput, add_splitting_op
+from stratum.optimizer.logical._split_ops import SplitIndicesOp, SplitOutput, add_splitting_op
 from stratum.optimizer.physical.rewrites._dead_code_elimination import eliminate_dead_code
 from stratum.optimizer.physical.rewrites._train_test_unrolling import unroll_train_test
 from stratum.optimizer.physical._conversion import ConversionOp
@@ -62,6 +62,9 @@ def test_estimators_fit_on_train_rows_and_predict_on_test_rows(frame):
     # Everything after the split runs once per fold, so all of it follows the split.
     assert all(op.train is not None for op in plan[split_pos + 1:])
     assert all(op.train is None for op in plan[:split_pos + 1])
+    indices, = [op for op in plan if isinstance(op, SplitIndicesOp)]
+    assert indices in plan[:split_pos]
+    assert plan[split_pos].indices is indices
     sides = {(op.is_x, op.train) for op in plan if isinstance(op, SplitOutput)}
     # A predict stage does not read y, and no scorer does here.
     assert sides == {(True, True), (False, True), (True, False)}

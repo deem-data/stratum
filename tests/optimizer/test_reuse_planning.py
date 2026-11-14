@@ -320,7 +320,8 @@ def test_optimizer_preserves_split_inputs_and_pins_hits(csv_path, backend):
     [hit] = hits(warm)
     split = warm[split_pos]
     assert type(hit) is type(x_op) and str(hit) == str(x_op)
-    assert split.inputs[0] is hit and hit.outputs == [split] and hit.inputs == []
+    assert split.inputs[0] is hit and set(hit.outputs) == {split, split.indices}
+    assert hit.inputs == []
     assert split.inputs[1].cache_hit is None
     assert hit.cache_key is None and hit.cache_hit.key == x_op.cache_key
     assert hit in compute_pinned_ops(warm, split_pos)

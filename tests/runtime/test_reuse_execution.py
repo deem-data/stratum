@@ -422,7 +422,7 @@ def test_cross_validation_failure_releases_buffers(csv_path, spill_directory):
     cache = ReuseCache()
     sched = scheduler_for(model(csv_path), cache, search=True)
     sched.pool.memory_budget = 1
-    with pytest.raises(ValueError, match="n_splits"):
+    with pytest.raises(RuntimeError, match="SplitIndices.*n_splits"):
         sched.grid_search(cv=100)
     assert cache.stats.puts > 0
     assert_released(sched, spill_directory)

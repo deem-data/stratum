@@ -2,9 +2,8 @@ from __future__ import annotations
 from copy import deepcopy
 from time import perf_counter
 from typing import TYPE_CHECKING
-from sklearn.model_selection import train_test_split, check_cv
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
-from stratum.optimizer.logical._dataframe_ops import SplitOp
+from stratum.optimizer.logical._split_ops import SplitIndicesOp, SplitOp
 from stratum.optimizer.logical._ops import Op
 from stratum.runtime._buffer_pool import BufferPool
 from stratum.runtime._object_size import get_size, prettify_bytes
@@ -83,12 +82,10 @@ class Scheduler:
             self._finish()
 
     def _grid_search(self, cv):
-        if cv is not None:
-            cv = check_cv(cv)
         logger.debug("\n" + "="*100 + "\n" + "Starting grid search" + "\n" + "="*100 + "\n")
         # Validate X/y markers before the sink type so a plan missing both
         # reports the missing input annotations first.
-        split_op = self.compute_xy()
+        split_op = self.compute_xy(cv=cv)
         sink = self.linearized_dag[-1]
         if not isinstance(sink, ScoreCandidatesOp):
             raise RuntimeError(
@@ -96,60 +93,27 @@ class Scheduler:
                 f" {type(sink).__name__}, not ScoreCandidates. Build it with"
                 " `optimize(..., search=SearchConfig(...))`."
             )
-        if cv is None:
-            cv = self._declared_splitter(split_op)
-
         results, predictions = [], []
 
         logger.debug("\n" + "="*100 + "\n" + "XY computed" + "\n" + "="*100 + "\n")
-        results = self.cross_validate(split_op, cv, predictions, results,
+        results = self.cross_validate(split_op, predictions, results,
                                       sink.emit_predictions)
         self.results_ = results
         return predictions if sink.emit_predictions else None
 
-    def _declared_splitter(self, split_op: SplitOp):
-        """The splitter the plan declares, or ``KFold(5)`` if it declares none.
-
-        Pre-split execution computes the splitter and its dependencies, including
-        graph-fed ``groups`` (see ``BuildSplitterOp``).
-        """
-        if split_op.splitter is None:
-            return check_cv(None)
-        splitter = self.pool.pin(split_op.splitter)
-        self.pool.unpin(split_op.splitter)
-        return splitter
-
-    def cross_validate(self, split_op, cv, predictions: list, results: list,
+    def cross_validate(self, split_op, predictions: list, results: list,
                        return_predictions: bool):
         """Perform cross-validation on the plan, one scored row per candidate per fold.
 
         Each execution of the split and its descendants fits on training rows
         and scores test-row outputs for one fold (see train/test unrolling).
         """
-        # The split op's inputs are [X, y] (see add_splitting_op). Both are still
-        # in the pool after compute_xy because lifetime planning retains them.
-        # Pin both while generating folds; stratified splitters need the labels.
-        x_data = self.pool.pin(split_op.inputs[0])
-        y_data = self.pool.pin(split_op.inputs[1])
-        splits = []
-        for i, (train_index, test_index) in enumerate(cv.split(x_data, y_data)):
-            train_key = ("__cv_split", "train", i)
-            test_key = ("__cv_split", "test", i)
-            splits.append((i, train_key, test_key))
-            self.pool.put(test_key, test_index)
-            self.pool.put(train_key, train_index)
-            self.log_memory_usage()
-        self.pool.unpin(split_op.inputs[0])
-        self.pool.unpin(split_op.inputs[1])
-
-        for i, train_ids_handle, test_ids_handle in splits:
-            self.cv_id = i
+        n_splits = self.pool.pin(split_op.indices)
+        self.pool.unpin(split_op.indices)
+        for i in range(n_splits):
             logger.debug(f"CV Fold Nr. {i + 1}")
 
-            fold = self.run_fold((self.pool.pin(train_ids_handle), self.pool.pin(test_ids_handle)))
-            for handle in (train_ids_handle, test_ids_handle):
-                self.pool.unpin(handle)
-                self.pool.remove(handle)
+            fold = self.run_fold(i)
             logger.debug("\n" + "="*100 + "\n" + "Fold " + str(i+1) + " done" + "\n" + "="*100 + "\n")
             if return_predictions:
                 predictions.append(fold.select("id", "vals"))
@@ -189,6 +153,7 @@ class Scheduler:
         """Execute an operator, retain live results and release values at last use.
 
         Data outputs use the buffer pool; fitted states use the state store.
+        Fold index pairs have separate pool entries, selected by ``cv_id``.
         Return the operator after execution or reuse of a cached result.
         """
         if op.cache_hit is not None:
@@ -210,8 +175,9 @@ class Scheduler:
                 if op.reads_state(k):
                     inputs.append(self.state_store.get(in_op))
                 else:
-                    inputs.append(self.pool.pin(in_op))
-                    pinned.append(in_op)
+                    key = (in_op, self.cv_id) if isinstance(in_op, SplitIndicesOp) else in_op
+                    inputs.append(self.pool.pin(key))
+                    pinned.append(key)
 
             # 2. Execute the selected operator implementation.
             if obs is not None:
@@ -231,6 +197,8 @@ class Scheduler:
                 self.pool.remove(in_op)
             for in_op in op.release_state_after:
                 self.state_store.remove(in_op)
+            if op.is_split_op:
+                self.pool.remove((op.indices, self.cv_id))
 
             # 5. Retain live data outputs and fitted states in their respective stores.
             if op.produces_state:
@@ -243,6 +211,8 @@ class Scheduler:
             if self.reuse_cache is not None and op.cache_key is not None:
                 self.reuse_cache.put(op.cache_key, result, label=str(op))
             if not op.produces_state or op.has_data_reader() or not op.outputs:
+                if isinstance(op, SplitIndicesOp):
+                    result = self._store_split_indices(op, result)
                 self.pool.put(op, result)
             self.log_memory_usage()
 
@@ -266,6 +236,12 @@ class Scheduler:
                 self.pool.unpin(in_op)
 
         return op
+
+    def _store_split_indices(self, op: SplitIndicesOp, splits: list) -> int:
+        """Store each fold under ``(op, fold_id)``; ``op`` holds only the count."""
+        for i, indices in enumerate(splits):
+            self.pool.put((op, i), indices)
+        return len(splits)
 
     def _format_predict_result(self, rows):
         """The candidate-set sink's labelled rows as a frame."""
@@ -300,32 +276,24 @@ class SequentialScheduler(Scheduler):
 
     def _evaluate(self, seed, test_size):
         try:
-            split_op = self.compute_xy()
+            self.compute_xy(holdout=(seed, test_size))
         except RuntimeError as e:
             if "X and y nodes not found in the DAG" in str(e):
                 return self._result_without_split()
             else:
                 raise e
 
-        x_data = self.pool.pin(split_op.inputs[0])
-        indices = train_test_split(range(len(x_data)), test_size=test_size, random_state=seed)
-        self.pool.unpin(split_op.inputs[0])
-        rows = self.run_fold(tuple(indices))
+        rows = self.run_fold(0)
         return self._format_predict_result(rows)["vals"][0]
 
-    def run_fold(self, indices):
-        """Execute one fold with ``indices=(train, test)`` and return the sink value."""
+    def run_fold(self, cv_id: int):
+        """Execute one fold using its stored indices and return the sink value."""
+        self.cv_id = cv_id
         self.fold_ops = self.linearized_dag[self.pos_split_op:]
-        for op in self.fold_ops:
-            if op.is_split_op:
-                op.indices = indices
         try:
             return self.compute(self.fold_ops)
         finally:
             self._release_states(self.fold_ops)
-            for op in self.fold_ops:
-                if op.is_split_op:
-                    op.indices = None
 
     def compute(self, ops: list[Op]):
         """Execute ``ops`` in order and return the final operator's output."""
@@ -339,12 +307,19 @@ class SequentialScheduler(Scheduler):
         self.log_memory_usage()
         return out
 
-    def compute_xy(self) -> SplitOp:
-        """Compute nodes until the split op is reached."""
-        for i, op in enumerate(self.linearized_dag):
+    def compute_xy(self, cv=None, *, holdout=None) -> SplitOp:
+        """Compute full-data nodes and fold indices before per-fold execution."""
+        for op in self.linearized_dag:
             if op.is_split_op:
                 return op
-            self.process_op(op)
+            if isinstance(op, SplitIndicesOp):
+                op.cv, op.holdout = cv, holdout
+                try:
+                    self.process_op(op)
+                finally:
+                    op.cv = op.holdout = None
+            else:
+                self.process_op(op)
         raise RuntimeError("X and y nodes not found in the DAG")
 
 

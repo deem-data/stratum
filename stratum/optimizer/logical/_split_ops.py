@@ -1,9 +1,9 @@
 """Train/test split operators and their insertion into the plan.
 
 ``add_splitting_op`` connects the marked features (``X``) and targets (``y``)
-to a shared ``SplitOp``. The scheduler supplies training and test row indices,
-which the operator applies to both inputs. ``SplitOutput`` nodes expose the
-resulting feature and target subsets separately to downstream operators.
+to a shared ``SplitOp``. ``SplitIndicesOp`` computes the folds before per-fold
+execution. ``SplitOp`` applies the current fold's indices to both inputs, and
+``SplitOutput`` exposes the feature and target subsets separately.
 
 ``BuildSplitterOp`` constructs a splitter declared through
 ``mark_as_X(cv=..., split_kwargs=...)``. This keeps dependencies such as
@@ -11,7 +11,7 @@ group labels in the plan so they are computed before splitting.
 """
 
 from skrub._data_ops._estimator import _Splitter
-from sklearn.model_selection import check_cv
+from sklearn.model_selection import check_cv, train_test_split
 from stratum.frontend._conversion import OperandBinder
 from stratum.optimizer.logical._ops import OperandRef, OutputType, Op, SplitXOp, _resolve_operand
 from stratum.optimizer._op_utils import topological_iterator
@@ -21,11 +21,42 @@ import polars as pl
 import numpy as np
 
 
+class SplitIndicesOp(Op):
+    """Compute train/test row positions once for all folds.
+
+    Inputs are ``[X, y]`` and optionally a declared splitter. An explicit ``cv``
+    overrides that splitter; without either, use ``KFold(5)``. ``holdout`` selects
+    one train/test split with ``(seed, test_size)`` for evaluation instead.
+
+    Return a list of index pairs without retaining the splitter iterator. All
+    indices are materialized during this call; afterward the runtime stores
+    each pair separately and binds the current fold to readers.
+    """
+    logical_family = "SplitIndices"
+
+    def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
+        super().__init__(inputs=inputs, outputs=outputs)
+        self.cv = None
+        self.holdout = None
+
+    def process(self, inputs: list):
+        x, y = inputs[:2]
+        if self.holdout is not None:
+            seed, test_size = self.holdout
+            return [tuple(train_test_split(range(len(x)), test_size=test_size,
+                                           random_state=seed))]
+        if self.cv is not None or len(inputs) == 2:
+            cv = check_cv(self.cv)
+        else:
+            cv = inputs[2]
+        return list(cv.split(x, y))
+
+
 class SplitOp(Op):
     """Partition ``X`` and ``y`` into a fold's training and test subsets.
 
-    ``indices`` is the fold's ``(train, test)`` row positions, set by the scheduler
-    before each run of the plan after the split. The output is the tuple
+    Inputs are ``[X, y, indices]``, where the runtime binds the indices input to
+    the current fold's ``(train, test)`` row positions. The output is the tuple
     ``(X_train, y_train, X_test, y_test)``. Each :class:`SplitOutput` operator
     extracts one component.
     """
@@ -35,19 +66,15 @@ class SplitOp(Op):
         super().__init__(name="Train/Test", is_X=False, is_y=False, inputs=inputs, outputs=outputs)
         self.is_split_op = True
         self.output_type = OutputType.FRAME
-        self.indices = None
 
     @property
-    def splitter(self) -> "BuildSplitterOp | None":
-        """The op computing the splitter the plan declares, or None if it declares none.
-
-        Inputs are ``[X, y]``, plus the splitter when X is marked with a ``cv``.
-        """
-        return self.inputs[2] if len(self.inputs) > 2 else None
+    def indices(self) -> SplitIndicesOp:
+        """The producer of the fold indices."""
+        return self.inputs[2]
 
     def process(self, inputs: list):
         x, y = inputs[0], inputs[1]
-        train, test = self.indices
+        train, test = inputs[2]
         return (*_take(x, y, train), *_take(x, y, test))
 
 
@@ -95,8 +122,8 @@ class BuildSplitterOp(Op):
 
     Bind ``cv`` and ``split_kwargs`` to a splitter. Graph-fed arguments, such as
     ``groups`` for ``GroupKFold``, remain explicit dependencies and execute before
-    splitter construction. The dependency from ``SplitOp`` retains the splitter
-    in the buffer pool for the scheduler to generate folds.
+    splitter construction. ``SplitIndicesOp`` consumes the splitter before
+    per-fold execution, after which the runtime can release it.
     """
     logical_family = "BuildSplitter"
     fields = ("cv", "split_kwargs")
@@ -155,9 +182,6 @@ def add_splitting_op(root: Op) -> Op:
             split_out_y.inputs = [split_op]
             x_op.outputs = [split_op]
             y_op.outputs = [split_op]
-            if splitter is not None:
-                split_op.add_input(splitter)
-                splitter.add_output(split_op)
             if x_source is not None:
                 split_op.replace_input(x_op, x_source)
                 for in_op in x_op.inputs:
@@ -165,6 +189,12 @@ def add_splitting_op(root: Op) -> Op:
                 x_source.add_output(split_op)
                 x_op.inputs = []
                 x_op.outputs = []
+            indices = SplitIndicesOp(inputs=list(split_op.inputs), outputs=[split_op])
+            if splitter is not None:
+                indices.add_input(splitter)
+            for in_op in indices.inputs:
+                in_op.add_output(indices)
+            split_op.add_input(indices)
             break
     log_time("splitting took", start)
     return root
