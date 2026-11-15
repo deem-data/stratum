@@ -43,7 +43,7 @@ from stratum.optimizer.physical._transform_execs import (RustOneHotEncoder,
                                                         RustStringEncoder,
                                                         SkrubStringEncoder,
                                                         StringEncoderOp,
-                                                        PassthroughTransformer)
+                                                        OneHotEncoderOp)
 
 
 def test_default_registry_discovers_registered_operator_types():
@@ -62,10 +62,11 @@ def test_default_registry_discovers_registered_operator_types():
                     StringEncoderOp):
         assert op_type in registry.op_types()
 
-    # OneHotEncoder's Rust kernel is keyed on the generic physical transformer.
-    rust_candidates = registry.candidates_for(PassthroughTransformer, backend_name="rust")
+    # One-hot encoding exposes an explicit reference as well as a native kernel.
+    rust_candidates = registry.candidates_for(OneHotEncoderOp, backend_name="rust")
     assert len(rust_candidates) == 1
     assert all(candidate.backend_name == "rust" for candidate in rust_candidates)
+    assert len(registry.candidates_for(OneHotEncoderOp, backend_name="sklearn-skrub")) == 1
     assert not registry.candidates_for(TransformerOp)
     assert len(registry.candidates_for(PredictorOp, backend_name="sklearn-skrub")) == 1
     # The migrated StringEncoder physical op carries both a skrub and a rust impl.
@@ -103,7 +104,7 @@ def test_rust_kernels_are_class_based_impls():
     # Every Rust kernel is a class-based @rust_impl.
     registry = build_default_physical_registry()
 
-    ohe_rust = registry.candidates_for(PassthroughTransformer, backend_name="rust")
+    ohe_rust = registry.candidates_for(OneHotEncoderOp, backend_name="rust")
     se_rust = registry.candidates_for(StringEncoderOp, backend_name="rust")
 
     assert len(ohe_rust) == 1 and ohe_rust[0].impl_class is RustOneHotEncoder

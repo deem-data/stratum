@@ -16,6 +16,7 @@ from __future__ import annotations
 from sklearn.base import clone
 from sklearn.feature_extraction.text import CountVectorizer as _SklearnCountVectorizer
 from sklearn.preprocessing import StandardScaler as _SklearnStandardScaler
+from sklearn.preprocessing import OneHotEncoder as _SklearnOneHotEncoder
 from typing import Any
 
 from skrub import TableVectorizer as _SkrubTableVectorizer
@@ -216,17 +217,28 @@ def _as_rusty_string_encoder(estimator) -> RustyStringEncoder:
 
 
 # --- OneHotEncoder -----------------------------------------------------------
-# Not yet lowered to its own dedicated physical op, so its Rust kernel is keyed
-# on the generic pass-through transformer. Selection swaps a supported op to
-# this class and its on_impl_selected swaps in the Rust adapter.
-@rust_impl(of=PassthroughTransformer, output_format="matrix")
-class RustOneHotEncoder(_TransformerExecution, TransformerOp, PhysicalOp):
+class OneHotEncoderOp(_TransformerExecution, TransformerOp, PhysicalOp):
+    """Abstract physical one-hot encoding operator."""
+
+    is_abstract = True
+
+
+@sklearn_skrub_impl(of=OneHotEncoderOp, output_format="matrix")
+class SklearnOneHotEncoder(OneHotEncoderOp):
+    """Reference sklearn encoding, including unsupported native options."""
+
+    is_abstract = False
+
+
+@rust_impl(of=OneHotEncoderOp, output_format="matrix")
+class RustOneHotEncoder(OneHotEncoderOp):
     """Native Rust one-hot encoder: swaps in ``RustyOneHotEncoder`` at plan time."""
+
+    is_abstract = False
 
     @classmethod
     def supports(cls, op: TransformerOp, ctx: Any) -> bool:
-        supported, _ = supports_rust_one_hot_encoder(op.original_estimator)
-        return supported
+        return not op.param_refs and supports_rust_one_hot_encoder(op.original_estimator)[0]
 
     def on_impl_selected(self, ctx: Any) -> None:
         self.original_estimator = _as_rusty_one_hot_encoder(self.original_estimator)
@@ -350,6 +362,14 @@ def lower_transformer(op: TransformerOp, ctx) -> PhysicalOp | None:
 
     Dedicated estimators get their own physical op; others run through Skrub.
     """
+    if type(op.original_estimator) is _SklearnOneHotEncoder:
+        return OneHotEncoderOp(
+            estimator=op.estimator, y=op.y, cols=op.cols,
+            exclude_cols=op.exclude_cols, no_wrap=op.no_wrap,
+            allow_reject=op.allow_reject, unsupervised=op.unsupervised,
+            kwargs=op.kwargs, param_refs=op.param_refs,
+            feeds_estimator=op.feeds_estimator,
+        )
     if type(op.original_estimator) is _SklearnCountVectorizer:
         return CountVectorizerOp(
             estimator=op.estimator,

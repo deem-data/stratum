@@ -25,10 +25,11 @@ def supports_rust_one_hot_encoder(estimator) -> tuple[bool, str]:
         return False, "estimator is not a sklearn OneHotEncoder"
     if not _rust_runtime_available():
         return False, "Rust OneHotEncoder runtime is not available"
-    if getattr(estimator, "drop", None) != "if_binary":
-        return False, "drop must be 'if_binary'"
-    if np.dtype(getattr(estimator, "dtype", np.float64)) != np.dtype(np.float32):
-        return False, "dtype must be float32"
+    drop = getattr(estimator, "drop", None)
+    if not (drop is None or (isinstance(drop, str) and drop == "if_binary")):
+        return False, "drop must be None or 'if_binary'"
+    if np.dtype(getattr(estimator, "dtype", np.float64)) not in (np.dtype(np.float32), np.dtype(np.float64)):
+        return False, "dtype must be float32 or float64"
     if getattr(estimator, "handle_unknown", None) != "ignore":
         return False, "handle_unknown must be 'ignore'"
     categories = getattr(estimator, "categories", "auto")
@@ -91,7 +92,8 @@ class RustyOneHotEncoder(_SKOneHot):
     """Drop-in OneHotEncoder that prefers the Rust fastpath where supported
 
     Supported params:
-        drop='if_binary', dtype=float32, handle_unknown='ignore', sparse_output=True|False"""
+        drop=None|'if_binary', dtype=float32|float64,
+        handle_unknown='ignore', sparse_output=True|False"""
 
     def __init__(self,
                  drop="if_binary",
@@ -100,8 +102,8 @@ class RustyOneHotEncoder(_SKOneHot):
                  sparse_output=False,
                  **kwargs):
         super().__init__(drop=drop, dtype=dtype, handle_unknown=handle_unknown, sparse_output=sparse_output, **kwargs)
-        self._supported_params = (drop == "if_binary"
-                                  and np.dtype(self.dtype) == np.dtype(np.float32) #'float32'/np.float32/np.dtype('float32)
+        self._supported_params = ((drop is None or (isinstance(drop, str) and drop == "if_binary"))
+                                  and np.dtype(self.dtype) in (np.dtype(np.float32), np.dtype(np.float64))
                                   and handle_unknown == "ignore" and len(kwargs) == 0)
 
     def __sklearn_clone__(self):
@@ -135,22 +137,27 @@ class RustyOneHotEncoder(_SKOneHot):
             return super().transform(X)
 
         # Recode (integer encoding) the input features. codes[i] is recoded feature i
+        # FIXME: Use user-specified #threads (similar to other adapters)
         t0 = rb.start_timing()
         codes, n_cats = _codes_from_categories(X, self.categories_)
-        drop_idx = [None if d is None else int(d) for d in self.drop_idx_]
+        # sklearn uses a single None (not a per-column array) for drop=None.
+        drop_idx = ([None] * len(n_cats) if self.drop_idx_ is None else
+                    [None if d is None else int(d) for d in self.drop_idx_])
         rb.print_timing("Recoding", t0)
 
         # Dispatch the apply phase to Rust (returns CSR)
         if _DEBUG_INFO: print("INFO: Dispatching OneHotEncoder transform to Rust backend") #TODO: proper logging
         t0 = rb.start_timing()
-        data, indices, indptr, n_rows, n_cols = rb.ohe_transform(codes, n_cats, drop_idx)
+        out_dt = np.dtype(self.dtype)
+        data, indices, indptr, n_rows, n_cols = rb.ohe_transform(
+            codes, n_cats, drop_idx, dtype=out_dt.name
+        )
         rb.print_timing("ohe_transform_csr", t0)
 
-        out_dt = np.dtype(self.dtype)
         if self.sparse_output:
             # Make a SciPy CSR
             sparse_mat = sp.csr_matrix(
-                (np.asarray(data, dtype=np.float32),
+                (np.asarray(data, dtype=out_dt),
                  np.asarray(indices, dtype=np.int32),
                  np.asarray(indptr, dtype=np.int64)),
                 shape=(int(n_rows), int(n_cols)),
@@ -162,8 +169,6 @@ class RustyOneHotEncoder(_SKOneHot):
         #print("INFO: Using Rust densifier")
         t0 = rb.start_timing()
         dense_mat = rb.csr_to_dense(data, indices, indptr, n_rows, n_cols) #2.5x faster than scipy toarray
-        if out_dt != np.dtype(np.float32):
-            dense_mat = dense_mat.astype(out_dt, copy=False)
         rb.print_timing("csr_to_dense", t0)
         return dense_mat
 
