@@ -1,3 +1,13 @@
-100K
-stratum: 86s
-skrub: 249s
+200K
+Mode                 Explore(s)  Refine(s)   Total(s)
+skrub                   332.705    341.792    674.498
+stratum-default         159.055     82.098    241.152
+stratum-greedy           66.155     61.975    128.130
+stratum-reuse            53.555     22.899     76.454
+
+1M
+Mode                 Explore(s)  Refine(s)   Total(s)
+skrub                  1690.356   1614.849   3305.205
+stratum-default         842.887    368.118   1211.005
+stratum-greedy          240.954    200.802    441.756
+stratum-reuse           199.348     62.492    261.840
