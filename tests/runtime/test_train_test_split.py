@@ -62,6 +62,7 @@ def test_fold_indices_are_generated_once_and_spill_independently(tmp_path):
         assert sched.compute_xy(cv=cv) is split
         assert cv.calls == 1
         assert split.indices.cv is None
+        assert sched._cv is None
         assert all(ref() is None for ref in cv.references)
         assert all(entry.pin_count == 0 for entry in sched.pool.live_variable_map.values())
         assert all(sched.pool.live_variable_map[(split.indices, i)].is_spilled
@@ -106,6 +107,7 @@ def test_holdout_indices_preserve_seed_size_and_ignore_declared_cv(tmp_path):
         np.testing.assert_array_equal(sched.run_fold(0),
                                       np.arange(24).reshape(12, 2)[test])
         assert split.indices.holdout is None
+        assert sched._holdout is None
         assert (split.indices, 1) not in sched.pool.live_variable_map
     finally:
         sched._finish()

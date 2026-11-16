@@ -2,18 +2,18 @@
 
 - The planner decides which results have reliable keys. This store accepts every
   such result that fits its budget, without cost-based admission.
-- All intermediates are immutable, including nested objects. No operator may
-  modify an intermediate in place. The cache and BufferPool share materialized
-  results without copying.
+- Outputs and fitted states are immutable, including nested objects. The cache
+  and execution share them without copying; callers must not mutate values
+  after insertion or retrieval.
 - The runtime owns intermediate lifetimes through the BufferPool and reuse
   cache. Operators borrow intermediates only for the duration of their
   execution; retaining references to inputs or outputs afterward is a memory
   leak and violates the operator contract.
-- The cache budget (> 0) bounds the sum of estimated sizes of resident cache entries,
-  using the same sizing helper as the BufferPool. Eviction releases cache
-  ownership; the BufferPool manages intermediates still live in an executing
-  plan.
-- Entries live only as long as this cache instance and are never serialized (currently).
+- The cache budget (> 0) bounds the sum of estimated sizes of resident entries,
+  using producer-supplied estimates or the BufferPool's sizing helper. It does
+  not bound process memory: runtime readers may keep evicted objects alive,
+  and shared buffers may be counted more than once.
+- Entries live only as long as this cache instance and are never serialized.
 """
 from __future__ import annotations
 
@@ -133,17 +133,23 @@ class ReuseCache:
                 } for key, entry in self._entries.items()]
             return report
 
-    def put(self, key: str, data: Any, *, label: str | None = None) -> bool:
+    def put(self, key: str, data: Any, *, label: str | None = None,
+            size: int | None = None) -> bool:
         """Keep ``data`` if it fits, evicting older entries as needed.
 
         A duplicate key keeps the existing value. An oversized entry is refused
         without evicting anything. False indicates either rejection.
+        ``size`` reuses a producer's byte estimate; otherwise the cache sizes data.
         """
+        if size is not None:
+            size = index(size)
+            if size < 0:
+                raise ValueError("size must be non-negative")
         with self._lock:
             if key in self._entries:
                 self._stats.rejected += 1
                 return False
-            size = int(get_size(data))
+            size = int(get_size(data)) if size is None else size
             if 0 < self._memory_budget < size:
                 self._stats.rejected += 1
                 return False
@@ -156,8 +162,12 @@ class ReuseCache:
         self._notify("admit")
         return True
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return the cached object and refresh its LRU position, or ``default``."""
+    def get(self, key: str, default: Any = None, *, with_size: bool = False) -> Any:
+        """Return the cached object and refresh its LRU position, or ``default``.
+
+        With ``with_size``, return ``(object, estimated_bytes)`` from the same
+        entry atomically. A miss still returns ``default``.
+        """
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -167,7 +177,7 @@ class ReuseCache:
             self._stats.hits += 1
             entry.hits += 1
             entry.last_access = time.time()
-            data = entry.data
+            data = (entry.data, entry.size) if with_size else entry.data
         self._notify("read")
         return data
 

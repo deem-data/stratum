@@ -228,10 +228,11 @@ def set_config(rust_backend: bool | None = None,
             (fixed 2 GiB fallback when host memory cannot be detected).
 
         reuse_cache: bool, default false
-            Reuse eligible pre-split results by Merkle lineage key across
+            Reuse eligible outputs and fitted states by Merkle lineage key across
             Stratum evaluation and grid-search runs in this process. The cache
             is created lazily and kept only in memory. Every keyed result except
-            constants is eligible for admission. Disabling reuse bypasses reads
+            constants and split row selections is eligible for admission.
+            Disabling reuse bypasses reads
             and writes while retaining existing entries for later enabled runs.
             Defaults from STRATUM_REUSE_CACHE at import time.
 

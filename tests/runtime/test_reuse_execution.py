@@ -133,7 +133,9 @@ def test_model_edits_reuse_features_and_fit_the_new_model(csv_path):
     assert_equal(changed.evaluate(), expected)
 
 
-def test_full_data_predictions_are_cached_without_caching_fitted_state(csv_path):
+def test_full_data_predictions_and_fitted_state_are_cached(csv_path):
+    from stratum.optimizer._lineage import state_key
+
     def pipeline():
         data = features(csv_path)
         return data[["a", "b"]].skb.apply(Ridge(), y=data["y"], no_wrap=True)
@@ -142,9 +144,10 @@ def test_full_data_predictions_are_cached_without_caching_fitted_state(csv_path)
     cold = scheduler_for(pipeline(), cache)
     assert cold.pos_split_op is None
     fit, predict = [op for op in cold.linearized_dag if isinstance(op, PredictorOp)]
-    assert fit.mode == "fit" and fit.cache_key is None
+    assert fit.mode == "fit" and fit.cache_key is not None
     assert predict.mode == "predict" and predict.cache_key is not None
     expected = cold.evaluate()
+    assert isinstance(cache.get(state_key(fit.cache_key)), Ridge)
 
     warm = scheduler_for(pipeline(), cache)
     assert not any(op.produces_state for op in warm.linearized_dag)
@@ -167,7 +170,7 @@ def test_a_cached_fit_output_does_not_replace_required_state(csv_path):
     keys = compute_lineage_keys(plan, cacheable_region(plan))
     cache.put(keys[fit], None)
     apply_reuse_cache(plan[-1], cache)
-    assert fit.cache_hit is None and fit.cache_key is None
+    assert fit.cache_hit is None and fit.cache_key == keys[fit]
     plan, split_pos = linearize_dag(plan[-1])
     plan_input_removals(plan, set())
     actual = SequentialScheduler(plan, split_pos, reuse_cache=cache).evaluate()

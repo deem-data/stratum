@@ -11,12 +11,13 @@ from skrub._data_ops._data_ops import EvalMode
 import stratum as st
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer.physical.rewrites._lifetime_planning import compute_pinned_ops
-from stratum.optimizer._lineage import compute_lineage_keys
+from stratum.optimizer._lineage import compute_lineage_keys, state_key
+from stratum.optimizer._plan import Plan
 from stratum.optimizer.physical.rewrites._linearization import linearize_dag
 from stratum.optimizer._op_utils import topological_iterator, validate_dag, validate_operands
 from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.physical.rewrites._reuse_planning import (
-    CacheHit, apply_reuse_cache, cacheable_region, post_split_region)
+    CacheHit, apply_reuse_cache, cacheable_region, plan_reuse, post_split_region)
 from stratum.optimizer.logical._base import OperandRef
 from stratum.optimizer.logical._ops import ImplOp, ValueOp
 from stratum.optimizer.physical._impl_selection import FlagBasedSelector
@@ -125,6 +126,63 @@ def test_repeated_input_edges_are_all_cut():
     assert_graph(root, [shared, cached, other, root])
     assert cached.outputs == [root, root] and shared.outputs == [other]
     assert set(linearize_dag(root)[0]) == {shared, cached, other, root}
+
+
+def test_region_pruning_preserves_external_producers_and_required_results():
+    source = KeyedOp("source")
+    external = KeyedOp("external", source)
+    shared = KeyedOp("shared", external)
+    retained = KeyedOp("retained", external)
+    private = KeyedOp("private", retained)
+    cached = KeyedOp("cached", private)
+    root = KeyedOp("root", cached, shared, shared, external, cacheable=False)
+    ops = [source, external, shared, retained, private, cached, root]
+    keys = compute_lineage_keys(ops)
+    external.lineage = keys[external]
+    edges = [(op, list(op.inputs), list(op.outputs)) for op in ops]
+    plan = Plan(ops[2:], retained={retained}).copy()
+    shared_copy, retained_copy, private_copy, hit, result = plan.ops
+    cache = ReuseCache()
+    cache.put(keys[cached], "cached-result")
+
+    remaining = plan_reuse(plan.ops, cache, [plan.result, *plan.retained])
+
+    assert remaining == [shared_copy, retained_copy, hit, result]
+    assert shared_copy.lineage == keys[shared]
+    assert shared_copy.inputs == retained_copy.inputs == [external]
+    assert result.inputs == [hit, shared_copy, shared_copy, external]
+    assert shared_copy.outputs == [result, result]
+    assert retained_copy.outputs == []
+    assert hit.inputs == [] and hit.outputs == [result]
+    assert hit.cache_hit.take() == "cached-result"
+    assert private_copy.inputs == private_copy.outputs == []
+    for op, inputs, outputs in edges:
+        assert op.inputs == inputs and op.outputs == outputs
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_a_hit_removes_data_requirements_before_probing_fitted_state(initial):
+    source = KeyedOp("source")
+    fit = KeyedOp("fit", source)
+    fit.has_state = True
+    data = KeyedOp("data", fit)
+    state = KeyedOp("state", fit)
+    state.state_ref = OperandRef(0)
+    root = KeyedOp("root", state, data, cacheable=False)
+    keys = graph_keys(root)
+    cache = ReuseCache()
+    cache.put(keys[data], "transformed data")
+    cache.put(state_key(keys[fit]), "fitted state")
+
+    if initial:
+        apply_reuse_cache(root, cache)
+    else:
+        plan_reuse(list(topological_iterator(root)), cache, [root])
+
+    assert_graph(root, [fit, data, state, root])
+    assert fit.cache_hit.has_state and not fit.cache_hit.has_output
+    assert fit.cache_hit.take_state() == "fitted state"
+    assert data.cache_hit.take() == "transformed data"
 
 
 def test_a_hit_can_prune_a_long_pipeline_without_recursion():

@@ -26,8 +26,9 @@ import numpy as np
 import pandas as pd
 
 from stratum.optimizer.logical._base import IRNode, OperandRef, Uncacheable
+from stratum.optimizer.logical._split_ops import SplitOutput
 
-__all__ = ["Uncacheable", "LineageEncoder", "compute_lineage_keys", "lineage_key"]
+__all__ = ["Uncacheable", "LineageEncoder", "compute_lineage_keys", "lineage_key", "state_key"]
 
 #: Bytes of a lineage key (hex-encoded to twice as many characters).
 KEY_BYTES = 16
@@ -211,7 +212,8 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     lib = getattr(op, "_frame_lib", None)
     enc.encode(None if lib is None else str(lib))
     # Inference and fitting can share an implementation and configuration.
-    enc.encode(op.mode)
+    # SplitOutput only selects rows; a scorer's prediction method is irrelevant.
+    enc.encode(None if isinstance(op, SplitOutput) else op.mode)
     enc.encode(None if op.state_ref is None else op.state_ref.k)
     enc.encode(op.lineage_config())
     enc._str(str(len(input_keys)))
@@ -220,19 +222,28 @@ def lineage_key(op: IRNode, input_keys: list[str]) -> str:
     return enc.hexdigest()
 
 
+def state_key(key: str) -> str:
+    """Derive a fitted-state key distinct from the producer's data-output key."""
+    enc = LineageEncoder()
+    enc.raw(b"state", key.encode())
+    return enc.hexdigest()
+
+
 def compute_lineage_keys(ops: Iterable[IRNode], region: set | None = None,
-                         reasons: dict | None = None) -> dict[IRNode, str | None]:
+                         reasons: dict | None = None,
+                         known: dict | None = None) -> dict[IRNode, str | None]:
     """Lineage keys for ``ops``, given in topological order (inputs first).
 
     An op outside ``region`` (when given), one that is :class:`Uncacheable`, or one
-    with an input lacking a key gets ``None``. Pass a dict as ``reasons`` to learn
+    with an input lacking a key gets ``None``. ``known`` supplies keys of inputs
+    outside ``ops``. Pass a dict as ``reasons`` to learn
     why each keyless op in the region has no key.
     """
-    keys: dict[IRNode, str | None] = {}
+    keys: dict[IRNode, str | None] = dict(known) if known else {}
     for op in ops:
         key = None
         if region is None or op in region:
-            input_keys = [keys.get(in_) for in_ in op.inputs]
+            input_keys = [keys.get(in_) for in_ in op.lineage_inputs]
             if any(k is None for k in input_keys):
                 if reasons is not None:
                     reasons[op] = "an input has no key"

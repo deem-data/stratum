@@ -322,6 +322,8 @@ class IRNode:
         self.mode: str = self.fitting_mode
         #: Set by reuse planning: admit this result under its lineage key.
         self.cache_key: str | None = None
+        #: Lineage retained when execution or cache pruning removes dependencies.
+        self.lineage: str | None = None
         #: A retained cached value replaces execution; the op then has no inputs.
         #: See physical.rewrites._reuse_planning.CacheHit for the one-time
         #: handoff to the scheduler.
@@ -346,6 +348,11 @@ class IRNode:
         return any(out.reads_state(k) and in_op is self
                    for out in self.outputs for k, in_op in enumerate(out.inputs))
 
+    @property
+    def lineage_inputs(self) -> list:
+        """Inputs whose keys determine this operator's lineage."""
+        return self.inputs
+
     def propagate_output_schema(self):
         """Default rule for the schema-propagation pass: the output is unknown.
 
@@ -360,6 +367,9 @@ class IRNode:
     #: Whether the operator produces fitted state for subsequent application.
     #: Planning creates inference operators with explicit fitted-state inputs.
     has_state = False
+
+    #: Selected operator copied by an execution instance, for profiling.
+    instance_of: "IRNode | None" = None
 
     #: Whether the output is eligible for a reuse-cache lineage key.
     #: Requires a deterministic function of inputs and ``lineage_config()``;

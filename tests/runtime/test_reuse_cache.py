@@ -42,6 +42,53 @@ def test_a_cached_none_is_a_hit():
     assert cache.stats.hits == 1 and cache.stats.misses == 0
 
 
+def test_supplied_sizes_control_admission_without_recomputing_sizes(monkeypatch):
+    cache = ReuseCache(memory_budget=100)
+    value = object()
+
+    def fail(value):
+        raise AssertionError("a supplied estimate must not be recomputed")
+
+    monkeypatch.setattr("stratum.runtime._reuse_cache.get_size", fail)
+    assert cache.put("a", value, size=60)
+    assert not cache.put("too-large", object(), size=101)
+    assert cache.get("a", with_size=True) == (value, 60)
+    assert cache.put("b", value, size=50)
+    assert "a" not in cache and cache.memory_usage == 50
+    assert cache.get("b", with_size=True) == (value, 50)
+    assert cache.put("empty", None, size=0)
+    assert cache.get("empty", with_size=True) == (None, 0)
+    miss = object()
+    assert cache.get("missing", miss, with_size=True) is miss
+
+
+@pytest.mark.parametrize("size, error", [(-1, ValueError), (1.5, TypeError)])
+def test_invalid_supplied_size_leaves_cache_unchanged(size, error):
+    cache = ReuseCache(memory_budget=100)
+    cache.put("kept", object(), size=50)
+    before = cache.snapshot()
+    with pytest.raises(error):
+        cache.put("invalid", object(), size=size)
+    assert cache.snapshot() == before
+
+
+def test_value_and_size_stay_paired_when_a_read_observer_replaces_the_entry():
+    cache = ReuseCache()
+    old, new = object(), object()
+    cache.put("key", old, size=10)
+
+    def replace_on_read(event):
+        if event == "read":
+            cache.clear()
+            cache.put("key", new, size=20)
+
+    cache.listeners.append(replace_on_read)
+    assert cache.get("key", with_size=True) == (old, 10)
+    assert cache.stats.hits == 1
+    cache.listeners.clear()
+    assert cache.get("key", with_size=True) == (new, 20)
+
+
 @pytest.mark.parametrize("value", [
     pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}),
     pd.Series([1, 2]), pl.DataFrame({"a": [1, 2]}), pl.Series([1, 2]),

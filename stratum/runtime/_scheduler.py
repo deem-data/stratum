@@ -1,9 +1,13 @@
 from __future__ import annotations
 from copy import deepcopy
+import hashlib
 from time import perf_counter
 from typing import TYPE_CHECKING
+from stratum.optimizer._plan import Plan
+from stratum.optimizer._lineage import state_key
+from stratum.optimizer.physical.rewrites._lifetime_planning import compute_pinned_ops
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
-from stratum.optimizer.logical._split_ops import SplitIndicesOp, SplitOp
+from stratum.optimizer.logical._split_ops import SplitIndicesOp, SplitOp, SplitOutput
 from stratum.optimizer.logical._ops import Op
 from stratum.runtime._buffer_pool import BufferPool
 from stratum.runtime._object_size import get_size, prettify_bytes
@@ -34,10 +38,18 @@ class Scheduler:
     """
 
     def __init__(self, print_heavy_hitters=False, t0=None, reuse_cache: ReuseCache | None = None):
+        #: Original selected operators, used for diagnostic node identities.
         self.linearized_dag = None
         self.pos_split_op: int | None = None
         #: Operators scheduled for the most recent fold, retained for inspection.
         self.fold_ops: list[Op] | None = None
+        #: Active executable region; position is its next operator to execute.
+        self.plan: Plan | None = None
+        self.fold_plan: Plan | None = None
+        self.position = 0
+        self.executed: list[Op] = []
+        self._processing = False
+        self._cv = self._holdout = None
         self.timings = [] if print_heavy_hitters else None
         self.observer = None  # Inspection-only hooks, see stratum._profiler.
         self.results_ = None
@@ -47,20 +59,30 @@ class Scheduler:
         self.t0 = t0 if t0 is not None else perf_counter()
         self._pinned_ops: set[Op] = set()
         self.buffer_pool_overhead = 0
-        #: Shared in-memory cache for read-only outputs.
+        #: Shared in-memory cache for read-only outputs and fitted states.
         self.reuse_cache = reuse_cache
         #: Results may alias cached values, including through uncacheable ops.
         #: Detach them once when returning to the caller, outside execution.
         self._shares_cache_values = reuse_cache is not None
 
     def _pool_cache_hits(self, ops: list[Op]) -> None:
-        """Register cached values retained during reuse planning in the buffer pool."""
-        for op in ops:
-            hit = op.cache_hit
-            if hit is None:
-                continue
-            self._shares_cache_values = True
-            self.pool.put(op, hit.take())
+        """Transfer cached outputs and fitted states to their runtime stores."""
+        try:
+            for op in ops:
+                hit = op.cache_hit
+                if hit is None:
+                    continue
+                self._shares_cache_values = True
+                if hit.has_output:
+                    self.pool.put(op, hit.take())
+                if hit.has_state:
+                    self.state_store.put(op, hit.take_state(), size=hit.state_size)
+        except BaseException:
+            # Also release pending hits that the admission loop did not reach.
+            for op in ops:
+                if op.cache_hit is not None:
+                    op.cache_hit.release()
+            raise
 
     def _finish(self):
         """Release execution buffers and fitted states, including after failures."""
@@ -144,7 +166,7 @@ class Scheduler:
     def _result_without_split(self):
         """Return the sink value after ``compute_xy`` executes a plan without a split."""
         logger.warning("X and y nodes not found in the DAG, returning the last node")
-        sink = self.linearized_dag[-1]
+        sink = self.plan.result
         out = self.pool.pin(sink)
         self.pool.unpin(sink)
         return out
@@ -163,7 +185,7 @@ class Scheduler:
         logger.debug(f"[{perf_counter() - self.t0:.2f}s] Processing op: {op}")
 
         obs = self.observer
-        node = op
+        node = op.instance_of or op
         token = t1 = t2 = None
         pinned = []
         try:
@@ -175,7 +197,7 @@ class Scheduler:
                 if op.reads_state(k):
                     inputs.append(self.state_store.get(in_op))
                 else:
-                    key = (in_op, self.cv_id) if isinstance(in_op, SplitIndicesOp) else in_op
+                    key = self._buffer_key(in_op)
                     inputs.append(self.pool.pin(key))
                     pinned.append(key)
 
@@ -202,14 +224,19 @@ class Scheduler:
 
             # 5. Retain live data outputs and fitted states in their respective stores.
             if op.produces_state:
+                state = result.state
+                state_size = result.size if result.size is not None else get_size(state)
                 if op.has_state_reader():
-                    size = result.size if result.size is not None else get_size(result.state)
-                    self.state_store.put(op, result.state, size=size)
+                    self.state_store.put(op, state, size=state_size)
                 result = result.output
             # Operators read inputs and fitted states without mutating them, so
             # the cache can retain the same objects as this execution.
             if self.reuse_cache is not None and op.cache_key is not None:
-                self.reuse_cache.put(op.cache_key, result, label=str(op))
+                if op.produces_state:
+                    self.reuse_cache.put(state_key(op.cache_key), state,
+                                         label=f"{op} state", size=state_size)
+                if not op.produces_state or op.has_data_reader() or not op.outputs:
+                    self.reuse_cache.put(op.cache_key, result, label=str(op))
             if not op.produces_state or op.has_data_reader() or not op.outputs:
                 if isinstance(op, SplitIndicesOp):
                     result = self._store_split_indices(op, result)
@@ -237,6 +264,14 @@ class Scheduler:
 
         return op
 
+    def _buffer_key(self, op: Op):
+        return ((op, self.cv_id)
+                if isinstance(op, SplitIndicesOp) and self.cv_id >= 0 else op)
+
+    def _available(self, op: Op, state: bool) -> bool:
+        return (op in self.state_store if state
+                else self._buffer_key(op) in self.pool.live_variable_map)
+
     def _store_split_indices(self, op: SplitIndicesOp, splits: list) -> int:
         """Store each fold under ``(op, fold_id)``; ``op`` holds only the count."""
         for i, indices in enumerate(splits):
@@ -259,6 +294,8 @@ class SequentialScheduler(Scheduler):
         super().__init__(print_heavy_hitters, t0=t0, reuse_cache=reuse_cache)
         self.linearized_dag = linearized_dag
         self.pos_split_op = split_pos
+        self._pinned_ops = compute_pinned_ops(linearized_dag, split_pos)
+        self.plan = Plan(linearized_dag, retained=self._pinned_ops)
         try:
             self._pool_cache_hits(linearized_dag)
         except BaseException:
@@ -286,21 +323,92 @@ class SequentialScheduler(Scheduler):
         rows = self.run_fold(0)
         return self._format_predict_result(rows)["vals"][0]
 
-    def run_fold(self, cv_id: int):
-        """Execute one fold using its stored indices and return the sink value."""
-        self.cv_id = cv_id
-        self.fold_ops = self.linearized_dag[self.pos_split_op:]
+    def step(self) -> Op | None:
+        """Execute the next operator and stop at a recompilation boundary."""
+        if self._processing:
+            raise RuntimeError("execution is already inside an operator")
+        if self.position == len(self.plan.ops):
+            return None
+        op = self.plan.ops[self.position]
+        self._processing = True
         try:
-            return self.compute(self.fold_ops)
+            if isinstance(op, SplitIndicesOp):
+                op.cv, op.holdout = self._cv, self._holdout
+            self.process_op(op)
         finally:
-            self._release_states(self.fold_ops)
+            self._processing = False
+            if isinstance(op, SplitIndicesOp):
+                op.cv = op.holdout = None
+        self.position += 1
+        self.executed.append(op)
+        return op
 
-    def compute(self, ops: list[Op]):
-        """Execute ``ops`` in order and return the final operator's output."""
-        for node in ops:
-            self.process_op(node)
+    def recompile(self, *, profile=None) -> Plan:
+        """Replace remaining work while preserving completed producer identities.
 
-        sink = ops[-1]
+        The caller controls when to recompile. CV uses this same entry point
+        before each fold; explicit callers can use it after any successful step.
+        """
+        if self._processing:
+            raise RuntimeError("recompilation requires an operator boundary")
+        if profile is None and self.observer is not None:
+            profile = self.observer.node_timings
+        previous = self.plan
+        replacement = previous.recompile(self.position, available=self._available,
+                                         cache=self.reuse_cache, profile=profile)
+        self._pool_cache_hits(replacement.ops)
+        self.plan, self.position = replacement, 0
+        # Pruning can remove the final reader of an already materialized value.
+        # Preserve values needed by future executions without loading spilled data.
+        data, states = replacement.required_values()
+        data |= replacement.retained
+        states |= replacement.retained
+        old = set(previous.ops) | {in_ for op in previous.ops for in_ in op.inputs}
+        for op in old:
+            if op not in data:
+                self.pool.remove(op)
+            if op not in states:
+                self.state_store.remove(op)
+        self._pinned_ops = replacement.retained
+        if self.cv_id >= 0:
+            self.fold_ops = self.executed + replacement.ops
+        return replacement
+
+    def run_fold(self, cv_id: int):
+        """Bind one fold's context, recompile its plan, and execute it."""
+        self.cv_id = cv_id
+        self.executed = []
+        self.plan, self.position = self.fold_plan.copy(), 0
+        split = next(op for op in self.plan.ops if op.is_split_op)
+        key = (split.indices, cv_id)
+        try:
+            if self.reuse_cache is not None:
+                indices = self.pool.pin(key)
+                try:
+                    digests = [hashlib.blake2b(
+                        np.ascontiguousarray(rows, dtype=np.int64).tobytes(),
+                        digest_size=16).digest() for rows in indices]
+                finally:
+                    self.pool.unpin(key)
+                    del indices
+                for op in self.plan.ops:
+                    if isinstance(op, SplitOutput):
+                        op.row_digest = digests[0 if op.train else 1]
+            self.recompile()
+            return self.compute()
+        finally:
+            self._release_states(self.fold_ops or [])
+            # The split may have been pruned by cache hits.
+            self.pool.remove(key)
+
+    def compute(self, ops: list[Op] | None = None):
+        """Run the remaining plan and return its result. ``ops`` starts a new plan."""
+        if ops is not None:
+            self.plan, self.position = Plan(ops, retained=self._pinned_ops), 0
+            self.executed = []
+        while self.step() is not None:
+            pass
+        sink = self.plan.result
         out = self.pool.pin(sink)
         self.pool.unpin(sink)
         self.pool.remove(sink)
@@ -308,19 +416,19 @@ class SequentialScheduler(Scheduler):
         return out
 
     def compute_xy(self, cv=None, *, holdout=None) -> SplitOp:
-        """Compute full-data nodes and fold indices before per-fold execution."""
-        for op in self.linearized_dag:
-            if op.is_split_op:
-                return op
-            if isinstance(op, SplitIndicesOp):
-                op.cv, op.holdout = cv, holdout
-                try:
-                    self.process_op(op)
-                finally:
-                    op.cv = op.holdout = None
-            else:
-                self.process_op(op)
-        raise RuntimeError("X and y nodes not found in the DAG")
+        """Execute full-data work using the same cursor as ordinary plan execution."""
+        self._cv, self._holdout = cv, holdout
+        try:
+            while self.position < len(self.plan.ops):
+                op = self.plan.ops[self.position]
+                if op.is_split_op:
+                    self.fold_plan = Plan(self.plan.ops[self.position:],
+                                          retained=self.plan.retained)
+                    return op
+                self.step()
+            raise RuntimeError("X and y nodes not found in the DAG")
+        finally:
+            self._cv = self._holdout = None
 
 
 def _copy_result(value):

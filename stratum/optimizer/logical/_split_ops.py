@@ -13,6 +13,7 @@ group labels in the plan so they are computed before splitting.
 from skrub._data_ops._estimator import _Splitter
 from sklearn.model_selection import check_cv, train_test_split
 from stratum.frontend._conversion import OperandBinder
+from stratum.optimizer.logical._base import Uncacheable
 from stratum.optimizer.logical._ops import OperandRef, OutputType, Op, SplitXOp, _resolve_operand
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.utils._utils import start_time, log_time
@@ -89,7 +90,14 @@ def _take(x, y, rows) -> tuple:
 
 
 class SplitOutput(Op):
-    """``X`` or ``y`` of the training or the test rows of a fold."""
+    """Expose X or y for a fold's training or test subset.
+
+    Lineage depends on the selected rows and their source, independently of the
+    splitter and the other subset's rows. The scheduler binds ``row_digest`` before
+    planning reuse for an execution.
+    """
+    cacheable = True
+    row_digest: bytes | None = None
 
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None, is_x = True, train=False):
         name = ("X" if is_x else "y") + ("_train" if train else "_test")
@@ -116,6 +124,17 @@ class SplitOutput(Op):
 
     def process(self, inputs: list):
         return inputs[0][(0 if self.train else 2) + (0 if self.is_x else 1)]
+
+    @property
+    def lineage_inputs(self) -> list:
+        split = self.inputs[0]
+        return [split.inputs[0 if self.is_x else 1]]
+
+    def lineage_config(self):
+        if self.row_digest is None:
+            raise Uncacheable("the split has no rows bound yet")
+        return self.is_x, self.train, self.row_digest
+
 
 class BuildSplitterOp(Op):
     """Build the splitter declared by ``mark_as_X(cv=..., split_kwargs=...)``.
