@@ -82,8 +82,11 @@ def _prep_strings_transform(X):
 # Create a subclass of StringEncoder
 """Drop-in StringEncoder that prefers the Rust fastpath where supported."""
 class RustyStringEncoder(_SE):
-    def __init__(self, vectorizer="tfidf", analyzer="char_wb", ngram_range=(3,4), n_components=30, **kwargs):
-        super().__init__(vectorizer=vectorizer, analyzer=analyzer, ngram_range=ngram_range, n_components=n_components, **kwargs)
+    def __init__(self, vectorizer="tfidf", analyzer="char_wb", ngram_range=(3,4),
+                 n_components=30, *, stop_words=None, random_state=None, vocabulary=None):
+        super().__init__(vectorizer=vectorizer, analyzer=analyzer, ngram_range=ngram_range,
+                         n_components=n_components, stop_words=stop_words,
+                         random_state=random_state, vocabulary=vocabulary)
         self._rust_state_ = None
 
     def __sklearn_clone__(self):

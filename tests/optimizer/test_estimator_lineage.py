@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import skrub.selectors as s
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.frozen import FrozenEstimator
@@ -21,6 +21,7 @@ from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from skrub import StringEncoder, TableVectorizer
 
 import stratum as st
+from stratum.adapters.string_encoder import RustyStringEncoder
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._estimator_lineage import estimator_lineage, selector_lineage
 from stratum.optimizer._lineage import (
@@ -51,6 +52,18 @@ def test_nested_estimators_are_part_of_the_key():
     seeded = StringEncoder(random_state=0)
     assert key(TableVectorizer(high_cardinality=seeded)) != key(
         TableVectorizer(high_cardinality=StringEncoder(n_components=5, random_state=0)))
+
+
+def test_native_string_encoder_cloning_preserves_seed_and_lineage():
+    encoder = RustyStringEncoder(random_state=42, stop_words=["the"], vocabulary={"cat": 0})
+    encoder._stratum_force_rust = True
+    copied = clone(encoder)
+    assert copied.random_state == 42 and copied._stratum_force_rust
+    assert copied.get_params() == encoder.get_params()
+    assert key(copied) == key(encoder)
+    assert key(copied.set_params(random_state=43)) != key(encoder)
+    with pytest.raises(Uncacheable, match="random_state=None"):
+        key(RustyStringEncoder())
 
 
 def test_unseeded_randomness_is_uncacheable():
