@@ -12,9 +12,10 @@ import skrub
 import stratum as st
 from stratum.frontend._api import evaluate
 from stratum.frontend._skrub_graph import get_data
-from stratum.optimizer._optimize import optimize
+from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.logical._base import IRNode
-from stratum.optimizer.logical._ops import Op
+from stratum.optimizer.logical._dataframe_ops import ConcatOp
+from stratum.optimizer.logical._ops import Op, OperandRef
 from stratum.optimizer.physical._conversion import ConversionOp, to_pandas, to_polars
 from stratum.optimizer.physical._representation import FrameLib, frame_lib
 
@@ -140,6 +141,56 @@ def test_columns_of_the_same_frame_stay_on_polars(source):
     assert frame_lib(assign) is FrameLib.POLARS
     pd.testing.assert_frame_equal(_as_pandas(result).reset_index(drop=True),
                                   _pandas(plan).reset_index(drop=True), check_dtype=False)
+
+
+@pytest.mark.parametrize("read_index", [False, True])
+def test_nested_column_concats_preserve_a_shared_filtered_index(source, read_index):
+    filtered = source[source["k"] > 1]
+    numeric = filtered[["k"]].skb.concat([filtered[["x"]]], axis=1)
+    plan = numeric.skb.concat([filtered[["s"]]], axis=1)
+    if read_index:
+        plan = plan.assign(row_label=plan.index)
+    ops, result = _greedy(plan)
+    concats = [op for op in ops if isinstance(op, ConcatOp)]
+    assert len(concats) == 2
+    expected = _pandas(plan)
+    if read_index:
+        # An index-observing consumer still requires the original labels.
+        assert result["row_label"].tolist() == [0, 2]
+        pd.testing.assert_frame_equal(result, expected, check_dtype=False)
+    else:
+        assert all(frame_lib(op) is FrameLib.POLARS for op in concats)
+        assert not any(isinstance(op, ConversionOp) for op in ops)
+        pd.testing.assert_frame_equal(_as_pandas(result).reset_index(drop=True),
+                                      expected.reset_index(drop=True), check_dtype=False)
+
+
+def test_column_concat_of_different_row_sets_still_aligns_by_label(source):
+    filtered = source[source["k"] > 1]
+    plan = source[["k"]].skb.concat([filtered[["x"]]], axis=1)
+    ops, result = _greedy(plan)
+    concat = next(op for op in ops if isinstance(op, ConcatOp))
+    assert frame_lib(concat) is FrameLib.PANDAS
+    assert result["x"].isna().tolist() == [False, True, False, True]
+    pd.testing.assert_frame_equal(result, _pandas(plan), check_dtype=False)
+
+
+@pytest.mark.parametrize("graph_fed", [False, True])
+def test_row_concat_preserves_repeated_labels_when_the_index_is_read(source, graph_fed):
+    from tests.optimizer.physical.test_source_execs import run_plan
+
+    axis = st.as_data_op(0) if graph_fed else 0
+    frame = source[["k"]]
+    stacked = frame.skb.concat([frame], axis=axis)
+    plan = stacked.assign(row_label=stacked.index)
+    with st.config(implementation_selector="greedy"):
+        ops, _ = optimize(plan, OptConfig(literal_inlining=False), env=get_data(plan))
+    concat = next(op for op in ops if isinstance(op, ConcatOp))
+    assert isinstance(concat.axis, OperandRef) == graph_fed
+    assert frame_lib(concat) is FrameLib.PANDAS
+    result = run_plan(ops)
+    assert result["row_label"].tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
+    pd.testing.assert_frame_equal(result, _pandas(plan), check_dtype=False)
 
 
 def test_a_row_drop_starts_a_new_index_origin():

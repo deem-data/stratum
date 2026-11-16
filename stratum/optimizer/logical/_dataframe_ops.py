@@ -58,8 +58,6 @@ class ConcatOp(Op):
     """
     logical_family = "Concat"
     fields = ["operands", "axis"]
-    # Stacked rows keep their inputs' labels, repeats and all.
-    index_effect = IndexEffect.NEW
     cacheable = True
 
     def __init__(self, operands: list = None, axis=0, inputs: list[Op] = None,
@@ -70,6 +68,12 @@ class ConcatOp(Op):
         self.operands = list(operands or [])
         self.axis = axis
         self.output_type = OutputType.FRAME
+
+    @property
+    def index_effect(self):
+        # Column concatenation preserves a shared index. Row stacking can repeat
+        # labels; a graph-fed axis cannot establish a shared index at plan time.
+        return IndexEffect.COMMON if self.axis == 1 else IndexEffect.NEW
 
     @property
     def aligns_by_label(self):

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator
 from sklearn.linear_model import Ridge
-from skrub import ApplyToCols
+from skrub import ApplyToCols, StringEncoder, TableVectorizer
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 
@@ -21,6 +21,8 @@ from stratum.optimizer.logical._split_ops import SplitOutput
 from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._generic_execs import CallExec
 from stratum.optimizer.physical._physical_ops import EstimatorExecution
+from stratum.optimizer.physical._representation import FrameLib, frame_lib
+from stratum.optimizer.physical._transform_execs import TableVectorizerOp
 from stratum.runtime._reuse_cache import active_reuse_cache
 from stratum.runtime._scheduler import SequentialScheduler
 from stratum.runtime import _reuse_cache
@@ -93,6 +95,43 @@ def test_every_fold_probes_entries_written_by_previous_folds(csv_path, cache, ru
     sched, taken = run(search(csv_path), cv=cv)
     assert taken == [[], ["SklearnRidge_predict_test", "SklearnRidge_predict_test"]]
     assert sched.pool.active_count == 0 and not sched.state_store
+
+
+def test_nested_concats_do_not_prevent_reuse_when_a_search_branch_is_removed(
+        csv_path, cache, run, monkeypatch):
+    def pipeline(explore):
+        data = st.as_data_op(str(csv_path)).skb.apply_func(pd.read_csv)
+        X, y = data[["a", "b"]].skb.mark_as_X(), data["y"].skb.mark_as_y()
+        features = X.skb.apply(TableVectorizer(high_cardinality=StringEncoder(random_state=42)))
+        features = features.skb.apply(StandardScaler())
+        if explore:
+            manual = X[["a"]].skb.concat([X[["b"]]], axis=1)
+            manual = manual.skb.concat([X[["a"]].rename(columns={"a": "c"})], axis=1)
+            features = st.choose_from({"manual": manual, "tv": features}, name="features").as_data_op()
+        return features.skb.apply(Ridge(alpha=1.0 if explore else 2.0), y=y)
+
+    executed = []
+    process = SequentialScheduler.process_op
+
+    def record(sched, op):
+        if isinstance(op, TableVectorizerOp) and op.cache_hit is None:
+            executed.append(op.mode)
+        return process(sched, op)
+
+    monkeypatch.setattr(SequentialScheduler, "process_op", record)
+    with st.config(implementation_selector="greedy"), st.config_context(eager_data_ops=False):
+        first, _ = run(pipeline(True))
+        assert executed == ["fit_transform", "transform"] * 3
+        assert frame_lib(first.linearized_dag[first.pos_split_op].inputs[0]) is FrameLib.POLARS
+        assert not any(isinstance(op, ConversionOp) for op in first.linearized_dag[:first.pos_split_op])
+        executed.clear()
+        second, taken = run(pipeline(False))
+        assert not executed
+        assert all(any("StandardScaler" in name for name in hits) for hits in taken)
+        with st.config(reuse_cache=False):
+            fresh, _ = run(pipeline(False))
+    np.testing.assert_allclose(second.results_["scores"], fresh.results_["scores"])
+    assert second.pool.active_count == 0 and not second.state_store
 
 
 def test_training_lineage_depends_only_on_training_rows(csv_path, cache):
