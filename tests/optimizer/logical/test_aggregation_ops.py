@@ -7,19 +7,22 @@ import stratum as st
 from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import (
-    AggregateOp, _aggregation_entries, _aggregation_params,
-    _extract_aggregations, _extract_grouping, _is_aggregation, _is_groupby_op,
-    _is_value_counts, _named_aggregation_entries, make_aggregate_op,
+    AggregateOp, _AggCall, _AggItem, _DICT, _FUNC, _LABELS, _NAMED, _aggregation_entries,
+    _aggregation_params, _get_computed_sources, _extract_aggregations, _extract_grouping,
+    _get_sources, _is_aggregation, _is_groupby_op, _is_value_counts,
+    _labelled_aggregation_entries, _projected_aggregation_entries, make_aggregate_op,
     make_value_counts_ops)
 from stratum.optimizer.logical._column_expr import (
-    AggExpr, AllCols, BinOpExpr, Col, DtExpr, OperandLeaf)
+    AggExpr, AllCols, BinOpExpr, Col, Const, DtExpr, OperandLeaf, UnaryOpExpr)
 from stratum.optimizer.logical._metadata_ops import MetadataOp
+from stratum.optimizer.logical._numeric_ops import NumericOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._source_ops import InMemoryFrameOp
-from stratum.optimizer.logical._ops import MethodCallOp, Op, OperandRef, OutputType
+from stratum.optimizer.logical._ops import (
+    BinOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType)
 from stratum.runtime._buffer_pool import BufferPool
 from .test_dataframe_ops import (
     force_polars, optimize, run_op)
@@ -45,6 +48,30 @@ def _src(output_type):
 def _wildcard(func="sum", **params):
     """The `.agg(func)` shape: one unnamed entry over every column."""
     return ((None, AggExpr(func, AllCols(), params or None)),)
+
+
+def _groupby(*args, **kwargs):
+    """A `groupby(...)` call with no producers wired yet."""
+    return MethodCallOp("groupby", args=args, kwargs=kwargs)
+
+
+def _method(name, *args, **kwargs):
+    """A bare method call, for tests that only parse it."""
+    return MethodCallOp(name, args=args, kwargs=kwargs)
+
+
+def _call_over(*producers, method="sum", args=(), kwargs=None):
+    """Chain ``producers`` (source first) and hang an aggregation call off the end.
+
+    Each op is the single consumer of the one before it, which is how the
+    extraction pass sees a plain ``df.groupby(...)[...].agg(...)`` chain.
+    """
+    call = MethodCallOp(method, args=args, kwargs=kwargs or {})
+    chain = [*producers, call]
+    for producer, consumer in zip(chain, chain[1:]):
+        consumer.inputs = [producer]
+        producer.outputs = [consumer]
+    return call
 
 
 class TestAggregateOp(unittest.TestCase):
@@ -194,10 +221,10 @@ class TestAggregateOutputType(unittest.TestCase):
         self.assertEqual(OutputType.SERIES, op.output_type)
 
     def test_series_reduction_leaves_frame_world(self):
-        # A scalar is not frame-world data; the lattice spells that UNKNOWN.
+        # One reduction of a series is a scalar, which is not frame-world data.
         op = AggregateOp(grouped=False, aggregations=_wildcard(),
                          inputs=[_src(OutputType.SERIES)])
-        self.assertEqual(OutputType.UNKNOWN, op.output_type)
+        self.assertEqual(OutputType.SCALAR, op.output_type)
 
     def test_defaults_to_frame_when_the_source_kind_is_unknown(self):
         self.assertEqual(OutputType.FRAME, AggregateOp().output_type)
@@ -287,52 +314,65 @@ class TestAggregateHelpers(unittest.TestCase):
         _, agg = _groupby_agg_pair(agg_method="agg", agg_args=("sum",))
         self.assertTrue(_is_aggregation(agg))
 
+    def test_is_aggregation_reads_only_the_method_name(self):
+        # Whether a call can fuse is make_aggregate_op's decision alone, so the
+        # gate gives the same answer whatever feeds the call.
+        groupby, shared = _groupby_agg_pair()
+        groupby.outputs.append(_method("count"))
+        calls = {
+            "no input": _method("sum"),
+            "a frame input": _call_over(_src(OutputType.FRAME)),
+            "a shared groupby": shared,
+            "agg without a spec": _method("agg"),
+        }
+        for name, call in calls.items():
+            with self.subTest(name):
+                self.assertTrue(_is_aggregation(call))
+        self.assertFalse(_is_aggregation(_method("head")))
+
     def test_is_aggregation_agg_with_spec_as_a_kwarg(self):
         # `.agg(func="sum")` is the same call as `.agg("sum")`.
-        _, agg = _groupby_agg_pair(agg_method="agg", agg_kwargs={"func": "sum"})
-        self.assertTrue(_is_aggregation(agg))
-        self.assertEqual("sum", _extract_aggregations(agg))
+        _, keyword = _groupby_agg_pair(agg_method="agg", agg_kwargs={"func": "sum"})
+        _, positional = _groupby_agg_pair(agg_method="agg", agg_args=("sum",))
+        self.assertTrue(_is_aggregation(keyword))
+        self.assertEqual(
+            _AggCall(form=_FUNC, multi=False, items=(
+                _AggItem(key=None, column=None, func="sum", params={}),)),
+            _extract_aggregations(keyword))
+        self.assertEqual(_extract_aggregations(positional),
+                         _extract_aggregations(keyword))
 
     def test_named_aggregation_requires_column_reduction_pairs(self):
         _, named = _groupby_agg_pair(
             agg_method="agg", agg_kwargs={"total": ("v", "sum")})
-        self.assertTrue(_is_aggregation(named))
-        _, multi_output = _groupby_agg_pair(
+        self.assertEqual(
+            _AggCall(form=_NAMED, multi=False, items=(
+                _AggItem(key="total", column="v", func="sum", params={}),)),
+            _extract_aggregations(named))
+        # A list where the pair belongs is neither a pair nor a label.
+        groupby, multi_output = _groupby_agg_pair(
             agg_method="agg", agg_kwargs={"total": ["sum", "mean"]})
-        self.assertFalse(_is_aggregation(multi_output))
+        groupby.inputs = [_src(OutputType.FRAME)]
+        self.assertIsNone(_extract_aggregations(multi_output))
+        self.assertIsNone(make_aggregate_op(multi_output))
 
     def test_named_aggregation_accepts_named_agg(self):
         # pandas 3 made NamedAgg a dataclass, no longer a (column, aggfunc) tuple.
-        _, named = _groupby_agg_pair(agg_method="agg", agg_kwargs={
-            "total": pd.NamedAgg(column="v", aggfunc="sum"),
-            "spread": pd.NamedAgg("v", "std", ddof=0)})
-        self.assertTrue(_is_aggregation(named))
+        call = _extract_aggregations(_method(
+            "agg", total=pd.NamedAgg(column="v", aggfunc="sum"),
+            spread=pd.NamedAgg("v", "std", ddof=0)))
+        self.assertEqual(_NAMED, call.form)
         self.assertEqual((("total", AggExpr("sum", Col("v"))),
                           ("spread", AggExpr("std", Col("v"), {"ddof": 0}))),
-                         _named_aggregation_entries(named))
+                         _projected_aggregation_entries(call, None))
 
     def test_named_agg_with_positional_reduction_arguments_is_not_fused(self):
-        _, named = _groupby_agg_pair(agg_method="agg", agg_kwargs={
+        # AggExpr has no slot for positional reduction arguments.
+        groupby, agg = _groupby_agg_pair(agg_method="agg", agg_kwargs={
             "q": pd.NamedAgg("v", "quantile", 0.5)})
-        self.assertIsNone(_named_aggregation_entries(named))
-
-    def test_is_aggregation_agg_without_spec_is_false(self):
-        _, agg = _groupby_agg_pair(agg_method="agg", agg_args=())
-        self.assertFalse(_is_aggregation(agg))
-
-    def test_is_aggregation_no_inputs_is_false(self):
-        self.assertFalse(_is_aggregation(MethodCallOp("sum", args=(), kwargs={})))
-
-    def test_is_aggregation_non_groupby_input_is_false(self):
-        agg = MethodCallOp("sum", args=(), kwargs={})
-        agg.inputs = [InMemoryFrameOp(data=pd.DataFrame({"a": [1]}))]
-        self.assertFalse(_is_aggregation(agg))
-
-    def test_is_aggregation_multi_consumer_groupby_is_false(self):
-        groupby, agg = _groupby_agg_pair()
-        # A second consumer of the groupby blocks fusion.
-        groupby.outputs.append(MethodCallOp("count", args=(), kwargs={}))
-        self.assertFalse(_is_aggregation(agg))
+        groupby.inputs = [_src(OutputType.FRAME)]
+        self.assertIsNone(_extract_aggregations(agg))
+        self.assertIsNone(make_aggregate_op(agg))
 
     def test_is_aggregation_unknown_method_is_false(self):
         _, agg = _groupby_agg_pair(agg_method="head")
@@ -351,12 +391,16 @@ class TestAggregateHelpers(unittest.TestCase):
         self.assertIsNone(_extract_grouping(gb))
 
     def test_extract_aggregations_from_agg_spec(self):
-        agg = MethodCallOp("agg", args=("mean",), kwargs={})
-        self.assertEqual("mean", _extract_aggregations(agg))
+        self.assertEqual(
+            _AggCall(form=_FUNC, multi=False, items=(
+                _AggItem(key=None, column=None, func="mean", params={}),)),
+            _extract_aggregations(_method("agg", "mean")))
 
     def test_extract_aggregations_from_direct_method(self):
-        agg = MethodCallOp("sum", args=(), kwargs={})
-        self.assertEqual("sum", _extract_aggregations(agg))
+        self.assertEqual(
+            _AggCall(form=_FUNC, multi=False, items=(
+                _AggItem(key=None, column=None, func="sum", params={}),)),
+            _extract_aggregations(_method("sum")))
 
     def test_make_aggregate_op_normalizes_direct_method(self):
         df = InMemoryFrameOp(data=pd.DataFrame({"g": ["a"], "v": [1]}))
@@ -377,10 +421,17 @@ class TestAggregateHelpers(unittest.TestCase):
         self.assertIn(new_op, df.outputs)
 
     def test_aggregation_entries_refuse_a_parameter_the_reduction_lacks(self):
-        # ddof belongs to std/var/sem; sum has no spelling for it, so the entry
-        # cannot be built and the caller must leave the chain unfused.
-        self.assertIsNone(_aggregation_entries("sum", {"ddof": 1}))
-        self.assertIsNotNone(_aggregation_entries("std", {"ddof": 1}))
+        # ddof belongs to std/var/sem, and sum has no spelling for it. The entry
+        # builder raises, and make_aggregate_op turns that into no fusion.
+        def call(func):
+            return _AggCall(form=_FUNC, multi=False, items=(
+                _AggItem(key=None, column=None, func=func, params={"ddof": 1}),))
+        with self.assertRaises(NotImplementedError):
+            _aggregation_entries(call("sum"), None, False)
+        self.assertIsNotNone(_aggregation_entries(call("std"), None, False))
+        groupby, agg = _groupby_agg_pair(agg_kwargs={"ddof": 1})
+        groupby.inputs = [_src(OutputType.FRAME)]
+        self.assertIsNone(make_aggregate_op(agg))
 
     def test_aggregation_params_discard_hints_and_refuse_graph_fed_values(self):
         direct = MethodCallOp("sum", args=(), kwargs={"engine": "cython",
@@ -404,6 +455,428 @@ class TestAggregateHelpers(unittest.TestCase):
         self.assertIsNone(make_aggregate_op(agg))
 
 
+# Aggregation fusion, one class per stage.
+class TestAggregationSources(unittest.TestCase):
+    """`_get_sources`: what feeds an aggregation call, and which of it is folded."""
+
+    def _assert_sources(self, sources, *, groupby_op=None, projection_op=None,
+                        frame, columns=None, series=False):
+        self.assertIs(groupby_op, sources.groupby_op)
+        self.assertIs(projection_op, sources.projection_op)
+        self.assertIs(frame, sources.src)
+        self.assertEqual(columns, sources.columns)
+        self.assertIs(series, sources.is_series)
+        self.assertIs(groupby_op is not None, sources.grouped)
+
+    def test_a_bare_groupby_is_folded_and_nothing_is_projected(self):
+        frame, groupby = _src(OutputType.FRAME), _groupby("g")
+        self._assert_sources(_get_sources(_call_over(frame, groupby)),
+                             groupby_op=groupby, frame=frame)
+
+    def test_a_groupby_over_a_series_aggregates_a_series(self):
+        # series.groupby(...) is a SeriesGroupBy with no projection after it.
+        series, groupby = _src(OutputType.SERIES), _groupby("g")
+        self._assert_sources(_get_sources(_call_over(series, groupby)),
+                             groupby_op=groupby, frame=series, series=True)
+
+    def test_a_grouped_projection_is_folded_with_its_columns_in_selection_order(self):
+        # "v" and ["v"] select the same column, but the first aggregates a Series
+        # and the second a DataFrame.
+        for key, columns, series in (("v", ("v",), True),
+                                     (["v"], ("v",), False),
+                                     (["w", "v"], ("w", "v"), False)):
+            with self.subTest(key=key):
+                frame, groupby = _src(OutputType.FRAME), _groupby("g")
+                projection = ColumnProjectionOp(key=key)
+                sources = _get_sources(_call_over(frame, groupby, projection))
+                self._assert_sources(sources, groupby_op=groupby,
+                                     projection_op=projection, frame=frame,
+                                     columns=columns, series=series)
+
+    def test_a_shared_groupby_or_grouped_projection_is_refused(self):
+        # Both get folded, so a second reader of either would lose its value.
+        for shared in ("groupby", "projection"):
+            with self.subTest(shared):
+                groupby, projection = _groupby("g"), ColumnProjectionOp(key="v")
+                call = _call_over(_src(OutputType.FRAME), groupby, projection)
+                reader = groupby if shared == "groupby" else projection
+                reader.outputs.append(_method("max"))
+                self.assertIsNone(_get_sources(call))
+
+    def test_a_grouped_getitem_without_literal_columns_is_refused(self):
+        getitem = GetItemOp(key=OperandRef(1))
+        call = _call_over(_src(OutputType.FRAME), _groupby("g"), getitem)
+        self.assertIsNone(_get_sources(call))
+
+    def test_an_ungrouped_projection_stays_as_the_input_and_names_no_columns(self):
+        # Nothing is folded, so the entries read the projection's whole output.
+        for key, series in (("v", True), (["w", "v"], False)):
+            with self.subTest(key=key):
+                projection = ColumnProjectionOp(key=key)
+                call = _call_over(_src(OutputType.FRAME), projection)
+                self._assert_sources(_get_sources(call), frame=projection, series=series)
+
+    def test_an_ungrouped_projection_may_have_other_readers(self):
+        # Nothing is folded, so a second reader of the projection loses nothing.
+        projection = ColumnProjectionOp(key=["v", "w"])
+        call = _call_over(_src(OutputType.FRAME), projection)
+        projection.outputs.append(_method("max"))
+        self.assertIs(projection, _get_sources(call).src)
+
+    def test_a_frame_without_a_projection_is_aggregated_whole(self):
+        frame = _src(OutputType.FRAME)
+        self._assert_sources(_get_sources(_call_over(frame)), frame=frame)
+
+    def test_a_row_selecting_getitem_is_a_plain_source(self):
+        # df[mask] keeps every column: a frame to reduce whole, not a projection.
+        mask = GetItemOp(key=OperandRef(1), is_filter=True)
+        mask.output_type = OutputType.FRAME
+        self._assert_sources(_get_sources(_call_over(_src(OutputType.FRAME), mask)),
+                             frame=mask)
+
+    def test_an_object_that_is_not_a_frame_is_refused_without_a_projection(self):
+        # An UNKNOWN producer may be a window such as df.rolling(3). Reading it
+        # as a frame would turn a rolling sum into a whole-frame sum.
+        for kind in (OutputType.SERIES, OutputType.UNKNOWN):
+            with self.subTest(kind=kind.name):
+                self.assertIsNone(_get_sources(_call_over(_src(kind))))
+
+    @staticmethod
+    def _product_of_columns():
+        """``df["a"] * df["b"]`` wired over one frame: ``(frame, product)``."""
+        frame = _src(OutputType.FRAME)
+        a, b = ColumnProjectionOp(key="a"), ColumnProjectionOp(key="b")
+        product = BinOp(operator.mul, OperandRef(0), OperandRef(1))
+        product.output_type = OutputType.SERIES
+        a.inputs, b.inputs, product.inputs = [frame], [frame], [a, b]
+        frame.outputs, a.outputs, b.outputs = [a, b], [product], [product]
+        return frame, product
+
+    def test_an_ungrouped_computed_series_is_found_by_the_computed_stage(self):
+        # (df["a"] * df["b"]).sum() aggregates a computed Series, which
+        # _get_sources refuses and the computed stage finds.
+        frame, product = self._product_of_columns()
+        call = _call_over(product)
+        self.assertIsNone(_get_sources(call))
+        sources = _get_computed_sources(call, None)
+        self._assert_sources(sources, frame=frame, series=True)
+        self.assertIs(product, sources.producer)
+
+    def test_a_grouped_computed_series_is_re_read_by_the_computed_stage(self):
+        # (df["a"] * df["b"]).groupby(df["g"]).sum(): _get_sources sees a
+        # SeriesGroupBy over the product, and the computed stage re-reads it as
+        # the computed Series.
+        frame, product = self._product_of_columns()
+        key = ColumnProjectionOp(key="g")
+        key.inputs, frame.outputs = [frame], [*frame.outputs, key]
+        groupby = _groupby(OperandRef(1))
+        call = _call_over(product, groupby)
+        groupby.inputs = [product, key]
+        key.outputs = [groupby]
+        plain = _get_sources(call)
+        self._assert_sources(plain, groupby_op=groupby, frame=product, series=True)
+        sources = _get_computed_sources(call, plain)
+        self._assert_sources(sources, groupby_op=groupby, frame=frame, series=True)
+        self.assertIs(product, sources.producer)
+
+    def test_the_computed_stage_skips_objects_that_are_not_computed(self):
+        # A grouped projection, a plain frame, and arithmetic over two frames.
+        frame = _src(OutputType.FRAME)
+        projected = _call_over(frame, _groupby("g"), ColumnProjectionOp(key="v"))
+        self.assertIsNone(_get_computed_sources(projected, _get_sources(projected)))
+        whole = _call_over(_src(OutputType.FRAME))
+        self.assertIsNone(_get_computed_sources(whole, _get_sources(whole)))
+        left, right = _src(OutputType.FRAME), _src(OutputType.FRAME)
+        a, b = ColumnProjectionOp(key="a"), ColumnProjectionOp(key="b")
+        cross = BinOp(operator.mul, OperandRef(0), OperandRef(1))
+        cross.output_type = OutputType.SERIES
+        a.inputs, b.inputs, cross.inputs = [left], [right], [a, b]
+        self.assertIsNone(_get_computed_sources(_call_over(cross), None))
+
+
+class TestAggregationCallParsing(unittest.TestCase):
+    """`_extract_aggregations`: the syntax only. Its meaning depends on the aggregated object."""
+
+    def test_keywords_are_parameters_beside_a_spec_and_labels_without_one(self):
+        # The same keyword means two things, and only the parser can tell them
+        # apart. A direct method's keywords are parameters too.
+        std_ddof0 = _AggCall(form=_FUNC, multi=False, items=(
+            _AggItem(key=None, column=None, func="std", params={"ddof": 0}),))
+        self.assertEqual(std_ddof0, _extract_aggregations(_method("std", ddof=0)))
+        self.assertEqual(std_ddof0, _extract_aggregations(_method("agg", "std", ddof=0)))
+        self.assertEqual(
+            _AggCall(form=_LABELS, multi=False, items=(
+                _AggItem(key="ddof", column=None, func="std", params={}),)),
+            _extract_aggregations(_method("agg", ddof="std")))
+
+    def test_a_dict_is_parsed_by_key_and_drops_the_other_keywords(self):
+        self.assertEqual(
+            _AggCall(form=_DICT, multi=False, items=(
+                _AggItem(key="v", column=None, func="sum", params={}),
+                _AggItem(key="w", column=None, func="mean", params={}))),
+            _extract_aggregations(_method("agg", {"v": "sum", "w": "mean"})))
+        # pandas drops the keywords beside a dict spec: agg({"v": "std"}, ddof=0)
+        # is a sample std, as if ddof were never passed.
+        self.assertEqual(
+            _AggCall(form=_DICT, multi=False, items=(
+                _AggItem(key="v", column=None, func="std", params={}),)),
+            _extract_aggregations(_method("agg", {"v": "std"}, ddof=0)))
+        # axis keeps its meaning and has no spelling here.
+        self.assertIsNone(_extract_aggregations(_method("agg", {"v": "sum"}, axis=0)))
+
+    def test_named_pairs_carry_label_column_and_their_own_parameters(self):
+        call = _method("agg", total=("v", "sum"),
+                       spread=pd.NamedAgg("v", "std", ddof=0))
+        self.assertEqual(
+            _AggCall(form=_NAMED, multi=False, items=(
+                _AggItem(key="total", column="v", func="sum", params={}),
+                _AggItem(key="spread", column="v", func="std", params={"ddof": 0}))),
+            _extract_aggregations(call))
+
+    def test_a_list_of_functions_is_flagged_multi(self):
+        for name, call, form in (
+                ("agg(list)", _method("agg", ["sum", "mean"]), _FUNC),
+                ("agg(dict of lists)", _method("agg", {"v": ["sum", "mean"]}), _DICT)):
+            with self.subTest(name):
+                parsed = _extract_aggregations(call)
+                self.assertEqual(form, parsed.form)
+                self.assertTrue(parsed.multi)
+        self.assertFalse(_extract_aggregations(_method("agg", {"v": "sum"})).multi)
+
+    def test_execution_hints_are_neither_parameters_nor_labels(self):
+        for name, call, items in (
+                ("direct", _method("sum", engine="cython"),
+                 (_AggItem(key=None, column=None, func="sum", params={}),)),
+                ("agg spec", _method("agg", "sum", engine="numba"),
+                 (_AggItem(key=None, column=None, func="sum", params={}),)),
+                ("named", _method("agg", total=("v", "sum"), engine="numba"),
+                 (_AggItem(key="total", column="v", func="sum", params={}),))):
+            with self.subTest(name):
+                self.assertEqual(items, _extract_aggregations(call).items)
+
+    def test_unrepresentable_calls_parse_to_none(self):
+        calls = {
+            "no spec": _method("agg"),
+            "graph-fed spec": _method("agg", OperandRef(1)),
+            "callable spec": _method("agg", sum),
+            "empty dict": _method("agg", {}),
+            "extra positional argument": _method("agg", "sum", 3),
+            "positional reduction argument": _method("sum", 0),
+            "graph-fed parameter": _method("std", ddof=OperandRef(1)),
+            "list as a label": _method("agg", total=["sum", "mean"]),
+            "labels mixed with pairs": _method("agg", total="sum", avg=("v", "mean")),
+            "NamedAgg with positional arguments": _method(
+                "agg", q=pd.NamedAgg("v", "quantile", 0.5)),
+            "not an aggregation": _method("head"),
+        }
+        for name, call in calls.items():
+            with self.subTest(name):
+                self.assertIsNone(_extract_aggregations(call))
+
+
+class TestAggregationEntries(unittest.TestCase):
+    """The entry builders: one function over the aggregated object, a spec that picks
+    columns, or a dict or labels on a Series."""
+
+    def test_a_function_reduces_everything_unless_a_projection_was_folded(self):
+        call = _AggCall(form=_FUNC, multi=False, items=(
+            _AggItem(key=None, column=None, func="sum", params={}),))
+        self.assertEqual(_wildcard("sum"), _aggregation_entries(call, None, False))
+        self.assertEqual(((None, AggExpr("sum", Col("w"))),
+                          (None, AggExpr("sum", Col("v")))),
+                         _aggregation_entries(call, ("w", "v"), False))
+
+    def test_size_ignores_a_frame_shaped_projection_but_keeps_a_column(self):
+        # groupby(k)[["v"]].size() is groupby(k).size(). groupby(k)["v"].size()
+        # keeps "v" because it names the resulting series.
+        size = _AggCall(form=_FUNC, multi=False, items=(
+            _AggItem(key=None, column=None, func="size", params={}),))
+        self.assertEqual(_wildcard("size"), _aggregation_entries(size, ("v",), False))
+        self.assertEqual(((None, AggExpr("size", Col("v"))),),
+                         _aggregation_entries(size, ("v",), True))
+
+    def test_dict_keys_are_input_columns_and_named_entries_keep_their_labels(self):
+        as_dict = _AggCall(form=_DICT, multi=False, items=(
+            _AggItem(key="v", column=None, func="sum", params={}),
+            _AggItem(key="w", column=None, func="max", params={})))
+        self.assertEqual(((None, AggExpr("sum", Col("v"))),
+                          (None, AggExpr("max", Col("w")))),
+                         _projected_aggregation_entries(as_dict, None))
+        named = _AggCall(form=_NAMED, multi=False, items=(
+            _AggItem(key="total", column="v", func="sum", params={}),))
+        self.assertEqual((("total", AggExpr("sum", Col("v"))),),
+                         _projected_aggregation_entries(named, None))
+
+    def test_a_spec_column_outside_the_folded_projection_is_refused(self):
+        # Only a folded (grouped) projection is checked here. An ungrouped one
+        # stays in the plan, and pandas raises the KeyError when it runs.
+        call = _AggCall(form=_DICT, multi=False, items=(
+            _AggItem(key="w", column=None, func="sum", params={}),))
+        self.assertIsNone(_projected_aggregation_entries(call, ("v",)))
+        self.assertIsNotNone(_projected_aggregation_entries(call, ("v", "w")))
+        self.assertIsNotNone(_projected_aggregation_entries(call, None))
+
+    def test_labels_on_a_series_reduce_the_folded_column_or_the_series_itself(self):
+        labels = _AggCall(form=_LABELS, multi=False, items=(
+            _AggItem(key="total", column=None, func="sum", params={}),
+            _AggItem(key="avg", column=None, func="mean", params={})))
+        # df.groupby("g")["v"].agg(...): the folded selection names the column.
+        self.assertEqual((("total", AggExpr("sum", Col("v"))),
+                          ("avg", AggExpr("mean", Col("v")))),
+                         _labelled_aggregation_entries(labels, ("v",)))
+        # df["v"].agg(...) and df["v"].groupby(...).agg(...): the Series is the input.
+        self.assertEqual((("total", AggExpr("sum", AllCols())),
+                          ("avg", AggExpr("mean", AllCols()))),
+                         _labelled_aggregation_entries(labels, None))
+        # On a Series a dict key is a label too, not a column.
+        as_dict = _AggCall(form=_DICT, multi=False, items=(
+            _AggItem(key="total", column=None, func="sum", params={}),))
+        self.assertEqual((("total", AggExpr("sum", AllCols())),),
+                         _labelled_aggregation_entries(as_dict, None))
+
+    def test_a_key_or_function_that_is_not_a_name_is_refused(self):
+        def call(key, func):
+            return _AggCall(form=_DICT, multi=False, items=(
+                _AggItem(key=key, column=None, func=func, params={}),))
+        for builder in (_projected_aggregation_entries, _labelled_aggregation_entries):
+            for key, func in ((1, "sum"), ("v", sum)):
+                with self.subTest(builder=builder.__name__, key=key, func=func):
+                    self.assertIsNone(builder(call(key, func), None))
+
+
+class TestAggregateFusion(unittest.TestCase):
+    """`make_aggregate_op`: what is folded, what stays, and which pairs are refused."""
+
+    def test_a_whole_frame_reduction_becomes_an_ungrouped_aggregate(self):
+        frame = _src(OutputType.FRAME)
+        call = _call_over(frame)
+        new_op = make_aggregate_op(call)
+        self.assertFalse(new_op.grouped)
+        self.assertEqual((), new_op.grouping)
+        self.assertEqual(_wildcard("sum"), new_op.aggregations)
+        self.assertEqual([frame], new_op.inputs)
+        self.assertEqual([new_op], frame.outputs)
+        self.assertEqual([], call.inputs)
+        self.assertIs(OutputType.SERIES, new_op.output_type)
+
+    def test_an_ungrouped_projection_stays_as_the_input(self):
+        for key in ("v", ["v", "w"]):
+            with self.subTest(key=key):
+                frame, projection = _src(OutputType.FRAME), ColumnProjectionOp(key=key)
+                new_op = make_aggregate_op(_call_over(frame, projection))
+                self.assertEqual([projection], new_op.inputs)
+                self.assertEqual([frame], projection.inputs)
+                self.assertEqual([new_op], projection.outputs)
+                self.assertEqual(_wildcard("sum"), new_op.aggregations)
+
+    def test_a_grouped_projection_is_folded_away(self):
+        frame, groupby = _src(OutputType.FRAME), _groupby("g")
+        projection = ColumnProjectionOp(key=["w", "v"])
+        new_op = make_aggregate_op(_call_over(frame, groupby, projection))
+        self.assertEqual([frame], new_op.inputs)
+        self.assertEqual([new_op], frame.outputs)
+        self.assertEqual([], groupby.inputs)
+        self.assertEqual([], projection.inputs)
+        self.assertEqual((Col("g"),), new_op.grouping)
+        self.assertEqual(((None, AggExpr("sum", Col("w"))),
+                          (None, AggExpr("sum", Col("v")))),
+                         new_op.aggregations)
+
+    def test_the_aggregated_object_and_its_labels_decide_the_result_kind(self):
+        # A label widens a Series result by one level: a series instead of a
+        # scalar without a groupby, a frame instead of a series with one.
+        def frame(*selection):
+            return [_src(OutputType.FRAME), *selection]
+
+        def grouped(*selection, **options):
+            return frame(_groupby("g", **options), *selection)
+        labels = dict(method="agg", kwargs={"total": "sum"})
+        cases = {
+            "df.sum()": (frame(), {}, OutputType.SERIES),
+            "df['v'].sum()": (frame(ColumnProjectionOp(key="v")), {}, OutputType.SCALAR),
+            "df[['v']].sum()": (frame(ColumnProjectionOp(key=["v"])), {}, OutputType.SERIES),
+            "df['v'].agg(total='sum')": (frame(ColumnProjectionOp(key="v")), labels,
+                                         OutputType.SERIES),
+            "df['v'].agg({'total': 'sum'})": (
+                frame(ColumnProjectionOp(key="v")),
+                dict(method="agg", args=({"total": "sum"},)), OutputType.SERIES),
+            "df.groupby('g').sum()": (grouped(), {}, OutputType.FRAME),
+            "df.groupby('g').size()": (grouped(), dict(method="size"), OutputType.SERIES),
+            "df.groupby('g')['v'].sum()": (grouped(ColumnProjectionOp(key="v")), {},
+                                           OutputType.SERIES),
+            "df.groupby('g')['v'].agg(total='sum')": (
+                grouped(ColumnProjectionOp(key="v")), labels, OutputType.FRAME),
+            "df.groupby('g')[['v']].sum()": (grouped(ColumnProjectionOp(key=["v"])), {},
+                                             OutputType.FRAME),
+            "df.groupby('g', as_index=False)['v'].sum()": (
+                grouped(ColumnProjectionOp(key="v"), as_index=False), {}, OutputType.FRAME),
+            "series.groupby(key).sum()": ([_src(OutputType.SERIES), _groupby("g")], {},
+                                          OutputType.SERIES),
+        }
+        for name, (producers, call, kind) in cases.items():
+            with self.subTest(name):
+                new_op = make_aggregate_op(_call_over(*producers, **call))
+                self.assertIs(kind, new_op.output_type)
+
+    def test_a_shared_groupby_blocks_fusion_and_leaves_the_graph_alone(self):
+        # Folding a groupby that another call also reads would drop its input.
+        frame, groupby = _src(OutputType.FRAME), _groupby("g")
+        call = _call_over(frame, groupby)
+        other = _method("count")
+        groupby.outputs.append(other)
+        self.assertIsNone(make_aggregate_op(call))
+        self.assertEqual([call, other], groupby.outputs)
+        self.assertEqual([groupby], call.inputs)
+
+    def test_refused_calls_leave_the_chain_as_it_was(self):
+        # A refused call stays a MethodCallOp, and pandas runs it.
+        def frame(*selection):
+            return [_src(OutputType.FRAME), *selection]
+
+        def grouped(*selection):
+            return frame(_groupby("g"), *selection)
+
+        def agg(*args, **kwargs):
+            return dict(method="agg", args=args, kwargs=kwargs)
+        column, columns = (lambda: ColumnProjectionOp(key="v"),
+                           lambda: ColumnProjectionOp(key=["v"]))
+        cases = {
+            # Nothing to aggregate.
+            "no input": ([], {}),
+            "agg() without a spec": (grouped(), agg()),
+            # A spelling the aggregated object does not take (_SUPPORTED_FORMS).
+            "SeriesGroupBy + dict": (grouped(column()), agg({"t": "sum"})),
+            "SeriesGroupBy + named": (grouped(column()), agg(t=("v", "sum"))),
+            "Series + named": (frame(column()), agg(t=("v", "sum"))),
+            "DataFrameGroupBy + labels": (grouped(), agg(t="sum")),
+            "DataFrame + labels": (frame(), agg(t="sum")),
+            "DataFrame + named": (frame(), agg(t=("v", "sum"))),
+            # Several outputs per input: a MultiIndex layout.
+            "df.agg(list)": (frame(), agg(["sum", "mean"])),
+            "groupby.agg(dict of lists)": (grouped(), agg({"v": ["sum", "mean"]})),
+            "groupby['v'].agg(list)": (grouped(column()), agg(["sum", "mean"])),
+            # size, first and last mean something else without a groupby.
+            "df.size()": (frame(), dict(method="size")),
+            "df.first()": (frame(), dict(method="first")),
+            "df.agg('last')": (frame(), agg("last")),
+            "df.agg({'v': 'size'})": (frame(), agg({"v": "size"})),
+            # A grouped selection that dropped a spec column: pandas raises KeyError.
+            "groupby[['v']].agg({'w': 'sum'})": (grouped(columns()), agg({"w": "sum"})),
+            "groupby[['v']].agg(t=('w', 'sum'))": (grouped(columns()), agg(t=("w", "sum"))),
+            # A groupby without keys, or a parameter AggExpr cannot represent.
+            "groupby(level=0)": ([_src(OutputType.FRAME), _groupby(level=0)], {}),
+            "df.sum(axis=1)": (frame(), dict(kwargs={"axis": 1})),
+            "df.sum(ddof=1)": (frame(), dict(kwargs={"ddof": 1})),
+        }
+        for name, (producers, call) in cases.items():
+            with self.subTest(name):
+                op = _call_over(*producers, **call)
+                self.assertIsNone(make_aggregate_op(op))
+                self.assertEqual(producers[-1:], op.inputs)
+                for producer, consumer in zip(producers, [*producers[1:], op]):
+                    self.assertEqual([consumer], producer.outputs)
+
+
 def _run_plan(ops):
     """Execute an extracted plan in order and return the last op's value."""
     pool = BufferPool()
@@ -411,6 +884,16 @@ def _run_plan(ops):
         inputs = [pool.pin(key) for key in op.inputs]
         pool.put(op, op.process(inputs))
     return pool.pin(ops[-1])
+
+
+def _assert_same_value(result, expected):
+    """Compare a plan's value with pandas', whatever its kind."""
+    if isinstance(expected, pd.DataFrame):
+        pd.testing.assert_frame_equal(result, expected)
+    elif isinstance(expected, pd.Series):
+        pd.testing.assert_series_equal(result, expected)
+    else:
+        assert result == expected
 
 
 class TestAggregateRewrites(unittest.TestCase):
@@ -664,6 +1147,108 @@ class TestAggregateRewrites(unittest.TestCase):
         expected = df.groupby(df["d"].dt.year).agg({"v": "sum"})
         pd.testing.assert_frame_equal(result, expected)
 
+    # End to end through the extraction pass: plan shapes and rule interactions
+    # the parity tables in test_aggregation_semantics.py do not check.
+    def test_direct_method_and_agg_spec_share_a_structure_key_without_a_groupby(self):
+        numeric = self.df[["v", "w"]]
+        _, direct = self._agg_ops(st.as_data_op(numeric).sum())
+        _, spec = self._agg_ops(st.as_data_op(numeric).agg("sum"))
+        self.assertEqual(direct[0].aggregations, spec[0].aggregations)
+        self.assertEqual(direct[0].structure_key()[2], spec[0].structure_key()[2])
+
+    def test_a_shared_ungrouped_projection_feeds_every_aggregate(self):
+        # Unlike a grouped selection, an ungrouped one is never folded, so a
+        # second reader blocks neither aggregation.
+        selected = st.as_data_op(self.df)[["v", "w"]]
+        ops, agg_ops = self._agg_ops(selected.sum() + selected.max())
+        self.assertEqual(2, len(agg_ops))
+        self.assertEqual(1, sum(isinstance(o, ColumnProjectionOp) for o in ops))
+        numeric = self.df[["v", "w"]]
+        pd.testing.assert_series_equal(self._run_plan(ops),
+                                       numeric.sum() + numeric.max())
+
+    def test_a_computed_series_folds_into_the_entries(self):
+        # The arithmetic becomes each entry's child, so no column projection or
+        # NumericOp is left and the frame is the only input.
+        mul = BinOpExpr(operator.mul, Col("v"), Col("w"))
+        q6 = BinOpExpr(operator.mul, Col("v"), BinOpExpr(operator.sub, Const(1), Col("w")))
+        cases = {
+            "(v * w).sum()": (lambda d: (d["v"] * d["w"]).sum(),
+                              ((None, AggExpr("sum", mul)),), OutputType.SCALAR),
+            "(v * (1 - w)).sum()": (lambda d: (d["v"] * (1 - d["w"])).sum(),
+                                    ((None, AggExpr("sum", q6)),), OutputType.SCALAR),
+            "(-v).sum()": (lambda d: (-d["v"]).sum(),
+                           ((None, AggExpr("sum", UnaryOpExpr(operator.neg, Col("v")))),),
+                           OutputType.SCALAR),
+            "(v * w).agg({'total': 'sum'})": (
+                lambda d: (d["v"] * d["w"]).agg({"total": "sum"}),
+                (("total", AggExpr("sum", mul)),), OutputType.SERIES),
+            "(v * w).agg(total='sum', avg='mean')": (
+                lambda d: (d["v"] * d["w"]).agg(total="sum", avg="mean"),
+                (("total", AggExpr("sum", mul)), ("avg", AggExpr("mean", mul))),
+                OutputType.SERIES),
+            "(v * w).groupby(g).sum()": (
+                lambda d: (d["v"] * d["w"]).groupby(d["g"]).sum(),
+                ((None, AggExpr("sum", mul)),), OutputType.SERIES),
+            "(v * w).groupby(g).agg(total='sum')": (
+                lambda d: (d["v"] * d["w"]).groupby(d["g"]).agg(total="sum"),
+                (("total", AggExpr("sum", mul)),), OutputType.FRAME),
+        }
+        for name, (build, aggregations, kind) in cases.items():
+            with self.subTest(name):
+                ops, (agg,) = self._agg_ops(build(st.as_data_op(self.df)))
+                self.assertEqual(aggregations, agg.aggregations)
+                self.assertEqual((Col("g"),) if agg.grouped else (), agg.grouping)
+                self.assertIs(kind, agg.output_type)
+                self.assertEqual(1, len(agg.inputs))
+                self.assertEqual(
+                    [], [o for o in ops if isinstance(o, (ColumnProjectionOp, NumericOp))])
+                _assert_same_value(self._run_plan(ops), build(self.df))
+
+    def test_ungrouped_computed_reduction_after_filter_and_join(self):
+        right = pd.DataFrame({"g": ["a", "b"], "u": [0.25, 0.5]})
+
+        def after_filter(d):
+            flt = d[d["g"] == "a"]
+            return (flt["v"] * (1 - flt["w"])).sum()
+
+        def after_join(d, r):
+            jn = d.merge(r, on="g")
+            return (jn["v"] * (1 - jn["u"])).sum()
+
+        for name, build, env_args in [
+            ("after filter", after_filter, (self.df,)),
+            ("after join", after_join, (self.df, right)),
+        ]:
+            with self.subTest(name):
+                st_args = [st.as_data_op(arg) for arg in env_args]
+                ops, (agg,) = self._agg_ops(build(*st_args))
+                self.assertFalse(agg.grouped)
+                self.assertIs(OutputType.SCALAR, agg.output_type)
+                self.assertEqual(1, len(agg.inputs))
+                self.assertEqual(self._run_plan(ops), build(*env_args))
+
+    def test_a_computed_series_another_op_reads_is_not_absorbed(self):
+        src = st.as_data_op(self.df)
+        # A shared column stays a leaf input next to the frame.
+        col = src["v"]
+        ops, aggs = self._agg_ops((col * src["w"]).sum() + col.mean())
+        (computed,) = [a for a in aggs if isinstance(a.aggregations[0][1].child, BinOpExpr)]
+        self.assertEqual(2, len(computed.inputs))
+        self.assertEqual(self._run_plan(ops),
+                         (self.df["v"] * self.df["w"]).sum() + self.df["v"].mean())
+        # A shared product replaces the frame as the only input, and every entry
+        # reduces it directly.
+        prod = src["v"] * src["w"]
+        ops, aggs = self._agg_ops(prod.sum() + prod.mean())
+        self.assertEqual(2, len(aggs))
+        for agg in aggs:
+            self.assertEqual(1, len(agg.inputs))
+            self.assertIs(OutputType.SCALAR, agg.output_type)
+            self.assertEqual(AllCols(), agg.aggregations[0][1].child)
+        expected = self.df["v"] * self.df["w"]
+        self.assertEqual(self._run_plan(ops), expected.sum() + expected.mean())
+
 
 def _value_counts(**kwargs) -> MethodCallOp:
     """A `value_counts(**kwargs)` call over a series source."""
@@ -674,7 +1259,7 @@ def _value_counts(**kwargs) -> MethodCallOp:
 
 
 class TestPolarsRefusesASeriesSource(unittest.TestCase):
-    """polars has no expression context for a series, so it opts out at plan time."""
+    """Polars accepts grouped frames and ungrouped scalars, not keyed or frame Series."""
 
     def _agg(self, src_kind):
         return AggregateOp(grouped=True, inputs=[_src(src_kind)])
@@ -685,6 +1270,57 @@ class TestPolarsRefusesASeriesSource(unittest.TestCase):
             self._agg(OutputType.SERIES), None))
         self.assertTrue(PolarsAggregateOp.supports(
             self._agg(OutputType.FRAME), None))
+
+    def test_polars_support_contract_matches_executable_shapes(self):
+        from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
+        typed = _src(OutputType.FRAME)
+        typed.output_schema = pl.Schema({"s": pl.String, "b": pl.Boolean,
+                                         "cat": pl.Categorical()})
+
+        def reduce(child, src, func="sum", grouped=False, output_type=OutputType.SCALAR):
+            return AggregateOp(grouped=grouped, grouping=(Col("g"),) if grouped else (),
+                               aggregations=((None, AggExpr(func, child)),),
+                               inputs=[src], output_type=output_type)
+        mul = BinOpExpr(operator.mul, Col("a"), Col("b"))
+        cases = {
+            # One scalar reduction of a series, or of an expression over a frame.
+            "series scalar": (reduce(AllCols(), _src(OutputType.SERIES)), True),
+            "computed scalar": (reduce(mul, _src(OutputType.FRAME)), True),
+            # A result this path cannot build: a series keyed by columns or groups.
+            "frame reduced to a series": (
+                reduce(AllCols(), _src(OutputType.FRAME), output_type=OutputType.SERIES), False),
+            "grouped series": (reduce(Col("v"), _src(OutputType.FRAME), grouped=True,
+                                      output_type=OutputType.SERIES), False),
+            "frame wildcard as a scalar": (reduce(AllCols(), _src(OutputType.FRAME)), False),
+            # An input dtype where Polars disagrees with pandas.
+            "string sum": (reduce(Col("s"), typed), False),
+            "boolean quantile": (reduce(Col("b"), typed, "quantile"), False),
+            "categorical min": (reduce(Col("cat"), typed, "min"), False),
+        }
+        for name, (op, supported) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(supported, PolarsAggregateOp.supports(op, None))
+
+    def test_polars_executes_series_and_computed_scalar_reductions(self):
+        from stratum._config import config
+        from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
+
+        df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [0.5, 1.5, 2.5]})
+        for name, build in [
+            ("series sum", lambda d: d["a"].sum()),
+            ("computed mul sum", lambda d: (d["a"] * d["b"]).sum()),
+            ("computed expr mean", lambda d: (d["a"] * (1 - d["b"])).mean()),
+        ]:
+            with self.subTest(name):
+                with force_polars():
+                    ops = optimize(build(st.as_data_op(df)), OptConfig(dataframe_ops=True))
+                aggs = [o for o in ops if isinstance(o, AggregateOp)]
+                self.assertEqual(1, len(aggs))
+                self.assertIsInstance(aggs[0], PolarsAggregateOp)
+                self.assertIs(OutputType.SCALAR, aggs[0].output_type)
+                with config(implementation_selector="greedy"):
+                    self.assertAlmostEqual(
+                        build(df), _api.evaluate(build(st.as_data_op(df))))
 
     def test_the_pandas_impl_takes_a_series_source(self):
         from stratum.optimizer.physical._aggregation_execs import PandasAggregateOp
