@@ -14,6 +14,7 @@ transformer implementation.
 from __future__ import annotations
 
 from sklearn.base import clone
+from sklearn.impute import SimpleImputer as _SklearnSimpleImputer
 from sklearn.feature_extraction.text import CountVectorizer as _SklearnCountVectorizer
 from sklearn.preprocessing import StandardScaler as _SklearnStandardScaler
 from sklearn.preprocessing import OneHotEncoder as _SklearnOneHotEncoder
@@ -42,6 +43,7 @@ from stratum.adapters.count_vectorizer import (
     RustyCountVectorizer,
     supports_rust_count_vectorizer,
 )
+from stratum.adapters.simple_imputer import RustySimpleImputer, supports_rust_simple_imputer
 from stratum.optimizer.logical._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import (
@@ -321,6 +323,38 @@ class RustStandardScaler(StandardScalerOp):
             setattr(self, name, estimator)
 
 
+# --- SimpleImputer -----------------------------------------------------------
+class SimpleImputerOp(_TransformerExecution, TransformerOp, PhysicalOp):
+    """Abstract physical missing-value imputation operator."""
+
+    is_abstract = True
+
+
+@sklearn_skrub_impl(of=SimpleImputerOp)
+class SklearnSimpleImputer(SimpleImputerOp):
+    """Reference imputation for default selection and unsupported options."""
+
+    is_abstract = False
+
+
+@rust_impl(of=SimpleImputerOp)
+class RustSimpleImputer(SimpleImputerOp):
+    """Dense input and fused imputed/indicator output under one allocation."""
+
+    is_abstract = False
+
+    @classmethod
+    def supports(cls, op, ctx):
+        return not op.param_refs and supports_rust_simple_imputer(op.original_estimator)[0]
+
+    def on_impl_selected(self, ctx):
+        for name in ("estimator", "original_estimator"):
+            estimator = RustySimpleImputer(**getattr(self, name).get_params(deep=False))
+            estimator._bind_native_worker_budget(ctx.parallelism)
+            estimator._stratum_force_rust = True
+            setattr(self, name, estimator)
+
+
 # --- CountVectorizer ---------------------------------------------------------
 class CountVectorizerOp(_TransformerExecution, TransformerOp, PhysicalOp):
     """Abstract physical word-counting operator."""
@@ -362,6 +396,14 @@ def lower_transformer(op: TransformerOp, ctx) -> PhysicalOp | None:
 
     Dedicated estimators get their own physical op; others run through Skrub.
     """
+    if type(op.original_estimator) is _SklearnSimpleImputer:
+        return SimpleImputerOp(
+            estimator=op.estimator, y=op.y, cols=op.cols,
+            exclude_cols=op.exclude_cols, no_wrap=op.no_wrap,
+            allow_reject=op.allow_reject, unsupervised=op.unsupervised,
+            kwargs=op.kwargs, param_refs=op.param_refs,
+            feeds_estimator=op.feeds_estimator,
+        )
     if type(op.original_estimator) is _SklearnOneHotEncoder:
         return OneHotEncoderOp(
             estimator=op.estimator, y=op.y, cols=op.cols,

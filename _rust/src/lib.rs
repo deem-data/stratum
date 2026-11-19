@@ -8,6 +8,7 @@ mod fd;
 mod hashing;
 mod one_hot_encoder;
 mod standard_scaler;
+mod simple_imputer;
 mod tfidf;
 mod threads;
 mod timing;
@@ -34,6 +35,8 @@ fn _rust_backend_native(_py: Python<'_>, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_hot_encoder::csr_to_dense, m)?)?;
     m.add_function(wrap_pyfunction!(standard_scaler::standard_scale_fit, m)?)?;
     m.add_function(wrap_pyfunction!(standard_scaler::standard_scale_transform, m)?)?;
+    m.add_function(wrap_pyfunction!(simple_imputer::simple_imputer_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(simple_imputer::simple_imputer_transform, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf::tfidf_fit_csr, m)?)?;
     m.add_function(wrap_pyfunction!(tfidf::tfidf_transform_csr, m)?)?;
     m.add_function(wrap_pyfunction!(tree::tree_fit_exact, m)?)?;
