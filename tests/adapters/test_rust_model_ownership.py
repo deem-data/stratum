@@ -46,6 +46,8 @@ def test_native_extension_exports_expected_api():
         "forest_fit_hist",
         "forest_model_info",
         "forest_predict",
+        "simple_imputer_fit",
+        "simple_imputer_transform"
     }
 
     actual = {name for name in dir(rb.native) if not name.startswith("__")}
