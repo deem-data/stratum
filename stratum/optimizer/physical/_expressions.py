@@ -121,9 +121,11 @@ def _(expr: AggExpr, ctx):
     # The whole-object reduction; a grouped pandas aggregation reads func/params
     # off the node instead (see PandasAggregateOp).
     obj = to_pandas(expr.child, ctx)
-    # TODO: retain numeric_only for frame-valued children such as AllCols.
-    # Dropping numeric_only=True can include nonnumeric columns in reductions.
-    params = {k: v for k, v in expr.params.items() if k != "numeric_only"}
+    if isinstance(obj, pd.Series):
+        # Series reductions ignore numeric_only (and Series.quantile raises on it).
+        params = {k: v for k, v in expr.params.items() if k != "numeric_only"}
+    else:
+        params = dict(expr.params)
     if expr.func == "size":
         return obj.size
     if expr.func in ("first", "last"):
@@ -289,6 +291,9 @@ _AGG_POLARS_NOOP_DEFAULTS = {"skipna": True, "numeric_only": False,
 # matches pandas.
 _AGG_POLARS_FIXED_KWARGS = {"skew": {"bias": False}, "kurt": {"bias": False}}
 _AGG_POLARS_REFUSED = frozenset({"idxmin", "idxmax", "sem"})
+# The `quantile` interpolations both backends accept.
+_AGG_POLARS_INTERPOLATIONS = frozenset(
+    {"linear", "lower", "higher", "midpoint", "nearest"})
 
 
 def _agg_polars_params(expr: AggExpr) -> dict:
@@ -298,10 +303,47 @@ def _agg_polars_params(expr: AggExpr) -> dict:
 
 
 def _agg_supports_polars(expr: AggExpr) -> bool:
+    """Whether Polars can run ``expr`` with pandas' result, or pandas' error.
+
+    Parameter values are checked as well as names: where pandas computes and
+    Polars raises (a negative or fractional ``ddof``), or both raise with
+    different errors (``q`` outside ``[0, 1]``, an unknown ``interpolation``),
+    the pandas impl runs instead.
+    """
     if expr.func in _AGG_POLARS_REFUSED:
         return False
     allowed = {"dropna"} if expr.func == "nunique" else set(_AGG_POLARS_PARAMS)
-    return not (set(_agg_polars_params(expr)) - allowed)
+    params = _agg_polars_params(expr)
+    if set(params) - allowed:
+        return False
+    if "ddof" in params:
+        ddof = params["ddof"]
+        if not isinstance(ddof, int) or isinstance(ddof, bool) or ddof < 0:
+            return False
+    if "q" in params:
+        q = params["q"]
+        if (not isinstance(q, (int, float)) or isinstance(q, bool)
+                or not 0 <= q <= 1):
+            return False
+    if ("interpolation" in params
+            and params["interpolation"] not in _AGG_POLARS_INTERPOLATIONS):
+        return False
+    if "dropna" in params and not isinstance(params["dropna"], bool):
+        return False
+    return True
+
+
+def _polars_expr_result_dtype(expr: pl.Expr, frame: pl.DataFrame):
+    """The dtype ``expr`` yields over ``frame``, from its schema, or ``None``.
+
+    Resolves the output schema without executing the plan: the approach the
+    FIXME(#216) on :func:`_polars_expr_dtype` proposes for derived expressions.
+    """
+    try:
+        dtypes = frame.lazy().select(expr.alias("_agg_child")).collect_schema().dtypes()
+        return dtypes[0] if dtypes else None
+    except Exception:  # noqa: BLE001 - fall back cleanly without fill_nan
+        return None
 
 
 @to_polars.register
@@ -310,6 +352,15 @@ def _(expr: AggExpr, ctx):
     # and a whole-frame one (inside select()). Reductions and parameters polars
     # cannot express were refused at plan time (see _agg_supports_polars).
     obj = to_polars(expr.child, ctx)
+    # pandas skips NaN as missing. PolarsAggregateOp nulls the NaN in its inputs,
+    # but a computed child can produce new NaN (0 / 0), so null it here too.
+    if (isinstance(obj, pl.Expr) and isinstance(ctx.frame, pl.DataFrame)
+            and not isinstance(expr.child, (Col, AllCols))
+            and expr.func != "size"):
+        if _polars_expr_result_dtype(obj, ctx.frame) in (pl.Float32, pl.Float64):
+            obj = obj.fill_nan(None)
+    elif isinstance(obj, pl.Series) and obj.dtype in (pl.Float32, pl.Float64):
+        obj = obj.fill_nan(None)
     if expr.func in {"first", "last"} and expr.params.get("skipna", True):
         obj = obj.drop_nulls()
     params = _agg_polars_params(expr)
