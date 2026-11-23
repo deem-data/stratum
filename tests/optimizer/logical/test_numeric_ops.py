@@ -3,10 +3,19 @@ from unittest.mock import patch
 import pandas as pd
 import stratum as st
 import numpy as np
+from scipy.special import expit, logit
 from sklearn.dummy import DummyRegressor
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType, make_binary_numeric_op
 from stratum.optimizer.logical._ops import CallOp, OperandRef, ValueOp
 from stratum.optimizer._optimize import OptConfig, optimize
+from stratum.optimizer.physical._generic_execs import CallExec
+
+
+def _run_plan(ops):
+    results = {}
+    for op in ops:
+        results[op] = op.process("fit_transform", [results[in_op] for in_op in op.inputs])
+    return results[ops[-1]]
 
 class TestNumericOps(unittest.TestCase):
     def setUp(self):
@@ -270,6 +279,35 @@ class TestNumericOps(unittest.TestCase):
         out, *_ = optimize(t1)
         mul_ops = [op for op in out if isinstance(op, NumericOp) and op.type == NumericOpType.MULTIPLY]
         self.assertEqual(len(mul_ops), 1)
+
+    def test_scipy_ufunc(self):
+        for func, values in ((logit, [0.2, 0.8]), (expit, [-2.0, 2.0])):
+            with self.subTest(func=func.__name__):
+                self.assertFalse(hasattr(func, "__module__"))
+                out, *_ = optimize(st.as_data_op(values).skb.apply_func(func))
+
+                self.assertIsInstance(out[-1], CallExec)
+                self.assertIs(out[-1].func, func)
+                np.testing.assert_allclose(_run_plan(out), func(values))
+
+    def test_scipy_logit_after_clip_executes_unchanged(self):
+        probabilities = pd.Series([0.0, 0.2, 0.8, 1.0], name="p")
+        clipped = probabilities.clip(1e-6, 1 - 1e-6)
+        dag = st.as_data_op(probabilities).clip(1e-6, 1 - 1e-6).skb.apply_func(logit)
+
+        out, *_ = optimize(dag)
+
+        self.assertIsInstance(out[-1], CallExec)
+        pd.testing.assert_series_equal(_run_plan(out), logit(clipped))
+
+    def test_unlisted_numpy_ufunc_becomes_generic_numeric_op(self):
+        values = np.array([0.0, np.pi / 2])
+
+        out, *_ = optimize(st.as_data_op(values).skb.apply_func(np.sin))
+
+        self.assertIsInstance(out[-1], NumericOp)
+        self.assertEqual(out[-1].type, NumericOpType.GENERIC)
+        np.testing.assert_allclose(_run_plan(out), np.sin(values))
 
     def test_extract_callop_add_var_var(self):
         df1 = st.as_data_op(2)
