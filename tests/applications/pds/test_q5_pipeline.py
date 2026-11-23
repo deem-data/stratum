@@ -21,13 +21,14 @@ from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import AggExpr, BinOpExpr, Col, Const
 from stratum.optimizer.logical._join_ops import JoinOp
-from stratum.optimizer.logical._map_ops import AssignMapOp
+from stratum.optimizer.logical._combine_ops import AssignOp
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._ops import ValueOp
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
 from stratum.optimizer.physical._join_execs import PolarsJoinOp
-from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp
 from stratum.optimizer.physical._selection_execs import PolarsMaskSelectionOp
 from stratum.optimizer.physical._sort_execs import PolarsSortOp
 from stratum.frontend._skrub_graph import get_data
@@ -294,15 +295,22 @@ def test_q5_filters_inline_the_constants(polars):
 
 
 def test_q5_folds_the_revenue(polars):
-    """The revenue column collapses to one assign map over plain columns."""
-    amo = _one(_plan(build_q5_prefix(**make_q5_tables())), AssignMapOp)
+    """Assignment reads revenue computed from explicit column inputs."""
+    amo = next(op for op in _plan(build_q5_prefix(**make_q5_tables()))
+               if isinstance(op, (AssignOp, PolarsFusedAssignOp)))
 
-    assert {"revenue": BinOpExpr(
-        operator.mul, Col("l_extendedprice"),
-        BinOpExpr(operator.sub, Const(1.0), Col("l_discount")))} == amo.entries
-    assert len(amo.inputs) == 1, "the map should need only the filtered frame"
     if polars:
-        assert isinstance(amo, PolarsAssignMapOp)
+        assert isinstance(amo, PolarsFusedAssignOp)
+        assert list(amo.entries) == ["revenue"]
+        assert isinstance(amo.entries["revenue"], BinOpExpr)
+        assert amo.entries["revenue"].op is operator.mul
+        assert len(amo.inputs) == 1
+    else:
+        assert list(amo.kwargs) == ["revenue"]
+        revenue = amo.inputs[amo.kwargs["revenue"].k]
+        assert isinstance(revenue, ExpressionMapOp)
+        assert revenue.expr.op is operator.mul
+        assert len(amo.inputs) == 2
 
 
 def test_q5_folds_the_grouped_aggregation(polars):

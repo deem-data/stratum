@@ -12,7 +12,10 @@ from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.physical._polars_translate import polars_string_method
 from stratum.optimizer.physical._conversion import ConversionOp
-from stratum.optimizer.physical._map_execs import PolarsAssignMapOp, PolarsStringMethodOp
+from stratum.optimizer.physical._map_execs import (
+    PolarsExpressionMapOp)
+from stratum.optimizer.physical._combine_execs import PolarsAssignOp
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp, PolarsFusedMapOp
 from stratum.optimizer.physical._selection_execs import PolarsMaskSelectionOp
 
 FRAME = pd.DataFrame({"s": ["1000010001.0", "aaa", "a.a", "AaA", "", None]})
@@ -50,9 +53,9 @@ def _plan(path, args, kwargs):
         source = skrub.var("frame", FRAME)
         replaced = source["s"].str.replace(*args, **kwargs)
         if path == "standalone":
-            return replaced, PolarsStringMethodOp
+            return replaced, (PolarsExpressionMapOp, PolarsFusedMapOp)
         if path == "assign":
-            return source.assign(replaced=replaced), PolarsAssignMapOp
+            return source.assign(replaced=replaced), (PolarsAssignOp, PolarsFusedAssignOp)
         return source[replaced == "xxx"], PolarsMaskSelectionOp
 
 

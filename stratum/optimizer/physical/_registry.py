@@ -209,7 +209,7 @@ EXEC_MODULES = (
     "_source_execs", "_transform_execs", "_predictor_execs", "_generic_execs",
     "_concat_execs", "_join_execs", "_aggregation_execs", "_projection_execs",
     "_metadata_execs", "_index_execs", "_selection_execs", "_sort_execs",
-    "_map_execs", "_getitem_execs",
+    "_map_execs", "_combine_execs", "_getitem_execs",
 )
 
 

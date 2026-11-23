@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from stratum.optimizer.logical._base import FRAME_TYPES, IRNode
+from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._plan_context import PlanContext
 from stratum.optimizer.physical._predictor_execs import RandomForestOp
@@ -332,6 +332,10 @@ class _SelectionPlan:
 def _plan_selection(ops, ctx, registry, selector,
                     pandas_required: set[int]) -> _SelectionPlan:
     """One selection pass: impls, edge libraries, conversions, pandas requirements."""
+    from stratum.optimizer.logical._map_ops import MapOp, series_name
+    from stratum.optimizer.logical._base import OutputType
+    from stratum.optimizer.physical._map_execs import _map_name_is_read
+
     plan = _SelectionPlan()
     index_memo: dict = {}
     for op in ops:
@@ -340,7 +344,13 @@ def _plan_selection(ops, ctx, registry, selector,
         bound_cls = _bound_class(op, impl)
         if (impl is not None and _impl_frame_lib(impl) is FrameLib.POLARS
                 and _requires_label_alignment(op, index_memo)):
-            # Positional pairing would differ from label alignment: use pandas.
+            # Matching row labels cannot be established: use pandas alignment.
+            plan.new_pandas_required.add(id(op))
+        if (impl is not None and _impl_frame_lib(impl) is FrameLib.POLARS
+                and isinstance(op, MapOp) and op.output_type is OutputType.SERIES
+                and series_name(op) is None and _map_name_is_read(op)):
+            # A conversion would replace pandas' unnamed Series with a string
+            # name. This also applies to methods downstream of a binary map.
             plan.new_pandas_required.add(id(op))
         in_libs = []
         for k, producer in enumerate(op.inputs):
@@ -364,12 +374,12 @@ def _plan_selection(ops, ctx, registry, selector,
 
 
 def _requires_label_alignment(op: IRNode, index_memo: dict) -> bool:
-    """Whether polars' positional pairing differs from pandas' label alignment."""
+    """Whether positional pairing is unproven or labels are explicitly required."""
+    from stratum.optimizer.physical._conversion import index_inputs
+
     if op.aligns_by_label is not None:
         return op.aligns_by_label
-    frames = [i for k, i in enumerate(op.inputs)
-              if i.output_type in FRAME_TYPES and not op.reads_state(k)]
-    return len({index_origin(i, index_memo) for i in frames}) > 1
+    return len({index_origin(i, index_memo) for i in index_inputs(op)}) > 1
 
 
 def _enforce_input_lib(plan: _SelectionPlan, producer: IRNode, consumer: IRNode,

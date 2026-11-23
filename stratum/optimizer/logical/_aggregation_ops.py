@@ -1,8 +1,10 @@
 import pandas as pd
 
 from stratum.optimizer.logical._base import IndexEffect
-from stratum.optimizer.logical._column_expr import AggExpr, AllCols, Col, OperandLeaf
+from stratum.optimizer.logical._column_expr import (
+    AggExpr, AllCols, BinOpExpr, Col, OperandLeaf, UnaryOpExpr)
 from stratum.optimizer.logical._expr_folding import _Folder
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._ops import (
     BinOp, UnaryOp, GetItemOp, OperandRef, OutputType, MethodCallOp, Op, ValueOp)
 from stratum.optimizer.logical._sort_ops import SortOp
@@ -386,7 +388,7 @@ def _aggregation_params(op: MethodCallOp) -> dict | None:
     params = {k: v for k, v in (op.kwargs or {}).items() if k not in skip}
     if any(isinstance(v, OperandRef) for v in params.values()):
         # A graph-fed parameter isn't representable in the expression, the same
-        # way `_Folder` keeps a graph-fed StringMethodOp arg as a leaf.
+        # way `_Folder` keeps a graph-fed StrExpr argument as a leaf.
         return None
     return params
 
@@ -433,7 +435,12 @@ def _expression_source(node):
     row-local aggregate. The folder still checks external consumers before any
     expression node is removed.
     """
-    if not isinstance(node, (BinOp, UnaryOp)):
+    def arithmetic(op):
+        return (isinstance(op, (BinOp, UnaryOp))
+                or isinstance(op, ExpressionMapOp)
+                and isinstance(op.expr, (BinOpExpr, UnaryOpExpr)))
+
+    if not arithmetic(node):
         return None
     sources = {}
     stack = [node]
@@ -446,7 +453,7 @@ def _expression_source(node):
             if frame.output_type is not OutputType.FRAME:
                 return None
             sources[id(frame)] = frame
-        elif isinstance(current, (BinOp, UnaryOp)):
+        elif arithmetic(current):
             stack.extend(current.inputs)
         else:
             return None

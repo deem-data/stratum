@@ -2,7 +2,7 @@ import unittest
 import stratum as st
 import numpy as np
 import pandas as pd
-from stratum.optimizer._optimize import optimize
+from stratum.optimizer._optimize import OptConfig, optimize
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType
 from stratum.optimizer.logical._ops import ValueOp
 
@@ -121,7 +121,7 @@ class TestNumericComplexFanout(unittest.TestCase):
         x = frame[["x"]]
         dag = x.skb.apply_func(np.exp).skb.apply_func(np.log)
 
-        linearized_dag, *_ = optimize(dag)
+        linearized_dag, *_ = optimize(dag, OptConfig(dataframe_ops=False))
 
         self.assertEqual(len(linearized_dag), 2)
         source, root = linearized_dag

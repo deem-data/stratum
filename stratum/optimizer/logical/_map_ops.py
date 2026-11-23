@@ -1,35 +1,20 @@
-"""Column-map operators (MapOp).
+"""Value transformations over one or more explicit inputs.
 
-A map keeps the rows of its source and computes columns from them: it changes
-column values or dtypes (``.str``/``.dt`` accessors, ``pd.to_datetime``, a UDF,
-``astype``), or adds columns to the frame (``df.assign``), possibly from other
-intermediates. This sets maps apart from projections
-(:mod:`stratum.optimizer.logical._projection_ops`), which only select columns
-and never modify them.
-
-Two kinds of map:
-
-* :class:`AssignMapOp` computes its columns from backend-agnostic
-  :class:`~stratum.optimizer.logical._column_expr.ColumnExpr` trees. The grammar
-  supports arithmetic, boolean logic, accessor calls, datetime parsing, and
-  registered column methods. On Polars, entries are evaluated in one
-  ``with_columns`` call. Anything outside the grammar stays in the
-  graph and feeds the map through an ``OperandLeaf`` input.
-* Call-based maps (:class:`CallMapOp` and its subclasses) replay one recorded
-  pandas call; :class:`StringMethodOp`, :class:`DatetimeFieldOp`,
-  :class:`DatetimeConversionOp` and the ``ColumnMethodOp`` family hold one parsed
-  call. They are what the folder lifts
-  into ``ColumnExpr`` nodes, and the fallback where it cannot.
+Maps return their computed value. Assignment belongs to the Combine family;
+projections and producers of map operands remain separate logical operators.
+Expression maps use OperandLeaf references without a distinguished source frame.
 """
 from __future__ import annotations
 
 import pandas as pd
 import polars as pl
 
-from stratum.optimizer.logical._base import IndexEffect, Uncacheable
-from stratum.optimizer.logical._ops import (CallOp, GetAttrOp, MethodCallOp, Op,
+from stratum.optimizer.logical._base import IndexEffect
+from stratum.optimizer.logical._ops import (BinOp, UnaryOp, CallOp, GetAttrOp, MethodCallOp, Op,
                                             OperandRef, OutputType, substitute_op)
-from stratum.optimizer.logical._column_expr import ColumnExpr, Const
+from stratum.optimizer.logical._column_expr import (
+    BINARY_SYMBOLS, UNARY_SYMBOLS, UFUNCS, BinOpExpr, ColumnExpr, Const,
+    OperandLeaf, StrExpr, UnaryOpExpr, UfuncExpr)
 from stratum.optimizer.logical._index_ops import IndexAccessOp
 from stratum.optimizer.logical._metadata_ops import make_structure_read_op
 from stratum.frontend._pandas_calls import bind_pandas_function
@@ -37,13 +22,172 @@ from stratum.optimizer.logical import _schema
 
 
 class MapOp(Op):
-    """Base for column-map operators: row-preserving, computes column values."""
+    """Base for value transformations; each variant defines its alignment rules."""
     logical_family = "Map"
     index_effect = IndexEffect.KEEP
 
     def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)
         self.output_type = OutputType.FRAME
+
+
+# Unknown at compile time, distinct from an unnamed pandas Series (None).
+UNKNOWN_NAME = object()
+_NO_NAME = object()
+
+
+def series_name(op: Op):
+    """The known Series name, without reading intermediate values."""
+    from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
+    from stratum.optimizer.logical._ops import GetItemOp, ValueOp
+
+    if isinstance(op, ExpressionMapOp):
+        return op.result_name()
+    if isinstance(op, (ColumnProjectionOp, GetItemOp)) and isinstance(op.key, str):
+        return op.key
+    if isinstance(op, ValueOp):
+        return op.value.name if isinstance(op.value, (pd.Series, pl.Series)) else _NO_NAME
+    if isinstance(op, (DatetimeConversionOp, DatetimeFieldOp)):
+        return series_name(op.inputs[0])
+    schema = op.output_schema
+    return next(iter(schema)) if schema is not None and len(schema) == 1 else UNKNOWN_NAME
+
+
+class ExpressionMapOp(MapOp):
+    """Compute an expression over explicit inputs, without retaining a base frame.
+
+    ``OperandLeaf(OperandRef(k))`` reads input k. Projection is a separate
+    operator; expressions have no implicit source columns. Binary operations
+    retain their operands' label-alignment semantics.
+    """
+    fields = ["expr"]
+    cacheable = True
+
+    def __init__(self, expr: ColumnExpr, inputs=None, outputs=None,
+                 output_type: OutputType = OutputType.SERIES):
+        super().__init__(name=repr(expr), inputs=inputs, outputs=outputs)
+        self.expr = expr
+        self.output_type = output_type
+
+    @property
+    def index_effect(self):
+        return self.expr.index_effect
+
+    @property
+    def aligns_by_label(self):
+        return self.expr.aligns_by_label
+
+    def clone(self):
+        cloned = super().clone()
+        cloned.output_type = self.output_type
+        return cloned
+
+    def result_name(self):
+        """Pandas' result name, or UNKNOWN_NAME when it cannot be inferred."""
+        def name(expr):
+            if isinstance(expr, Const):
+                return _NO_NAME
+            if isinstance(expr, OperandLeaf):
+                source = self.inputs[expr.ref.k]
+                return _NO_NAME if source.output_type is OutputType.SCALAR else series_name(source)
+            if isinstance(expr, StrExpr) and not expr.preserves_columns:
+                return UNKNOWN_NAME
+            if isinstance(expr, BinOpExpr):
+                left, right = name(expr.left), name(expr.right)
+                if left is _NO_NAME:
+                    return right
+                if right is _NO_NAME:
+                    return left
+                if left is UNKNOWN_NAME or right is UNKNOWN_NAME:
+                    return UNKNOWN_NAME
+                return left if left == right else None
+            return name(expr.operand)
+        return name(self.expr)
+
+    def propagate_output_schema(self):
+        if self.expr.preserves_columns:
+            dtype = pl.Boolean if self.expr.boolean_result else _schema.UNKNOWN_DTYPE
+            self.output_schema = _schema.cast_columns(self.inputs[0].output_schema, dtype)
+            return
+
+        def dtype(column):
+            if not isinstance(self.expr, (BinOpExpr, UnaryOpExpr)):
+                return _schema.UNKNOWN_DTYPE
+            operands = list(self.expr.children())
+            schemas = [self.inputs[e.ref.k].output_schema for e in operands
+                       if isinstance(e, OperandLeaf)]
+            dtypes = ([schema[column] for schema in schemas]
+                      if len(schemas) == len(operands)
+                      and all(schema is not None and column in schema for schema in schemas)
+                      else None)
+            return _schema.elementwise_result_dtype(self.expr.op, dtypes)
+
+        if self.output_type is OutputType.SERIES:
+            name = self.result_name()
+            self.output_schema = pl.Schema({name: dtype(name)}) if isinstance(name, str) else None
+        else:
+            schemas = [op.output_schema for op in self.inputs
+                       if op.output_type is OutputType.FRAME]
+            if (any(op.output_type in (OutputType.SERIES, OutputType.UNKNOWN) for op in self.inputs)
+                    or not schemas or any(s is None for s in schemas)
+                    or any(list(s) != list(schemas[0]) for s in schemas)):
+                self.output_schema = None
+            else:
+                self.output_schema = pl.Schema({name: dtype(name) for name in schemas[0]})
+
+
+def ufunc_name(op: Op) -> str | None:
+    """Recognize a supported unary NumPy call without additional options."""
+    if not isinstance(op, CallOp) or op.kwargs or list(op.args or ()) != [OperandRef(0)]:
+        return None
+    return next((name for name, func in UFUNCS.items() if op.func is func), None)
+
+
+def make_expression_map_op(op: Op) -> ExpressionMapOp | None:
+    """Extract one elementwise operation, leaving all producers in the DAG."""
+    from stratum.optimizer.logical._ops import ValueOp
+    from stratum.optimizer.logical._expr_folding import CONST_SCALAR_TYPES
+
+    kinds = {i.output_type for i in op.inputs}
+    if not kinds.intersection((OutputType.FRAME, OutputType.SERIES)):
+        return None
+    inputs = list(op.inputs)
+
+    def operand(value):
+        if isinstance(value, OperandRef):
+            producer = inputs[value.k]
+            if isinstance(producer, ValueOp) and isinstance(producer.value, CONST_SCALAR_TYPES):
+                return Const(producer.value)
+            return OperandLeaf(value)
+        if pd.api.types.is_scalar(value):
+            return Const(value)
+        # Literal containers are data operands, not scalar expression constants.
+        inputs.append(ValueOp(value))
+        return OperandLeaf(OperandRef(len(inputs) - 1))
+
+    if isinstance(op, BinOp) and op.op in BINARY_SYMBOLS:
+        expr = BinOpExpr(op.op, operand(op.left), operand(op.right))
+    elif isinstance(op, UnaryOp) and op.op in UNARY_SYMBOLS:
+        expr = UnaryOpExpr(op.op, operand(op.operand))
+    elif (func := ufunc_name(op)) is not None:
+        expr = UfuncExpr(OperandLeaf(OperandRef(0)), func)
+    else:
+        return None
+    frame_result = (OutputType.FRAME in kinds
+                    or any(isinstance(i, ValueOp) and isinstance(i.value, (pd.DataFrame, pl.DataFrame))
+                           for i in inputs))
+    kind = OutputType.FRAME if frame_result else OutputType.SERIES
+    used = {ref.k for ref in expr.iter_operand_refs()}
+    kept = [k for k in range(len(inputs)) if k in used]
+    expr = expr.remap_operand_refs({k: new for new, k in enumerate(kept)})
+    new_op = substitute_op(op, ExpressionMapOp(expr, output_type=kind))
+    new_op.inputs = [inputs[k] for k in kept]
+    for producer in inputs[len(op.inputs):]:
+        producer.add_output(new_op)
+    for k, producer in enumerate(op.inputs):
+        if k not in used:
+            producer.outputs = [out for out in producer.outputs if out is not new_op]
+    return new_op
 
 
 class CallMapOp(MapOp):
@@ -67,17 +211,6 @@ class ApplyUDFOp(CallMapOp):
     """``df.apply(func, ...)`` or ``series.apply(func, ...)``."""
 
 
-class AssignOp(CallMapOp):
-    """``df.assign(...)`` that does not fold into an :class:`AssignMapOp`."""
-    cacheable = True
-
-    def propagate_output_schema(self):
-        """``df.assign(a=..., b=...)`` adds/overwrites the kwargs-named columns,
-        Unknown-typed since the dtype follows the assigned expression."""
-        new_columns = list(self.kwargs.keys()) if self.kwargs else []
-        self.output_schema = _schema.add_columns(self.inputs[0].output_schema, new_columns)
-
-
 class DatetimeConversionOp(MapOp):
     """Parses a column of strings into datetimes (``pd.to_datetime``).
 
@@ -89,6 +222,8 @@ class DatetimeConversionOp(MapOp):
     """
     fields = ["format", "exact", "cache", "errors"]
     cacheable = True
+    # Additional inputs are parsing options, not row-aligned data operands.
+    aligns_by_label = False
 
     ERRORS = ("raise", "coerce")
 
@@ -118,62 +253,6 @@ class DatetimeConversionOp(MapOp):
             self.output_schema = None
             return
         self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
-
-
-class StringMethodOp(MapOp):
-    """A ``col.str.<method>(...)`` accessor call on a (string) column expression.
-
-    Produced by fusing ``AttributeReadOp(["str"]) + MethodCallOp`` during frame
-    extraction (see :func:`make_string_method_op`). The accessor is removed when
-    it has no remaining consumers. A dedicated string map lets
-    selection folding match it directly -- lifting it into a
-    :class:`~stratum.optimizer.logical._column_expr.StrExpr` predicate -- instead of
-    re-discovering the accessor+call shape inside the mask folder.
-
-    ``method`` keeps pandas' name and ``params`` holds the arguments passed, by
-    pandas' parameter names, in the signature's order; a graph-fed one is an
-    ``OperandRef``. The polars impl translates both (see
-    ``physical/_polars_translate.py``).
-    """
-    fields = ["method", "params"]
-    cacheable = True
-
-    def __init__(self, method: str = None, params: dict = None,
-                 inputs: list[Op] = None, outputs: list[Op] = None):
-        super().__init__(name=method.upper() if method is not None else "",
-                         inputs=inputs, outputs=outputs)
-        self.method = method
-        self.params = dict(params or {})
-
-    # `.str` methods that map one input element to one output element, so the call
-    # keeps its operand's columns and only changes their dtype. Extraction fuses
-    # *any* `.str.<method>` into this op, so this must be an allow-list: `extract`,
-    # `extractall`, `get_dummies`, `partition` and `rpartition` return a frame of
-    # new columns, `split`/`rsplit` do the same under `expand=True`, and `cat()`
-    # collapses the column to a single string. Every member below was checked to
-    # return a Series.
-    ONE_TO_ONE_METHODS = frozenset({
-        "count", "lower", "upper", "startswith", "endswith", "len",
-        "strip", "lstrip", "rstrip", "capitalize", "casefold", "contains", "find", "fullmatch", "match",
-        "pad", "removeprefix", "removesuffix", "repeat", "replace", "rfind",
-        "slice", "swapcase", "title", "zfill",
-        "isalnum", "isalpha", "isdecimal", "isdigit", "islower", "isnumeric",
-        "isspace", "istitle", "isupper",
-    })
-
-    def lineage_config(self):
-        if self.method not in self.ONE_TO_ONE_METHODS:
-            raise Uncacheable(f"str.{self.method} is not a known string method")
-        return super().lineage_config()
-
-    def propagate_output_schema(self):
-        """A one-to-one method keeps the column names, dtype Unknown (per-method,
-        and the backends disagree on some). A method that fans the column out into
-        several is unknown; see :data:`ONE_TO_ONE_METHODS`."""
-        if self.method in self.ONE_TO_ONE_METHODS:
-            self.output_schema = _schema.cast_columns(self.inputs[0].output_schema)
-        else:
-            self.output_schema = None
 
 
 class DatetimeFieldOp(MapOp):
@@ -227,28 +306,6 @@ class AttributeReadOp(Op):
                  outputs: list[Op] = None):
         self.attr_name = list(attr_name or [])
         super().__init__(name=".".join(self.attr_name) or "?", inputs=inputs, outputs=outputs)
-
-
-class AssignMapOp(MapOp):
-    """``df.assign(...)`` with each assigned column folded to a ``ColumnExpr``.
-
-    ``entries`` maps assigned column names to expressions. Matching input columns
-    are overwritten; other input columns pass through unchanged.
-    """
-    fields = ["entries"]
-    cacheable = True
-
-    def __init__(self, entries: dict[str, ColumnExpr],
-                 inputs: list[Op] = None, outputs: list[Op] = None):
-        super().__init__(name=f"assign: {', '.join(entries)}",
-                         inputs=inputs, outputs=outputs)
-        self.entries = entries
-
-    def propagate_output_schema(self):
-        """``df.assign(...)`` folded to a map: adds/overwrites the entry names,
-        Unknown-typed, and passes the source columns through."""
-        self.output_schema = _schema.add_columns(self.inputs[0].output_schema,
-                                                 list(self.entries))
 
 
 # --- Extraction: recorded calls -> call-based maps ----------------------------
@@ -314,95 +371,4 @@ def make_frame_get_attr(op: GetAttrOp) -> Op:
         source.add_output(new_op)
     else:
         source.replace_output(input_, new_op)
-    return new_op
-
-
-def make_string_method_op(op: MethodCallOp) -> StringMethodOp | None:
-    """Fuse ``col.str.<method>(...)`` into a single :class:`StringMethodOp`.
-
-    ``op.inputs[0]`` is the ``AttributeReadOp(["str"])`` accessor; the new op
-    takes the *column* (the accessor's source) as its primary operand instead, so
-    the accessor drops out of the graph. The call is bound against pandas'
-    ``.str`` method; its arguments (which may carry ``OperandRef``s into the
-    remaining inputs) and those inputs are unchanged, so operand indices stay
-    valid without renumbering. A call pandas would reject stays opaque.
-
-    The accessor is only detached when this was its last consumer -- a ``.str``
-    accessor shared by several method calls (not the common case) stays in the graph
-    until the final call is fused.
-    """
-    if not hasattr(pd.Series.str, op.method_name):
-        return None
-    params = op.bind_pandas(owner=pd.Series.str)
-    if params is None:
-        return None
-    accessor = op.inputs[0]
-    column = accessor.inputs[0]
-    new_op = StringMethodOp(method=op.method_name, params=params,
-                            inputs=[column, *op.inputs[1:]], outputs=list(op.outputs))
-    # TODO: Infer output kind by method and arguments; methods such as
-    # str.get_dummies() return a frame, and str.cat() can return a scalar.
-    new_op.output_type = accessor.output_type
-
-    # Rewire every operand except the accessor: the args feed the new op, and the
-    # column now feeds it directly (in place of feeding the accessor).
-    for in_ in op.inputs[1:]:
-        in_.replace_output(op, new_op)
-    column.add_output(new_op)
-    accessor.outputs = [o for o in accessor.outputs if o is not op]
-    if not accessor.outputs:
-        accessor.detach_and_prune()
-    return new_op
-
-
-# --- Folding: assign subgraphs -> AssignMapOp ---------------------------------
-
-def _is_scalar_constant(value) -> bool:
-    """Whether an assign kwarg constant can fold to a ``Const`` entry.
-
-    Scalar-like values are eligible for broadcasting; sequence-like values
-    (lists, arrays, series) keep the ``AssignOp`` fallback.
-    """
-    if isinstance(value, str):
-        return True
-    return not hasattr(value, "__len__") and not isinstance(
-        value, (pd.Series, pd.DataFrame, pl.Series, pl.DataFrame))
-
-
-def make_assign_map_op(op: MethodCallOp) -> AssignMapOp | None:
-    """Fold ``df.assign(**kwargs)`` into an :class:`AssignMapOp`.
-
-    All graph-fed kwargs share one folder, so a producer feeding several columns
-    folds once. Returns ``None`` for non-foldable calls (positional args or a
-    sequence-valued constant kwarg), leaving the plain ``AssignOp`` in place.
-    """
-    # The folder absorbs the call-based maps defined above, so it imports this
-    # module and has to be imported lazily here.
-    from stratum.optimizer.logical._expr_folding import _Folder
-    if op.args:
-        return None
-    kwargs = op.kwargs or {}
-    if not kwargs:
-        return None
-    src = op.inputs[0]
-    ref_names, roots, const_entries = [], [], {}
-    for name, value in kwargs.items():
-        if isinstance(value, OperandRef):
-            ref_names.append(name)
-            roots.append(op.inputs[value.k])
-        elif _is_scalar_constant(value):
-            const_entries[name] = Const(value)
-        else:
-            return None
-
-    folder = _Folder(src)
-    exprs = folder.fold_many(roots, root_consumer=op)
-    # Preserve assignment order so new columns retain the recorded output order.
-    entries = {name: (const_entries[name] if name in const_entries
-                      else exprs[ref_names.index(name)])
-               for name in kwargs}
-
-    new_op = AssignMapOp(entries=entries,
-                         inputs=[src, *folder.leaf_ops], outputs=list(op.outputs))
-    folder.install(new_op, replaced=[op])
     return new_op

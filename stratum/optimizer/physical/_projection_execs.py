@@ -85,7 +85,7 @@ class PandasColumnSelectorOp(ColumnSelectorExec):
 @physical_impl(of=ColumnSelectorOp, backend="polars")
 class PolarsColumnSelectorOp(ColumnSelectorExec):
     def _select(self, frame, columns: list):
-        return frame.select(columns)
+        return frame[columns]
 
 
 # --- ColumnProjectionOp (df["a"] / df[["a", "b"]]) ----------------------------

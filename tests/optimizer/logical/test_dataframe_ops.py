@@ -51,6 +51,9 @@ def opt_config(conf=None):
     reaches, which is the point of them living there.
     """
     conf = copy.copy(conf) if conf is not None else OptConfig()
+    # These tests inspect individual logical operators and their bound kernels.
+    # Physical fusion has its own plan-structure and end-to-end tests.
+    conf.map_fusion = False
     if conf.selector is None:
         conf.selector = selector()
     if not conf.pandas_query:

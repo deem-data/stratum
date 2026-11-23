@@ -21,18 +21,16 @@ from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._base import OperandRef, OutputType
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AstypeExpr, BinOpExpr, Col, Const, DatetimeExpr, DtExpr,
-    FillnaExpr, OperandLeaf, StrExpr, UnaryOpExpr,
-)
-from stratum.optimizer.logical._column_methods import (
-    AstypeOp, ClipOp, FillnaOp, IsinOp, IsnaOp, MapValuesOp, NotnaOp, WhereOp,
+    ClipExpr, FillnaExpr, IsinExpr, IsnaExpr, MapValuesExpr, NotnaExpr,
+    OperandLeaf, StrExpr, UnaryOpExpr, WhereExpr,
 )
 from stratum.optimizer.logical._dataframe_ops import ConcatOp
 from stratum.optimizer.logical._index_ops import GroupKeysOp, IndexAccessOp
 from stratum.optimizer.logical._join_ops import FilteringJoinOp, JoinOp
 from stratum.optimizer.logical._map_ops import (
-    ApplyUDFOp, AssignMapOp, AssignOp, DatetimeConversionOp, DatetimeFieldOp,
-    StringMethodOp,
-)
+    ApplyUDFOp, DatetimeConversionOp, DatetimeFieldOp)
+from stratum.optimizer.logical._combine_ops import AssignOp
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._metadata_ops import (
     ColumnNamesOp, RenameOp, ResetIndexOp, ShapeOp,
 )
@@ -70,11 +68,11 @@ def digest(value):
     lambda x: FilteringJoinOp(left_on=x, right_on=x),
     lambda x: AggregateOp(grouped=True, grouping=(Col(x),),
                           aggregations=(("total", AggExpr("sum", Col("v"))),)),
-    lambda x: AssignMapOp({x: BinOpExpr(operator.add, Col("v"), Const(1))}),
+    lambda x: ExpressionMapOp(BinOpExpr(operator.add, OperandLeaf(OperandRef(0)), Const(x))),
     lambda x: AssignOp(kwargs={x: 1}),
-    lambda x: FillnaOp(value=x),
-    lambda x: MapValuesOp(mapping={"old": x}),
-    lambda x: IsinOp(values=[x]),
+    lambda x: ExpressionMapOp(FillnaExpr(OperandLeaf(OperandRef(0)), value=x)),
+    lambda x: ExpressionMapOp(MapValuesExpr(OperandLeaf(OperandRef(0)), mapping={"old": x})),
+    lambda x: ExpressionMapOp(IsinExpr(OperandLeaf(OperandRef(0)), values=[x])),
     lambda x: RenameOp(columns={"old": x}),
     lambda x: GroupKeysOp(x),
 ])
@@ -89,10 +87,13 @@ def test_operator_configuration_changes_the_key(make_op):
     (SampleSelectionOp(n=2, seed=0), SampleSelectionOp(n=2, seed=1)),
     (ConcatOp([OperandRef(0), OperandRef(1)], axis=0),
      ConcatOp([OperandRef(0), OperandRef(1)], axis=1)),
-    (AstypeOp("int64"), AstypeOp("float64")),
-    (ClipOp(lower=0), ClipOp(lower=1)),
-    (WhereOp(cond=OperandRef(1), other=0), WhereOp(cond=OperandRef(1), other=1)),
-    (StringMethodOp("lower"), StringMethodOp("upper")),
+    (ExpressionMapOp(AstypeExpr(OperandLeaf(OperandRef(0)), "int64")),
+     ExpressionMapOp(AstypeExpr(OperandLeaf(OperandRef(0)), "float64"))),
+    (ExpressionMapOp(ClipExpr(OperandLeaf(OperandRef(0)), lower=0)),
+     ExpressionMapOp(ClipExpr(OperandLeaf(OperandRef(0)), lower=1))),
+    (ExpressionMapOp(WhereExpr(OperandLeaf(OperandRef(0)), cond=OperandLeaf(OperandRef(1)), other=0)),
+     ExpressionMapOp(WhereExpr(OperandLeaf(OperandRef(0)), cond=OperandLeaf(OperandRef(1)), other=1))),
+    (ExpressionMapOp(StrExpr(OperandLeaf(OperandRef(0)), "lower")), ExpressionMapOp(StrExpr(OperandLeaf(OperandRef(0)), "upper"))),
     (DatetimeFieldOp("year"), DatetimeFieldOp("month")),
     (DatetimeConversionOp(format="%Y-%m-%d"), DatetimeConversionOp(format="%d/%m/%Y")),
     (AggregateOp(output_type=OutputType.FRAME), AggregateOp(output_type=OutputType.SERIES)),
@@ -104,16 +105,18 @@ def test_result_affecting_options_are_part_of_lineage(left, right):
 
 
 def test_parameterless_operations_remain_distinct():
-    ops = [IndexAccessOp(), ResetIndexOp(), ShapeOp(), ColumnNamesOp(), IsnaOp(), NotnaOp()]
+    ops = [IndexAccessOp(), ResetIndexOp(), ShapeOp(), ColumnNamesOp(),
+           ExpressionMapOp(IsnaExpr(OperandLeaf(OperandRef(0)))),
+           ExpressionMapOp(NotnaExpr(OperandLeaf(OperandRef(0))))]
     keys = [lineage_key(op, ["source"]) for op in ops]
     assert len(set(keys)) == len(ops)
     assert all(lineage_key(op, ["changed"]) != key for op, key in zip(ops, keys))
 
 
 def test_assignment_order_and_operand_order_are_semantic():
-    entries = {"a": Col("x"), "b": Col("y")}
-    first = lineage_key(AssignMapOp(entries), ["source"])
-    assert first != lineage_key(AssignMapOp(dict(reversed(list(entries.items())))), ["source"])
+    entries = {"a": OperandRef(1), "b": OperandRef(2)}
+    first = lineage_key(AssignOp(kwargs=entries), ["source"])
+    assert first != lineage_key(AssignOp(kwargs=dict(reversed(list(entries.items())))), ["source"])
     concat = ConcatOp([OperandRef(0), OperandRef(1)])
     assert lineage_key(concat, ["left", "right"]) != lineage_key(concat, ["right", "left"])
 
@@ -156,7 +159,7 @@ def test_unknown_expression_code_has_no_lineage(expression):
     SampleSelectionOp(n=2),
     SampleSelectionOp(n=2, seed=np.random.RandomState(0)),
     SampleSelectionOp(n=2, seed=np.random.default_rng(0)),
-    StringMethodOp("split", {"pat": ","}),
+    ExpressionMapOp(StrExpr(OperandLeaf(OperandRef(0)), "split", {"pat": ","})),
     RenameOp(columns=lambda name: name.upper()),
     AssignOp(kwargs={"x": lambda frame: frame["y"]}),
     ApplyUDFOp(args=(lambda frame: frame,)),

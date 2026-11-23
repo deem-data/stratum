@@ -13,16 +13,16 @@ import re
 import numpy as np
 import polars as pl
 
-from stratum.optimizer.logical._base import OperandRef
+from stratum.optimizer.logical._column_expr import ColumnExpr
 
-from stratum.optimizer.logical._column_methods import normalize_dtype
+from stratum.optimizer.logical._schema import normalize_dtype
 
 
 # --- .str ---------------------------------------------------------------------
 #
 # Translators accept pandas parameter names and return a function operating on a
 # Polars Series or expression, or raise _NoTranslation with a reason. They are
-# shared by StringMethodOp and the expression compiler's StrExpr.
+# used by StrExpr for explicit inputs and compiled expressions.
 # Matching method names do not guarantee matching semantics:
 # - find returns -1 for missing matches in pandas and null in Polars.
 # - join joins each row's list in pandas and concatenates rows in Polars.
@@ -310,15 +310,14 @@ def polars_to_datetime(obj, format=None, exact=None, cache=True, errors="raise",
     kwargs = {"format": format, "cache": cache, "strict": errors == "raise"}
     if exact is not None:
         kwargs["exact"] = exact
-    # TODO: Support numeric operands, and datetimes inside an expression whose
-    # dtype is not known (FIXME #216); the string namespace only accepts strings.
+    # TODO: Support numeric operands; the string namespace only accepts strings.
     return obj.str.to_datetime(**kwargs)
 
 
 # --- column methods -------------------------------------------------------------
 #
 # Each kernel takes the receiver (a polars Series, frame or expression), the
-# method's fields (those of its ``ColumnMethodOp``, resolved), and the receiver's
+# method's fields (those of its ``ColumnMethodExpr``, resolved), and the receiver's
 # dtype when it is known (``None`` for an expression whose dtype could not be
 # resolved).
 
@@ -327,11 +326,7 @@ def _polars_astype(obj, dtype, *, obj_dtype=None):
 
 
 def _polars_fillna(obj, value, *, obj_dtype=None):
-    # FIXME(#216): pandas fills NaN as well as null, polars needs both calls, and the
-    # fill_nan half is skipped whenever the dtype is unknown. A pl.Expr carries
-    # no dtype, and `_expressions._polars_expr_dtype` only resolves a bare Col or
-    # an astype, so any derived operand ((a / b).fillna(0), a chained
-    # clip/where/fillna) silently keeps its NaNs here while pandas replaces them.
+    # Expressions need the receiver's dtype to distinguish float NaNs from nulls.
     if isinstance(obj, pl.DataFrame):
         return _polars_frame_fillna(obj, value)
     result = obj.fill_null(value)
@@ -364,7 +359,7 @@ def polars_frame_fillna_unsupported(values: dict, schema) -> str | None:
         return None
     for name, value in values.items():
         dtype = schema.get(name)
-        if (dtype is not None and dtype != pl.Unknown and not isinstance(value, OperandRef)
+        if (dtype is not None and dtype != pl.Unknown and not isinstance(value, ColumnExpr)
                 and not _fill_value_fits(value, dtype)):
             return (f"fillna({{{name!r}: {value!r}}}) on a {dtype} column: pandas would "
                     f"mix types in an object column")
@@ -410,9 +405,7 @@ def _polars_isin(obj, values, *, obj_dtype=None):
 
 
 def _polars_notna(obj, *, obj_dtype=None):
-    # FIXME(#216): same unknown-dtype gap as _polars_fillna. Without a dtype the
-    # is_not_nan half is skipped, so (a / b).notna() reports True for a NaN
-    # that pandas reports as False. _polars_isna has the mirror-image gap.
+    # pandas treats both null and floating-point NaN as missing.
     result = obj.is_not_null()
     actual_dtype = getattr(obj, "dtype", None) or obj_dtype
     if actual_dtype is not None and actual_dtype.is_float():
@@ -421,7 +414,7 @@ def _polars_notna(obj, *, obj_dtype=None):
 
 
 def _polars_isna(obj, *, obj_dtype=None):
-    # pandas counts NaN as missing, polars only null. See _polars_notna's FIXME(#216).
+    # pandas counts NaN as missing; Polars' is_null alone does not.
     result = obj.is_null()
     actual_dtype = getattr(obj, "dtype", None) or obj_dtype
     if actual_dtype is not None and actual_dtype.is_float():
@@ -438,7 +431,7 @@ def _polars_map(obj, mapping, na_action=None, *, obj_dtype=None):
     return obj.replace_strict(mapping, default=None)
 
 
-# pandas method name -> kernel, for every ``ColumnMethodOp`` subclass.
+# pandas method name -> kernel, for every ``ColumnMethodExpr`` subclass.
 _POLARS_COLUMN_METHODS = {
     "astype": _polars_astype,
     "fillna": _polars_fillna,

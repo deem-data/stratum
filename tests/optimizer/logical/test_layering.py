@@ -18,7 +18,7 @@ from stratum.optimizer.logical._column_expr import ColumnExpr
 from stratum.optimizer.logical._ops import Op
 
 FRAME_MODULES = [
-    "_aggregation_ops", "_column_expr", "_column_methods", "_dataframe_ops",
+    "_aggregation_ops", "_combine_ops", "_column_expr", "_dataframe_ops",
     "_expr_folding", "_index_ops", "_join_ops", "_map_ops", "_metadata_ops",
     "_projection_ops", "_selection_ops", "_sort_ops", "_source_ops",
 ]

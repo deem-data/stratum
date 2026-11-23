@@ -1,6 +1,6 @@
 """Folding an op subgraph into a :class:`~stratum.optimizer.logical._column_expr.ColumnExpr`.
 
-Mask selections, assign maps and aggregations absorb supported operations
+Mask selections and aggregations absorb supported operations
 feeding them into column expression trees within a single operator, allowing
 a lazy backend to optimize the combined expressions. This module is the shared
 folder; each family's factory decides which roots to fold and installs the
@@ -17,9 +17,8 @@ from stratum.optimizer.logical._ops import (OperandRef, BinOp, UnaryOp, GetItemO
 from stratum.optimizer.logical._column_expr import (
     BINARY_SYMBOLS, UNARY_SYMBOLS, BinOpExpr, Col, ColumnExpr, Const,
     DatetimeExpr, DtExpr, OperandLeaf, StrExpr, UnaryOpExpr)
-from stratum.optimizer.logical._column_methods import ColumnMethodOp
 from stratum.optimizer.logical._map_ops import (
-    DatetimeConversionOp, DatetimeFieldOp, StringMethodOp)
+    DatetimeConversionOp, DatetimeFieldOp, ExpressionMapOp)
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 
 # Values a ``ValueOp`` may carry into a ``Const``. A ``Const`` is a scalar
@@ -100,14 +99,12 @@ class _Folder:
             # getitem, a list/sub-frame key, a non-string key) is not a Col leaf.
             return (isinstance(node.key, str) and bool(node.inputs)
                     and node.inputs[0] is self.src)
-        if isinstance(node, StringMethodOp):
-            # A graph-fed arg isn't representable in the expr; such a call stays a leaf.
-            return not any(isinstance(v, OperandRef) for v in node.params.values())
         if isinstance(node, DatetimeConversionOp):
             # A graph-fed option isn't representable in the expr; the op stays a leaf.
             return not any(isinstance(getattr(node, f), OperandRef) for f in node.fields)
-        if isinstance(node, ColumnMethodOp):
-            return True
+        if isinstance(node, ExpressionMapOp):
+            # String calls with graph-fed options remain materialized.
+            return not (isinstance(node.expr, StrExpr) and node.expr.has_parameter_exprs)
         if isinstance(node, DatetimeFieldOp):
             return True
         return False
@@ -121,14 +118,10 @@ class _Folder:
             if isinstance(node.operand, OperandRef):
                 return [node.inputs[node.operand.k]]
             return []
-        if isinstance(node, (StringMethodOp, DatetimeConversionOp,
-                             DatetimeFieldOp)):
+        if isinstance(node, (DatetimeConversionOp, DatetimeFieldOp)):
             return [node.inputs[0]]
-        if isinstance(node, ColumnMethodOp):
-            # Every remaining input is referenced by a field. Returning all
-            # inputs includes expression-valued method arguments in the subgraph;
-            # non-foldable/external producers become OperandLeafs later.
-            return list(node.inputs)
+        if isinstance(node, ExpressionMapOp):
+            return [node.inputs[ref.k] for ref in node.expr.iter_operand_refs()]
         return []
 
     # --- pass 1: discover the foldable subgraph -----------------------------------
@@ -218,20 +211,14 @@ class _Folder:
                                self._operand(node.operand, node, absorbable, memo))
         if isinstance(node, (GetItemOp, ColumnProjectionOp)):
             return Col(node.key)
-        if isinstance(node, StringMethodOp):
-            # The .str accessor was fused away in frame extraction, so the column is
-            # just inputs[0]; the params are literals (checked in _is_foldable).
-            operand = self._resolve(node.inputs[0], absorbable, memo)
-            return StrExpr(operand, node.method, node.params)
         if isinstance(node, DatetimeConversionOp):
             operand = self._resolve(node.inputs[0], absorbable, memo)
             return DatetimeExpr(operand, node.format, node.exact, node.cache,
                                 node.errors)
-        if isinstance(node, ColumnMethodOp):
-            operand = self._resolve(node.inputs[0], absorbable, memo)
-            return node.expr_class(operand, **{
-                name: self._method_value(getattr(node, name), node, absorbable, memo)
-                for name in node.fields})
+        if isinstance(node, ExpressionMapOp):
+            return node.expr.remap_operand_refs({
+                ref.k: self._resolve(node.inputs[ref.k], absorbable, memo)
+                for ref in node.expr.iter_operand_refs()})
         if isinstance(node, DatetimeFieldOp):
             operand = self._resolve(node.inputs[0], absorbable, memo)
             return DtExpr(operand, node.field)
@@ -242,21 +229,6 @@ class _Folder:
         if isinstance(operand, OperandRef):
             return self._resolve(parent.inputs[operand.k], absorbable, memo)
         return Const(operand)
-
-    def _method_value(self, value, parent: Op, absorbable: set[int],
-                      memo: dict[int, ColumnExpr]):
-        if isinstance(value, OperandRef):
-            return self._resolve(parent.inputs[value.k], absorbable, memo)
-        if isinstance(value, tuple):
-            return tuple(self._method_value(item, parent, absorbable, memo)
-                         for item in value)
-        if isinstance(value, list):
-            return [self._method_value(item, parent, absorbable, memo)
-                    for item in value]
-        if isinstance(value, dict):
-            return {key: self._method_value(item, parent, absorbable, memo)
-                    for key, item in value.items()}
-        return value
 
     def _resolve(self, node: Op, absorbable: set[int],
                  memo: dict[int, ColumnExpr]) -> ColumnExpr:

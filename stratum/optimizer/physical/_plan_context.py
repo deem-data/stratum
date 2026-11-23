@@ -39,6 +39,8 @@ class PlanContext:
         Name of the implementation-selection policy to use during physical
         planning: ``"default"`` (pandas/sklearn-skrub-first) or ``"greedy"``
         (rust/polars-first).
+    map_fusion:
+        Fuse compatible selected Polars maps before runtime planning.
     """
 
     pandas_query: bool
@@ -47,6 +49,7 @@ class PlanContext:
     rust_backend: bool
     allow_patch: bool
     implementation_selector: str = "default"
+    map_fusion: bool = True
 
     @property
     def prefer_rust(self) -> bool:
@@ -67,4 +70,5 @@ class PlanContext:
             rust_backend=bool(FLAGS.rust_backend),
             allow_patch=bool(FLAGS.allow_patch),
             implementation_selector=FLAGS.implementation_selector,
+            map_fusion=bool(config.map_fusion) if config is not None else True,
         )

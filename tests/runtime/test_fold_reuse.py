@@ -327,10 +327,13 @@ def test_the_test_rows_are_keyed_alike_whatever_the_scorer_calls(csv_path, cache
         return X.skb.apply(StandardScaler()).skb.apply(LogisticRegression(), y=y)
 
     run(model(), scoring="accuracy")
-    _, taken = run(model(), scoring="roc_auc")
-    # The scorer requires a different estimator prediction method; the scaler's
-    # fitting and transformation are unchanged.
-    assert taken == [["SklearnStandardScaler_fit_transform_train", "SklearnStandardScaler_transform_test"]] * 3
+    reused, taken = run(model(), scoring="roc_auc")
+    # The target map now has lineage, so the fitted model is reusable across
+    # scorers. Its state subsumes the training scaler's state and output.
+    assert taken == [["SklearnLogisticRegression_fit_train", "SklearnStandardScaler_transform_test"]] * 3
+    with st.config(reuse_cache=False):
+        fresh, _ = run(model(), scoring="roc_auc")
+    assert reused.results_.equals(fresh.results_)
 
 
 def test_cache_hits_retain_only_values_needed_by_remaining_consumers(

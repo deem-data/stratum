@@ -4,6 +4,9 @@ Used by selections (boolean predicates), maps (computed columns) and
 aggregations (reductions). Expressions compare structurally and are treated as
 immutable after construction.
 
+Maps reference their explicit inputs through ``OperandLeaf``. Selections and
+aggregations also use ``Col`` and ``AllCols`` to read their source frame.
+
 The grammar combines row-wise computations (column
 references, literals, arithmetic and boolean operators, the ``.str``/``.dt``
 namespaces, datetime parsing, and registered column methods) with a reduction
@@ -18,7 +21,10 @@ folding an op subgraph into a tree is ``_expr_folding.py``'s.
 from __future__ import annotations
 import operator
 
-from stratum.optimizer.logical._base import OperandRef, Uncacheable, config_key
+import numpy as np
+
+from stratum.optimizer.logical._base import (
+    IndexEffect, OperandRef, Uncacheable, config_key, rebuild_dict)
 
 # operator callable -> symbol. A binary/unary op whose callable is not in the
 # corresponding map is not foldable into a column expression.
@@ -37,10 +43,15 @@ class ColumnExpr:
     """Base class for column-expression nodes.
 
     Every node's ``__init__`` takes its fields in ``__slots__`` order. The
-    structural walks below rely on that, so a node only defines its fields,
-    its key and its repr.
+    structural walks below rely on that field order.
     """
     __slots__ = ()
+    # Map operands may align on a union of their row labels.
+    index_effect = IndexEffect.COMMON
+    aligns_by_label = None
+    # True lets a Map copy input 0's column names; other expressions need inference.
+    preserves_columns = False
+    boolean_result = False
 
     def _key(self):
         raise NotImplementedError
@@ -116,7 +127,7 @@ def map_exprs(value, fn):
     if isinstance(value, list):
         return [map_exprs(item, fn) for item in value]
     if isinstance(value, dict):
-        return {key: map_exprs(item, fn) for key, item in value.items()}
+        return rebuild_dict(value, ((key, map_exprs(item, fn)) for key, item in value.items()))
     return value
 
 
@@ -170,7 +181,7 @@ class Const(ColumnExpr):
 
 
 class OperandLeaf(ColumnExpr):
-    """Reference to an operator input that was not folded."""
+    """Reference to an explicit operator input."""
     __slots__ = ("ref",)
 
     def __init__(self, ref):
@@ -187,7 +198,7 @@ class OperandLeaf(ColumnExpr):
 
     def remap_operand_refs(self, mapping):
         # A ColumnExpr target substitutes the leaf, e.g. a projected input that a
-        # rewrite turns into a column of the frame (see push_projection_through_map).
+        # rewrite turns into a column of the frame.
         target = mapping[self.ref.k]
         if isinstance(target, ColumnExpr):
             return target
@@ -235,10 +246,51 @@ class UnaryOpExpr(ColumnExpr):
         return f"{UNARY_SYMBOLS.get(self.op, self.op)}({self.operand!r})"
 
 
+# Elementwise NumPy functions with one input and one output, without options.
+UFUNCS = {"abs": np.abs, "exp": np.exp, "expm1": np.expm1, "log": np.log,
+          "log1p": np.log1p, "sqrt": np.sqrt, "square": np.square}
+
+
+class UfuncExpr(ColumnExpr):
+    """Apply a registered NumPy function elementwise, using its NumPy kernel."""
+    __slots__ = ("operand", "func")
+
+    def __init__(self, operand: ColumnExpr, func: str):
+        self.operand = operand
+        self.func = func
+
+    def _key(self):
+        return self.operand, self.func
+
+    def __repr__(self):
+        return f"np.{self.func}({self.operand!r})"
+
+
 class StrExpr(ColumnExpr):
-    """String accessor call (``.str.<method>()``), in pandas' spelling: the
-    ``method`` and its ``params`` by pandas' parameter names."""
+    """String accessor call in pandas' spelling.
+
+    ``params`` uses pandas' parameter names; graph-fed values are expressions.
+    Known one-to-one methods preserve the receiver's column names.
+    """
     __slots__ = ("operand", "method", "params")
+
+    index_effect = IndexEffect.KEEP
+
+    # `.str` methods that map one input element to one output element, so the call
+    # keeps its operand's columns and only changes their dtype. Extraction admits
+    # *any* `.str.<method>` into this expression, so this must be an allow-list: `extract`,
+    # `extractall`, `get_dummies`, `partition` and `rpartition` return a frame of
+    # new columns, `split`/`rsplit` do the same under `expand=True`, and `cat()`
+    # collapses the column to a single string. Every member below was checked to
+    # return a Series.
+    ONE_TO_ONE_METHODS = frozenset({
+        "count", "lower", "upper", "startswith", "endswith", "len",
+        "strip", "lstrip", "rstrip", "capitalize", "casefold", "contains", "find", "fullmatch", "match",
+        "pad", "removeprefix", "removesuffix", "repeat", "replace", "rfind",
+        "slice", "swapcase", "title", "zfill",
+        "isalnum", "isalpha", "isdecimal", "isdigit", "islower", "isnumeric",
+        "isspace", "istitle", "isupper",
+    })
 
     def __init__(self, operand: ColumnExpr, method: str, params=None):
         self.operand = operand
@@ -248,11 +300,20 @@ class StrExpr(ColumnExpr):
     def _key(self):
         return (self.operand, self.method, config_key(self.params))
 
-    def lineage(self):
-        # Folding must preserve the standalone operator's cacheability check.
-        from stratum.optimizer.logical._map_ops import StringMethodOp
+    @property
+    def preserves_columns(self):
+        return self.method in self.ONE_TO_ONE_METHODS
 
-        if self.method not in StringMethodOp.ONE_TO_ONE_METHODS:
+    @property
+    def aligns_by_label(self):
+        return False if self.preserves_columns else None
+
+    @property
+    def has_parameter_exprs(self):
+        return next(_nested_exprs(self.params), None) is not None
+
+    def lineage(self):
+        if not self.preserves_columns:
             raise Uncacheable(f"str.{self.method} is not a known string method")
         return super().lineage()
 
@@ -371,16 +432,16 @@ class AggExpr(ColumnExpr):
 
 
 class ColumnMethodExpr(ColumnExpr):
-    """Base of the row-local column methods, in pandas' spelling.
+    """Column methods that preserve the receiver's rows and column names.
 
-    Each subclass is one pandas method, named by ``method``. Its fields are the
-    ``operand`` followed by the fields of its
-    :class:`~stratum.optimizer.logical._column_methods.ColumnMethodOp`, under the
-    same names. Expression-valued fields are row-wise operands too, e.g. the other
-    side of ``a.where(cond, b)``.
+    Fields are the receiver followed by method arguments. In an explicit Map,
+    the receiver is input 0. Arguments can be expressions, as in ``where``;
+    each method declares whether those arguments require label alignment.
     """
     __slots__ = ()
     method: str = None
+    index_effect = IndexEffect.KEEP
+    preserves_columns = True
 
     def _key(self):
         return tuple(config_key(getattr(self, name)) for name in type(self).__slots__)
@@ -393,6 +454,7 @@ class AstypeExpr(ColumnMethodExpr):
     """``astype(dtype)``; ``dtype`` is the pandas spelling."""
     __slots__ = ("operand", "dtype")
     method = "astype"
+    aligns_by_label = False
 
     def __init__(self, operand: ColumnExpr, dtype):
         self.operand = operand
@@ -400,7 +462,10 @@ class AstypeExpr(ColumnMethodExpr):
 
 
 class FillnaExpr(ColumnMethodExpr):
-    """``fillna(value)``: a missing value (null, or NaN in a float column) becomes ``value``."""
+    """Replace nulls and floating-point NaNs with ``value``.
+
+    A Series takes a scalar; a frame takes a column-name to scalar mapping.
+    """
     __slots__ = ("operand", "value")
     method = "fillna"
 
@@ -435,6 +500,9 @@ class IsinExpr(ColumnMethodExpr):
     """``isin(values)``: whether each value is one of ``values``."""
     __slots__ = ("operand", "values")
     method = "isin"
+    # Lookup values do not pair rows with the receiver.
+    aligns_by_label = False
+    boolean_result = True
 
     def __init__(self, operand: ColumnExpr, values):
         self.operand = operand
@@ -445,6 +513,7 @@ class IsnaExpr(ColumnMethodExpr):
     """``isna()``: whether each value is missing (null, or NaN in a float column)."""
     __slots__ = ("operand",)
     method = "isna"
+    boolean_result = True
 
     def __init__(self, operand: ColumnExpr):
         self.operand = operand
@@ -454,6 +523,7 @@ class NotnaExpr(ColumnMethodExpr):
     """``notna()``: the negation of :class:`IsnaExpr`."""
     __slots__ = ("operand",)
     method = "notna"
+    boolean_result = True
 
     def __init__(self, operand: ColumnExpr):
         self.operand = operand

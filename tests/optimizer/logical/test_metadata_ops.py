@@ -183,6 +183,7 @@ _STRUCTURE_READS = {
     "columns.tolist()": lambda x: x.columns.tolist(),
     "x[columns[:2]]": lambda x: x[x.columns[:2]],
     "drop(columns[0])": lambda x: x.drop(columns=x.columns[0]),
+    "head(shape[0])": lambda x: x.head(x.shape[0]),
 }
 _SELECTORS = {
     "pandas": lambda: FlagBasedSelector(backend="pandas"),

@@ -11,18 +11,18 @@ import stratum as st
 from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._map_ops import (
-    ApplyUDFOp, AssignMapOp, AssignOp, AttributeReadOp, CallMapOp,
-    DatetimeConversionOp, DatetimeFieldOp, StringMethodOp, make_datetime_conversion_op,
-    make_frame_get_attr, make_string_method_op)
+    ApplyUDFOp, AttributeReadOp, CallMapOp, DatetimeConversionOp, DatetimeFieldOp,
+    make_datetime_conversion_op, make_frame_get_attr)
+from stratum.optimizer.logical._combine_ops import AssignOp
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
+from stratum.runtime._scheduler import SequentialScheduler
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._column_expr import (
     AstypeExpr, BinOpExpr, ClipExpr, Col, Const, DatetimeExpr, DtExpr, FillnaExpr,
-    IsinExpr, IsnaExpr, NotnaExpr, OperandLeaf, StrExpr, WhereExpr)
+    IsinExpr, IsnaExpr, MapValuesExpr, NotnaExpr, OperandLeaf, StrExpr, WhereExpr)
 from stratum.optimizer.logical._expr_folding import _Folder
-from stratum.optimizer.logical._column_methods import (
-    AstypeOp, ClipOp, ColumnMethodOp, FillnaOp, IsinOp, IsnaOp, MapValuesOp, NotnaOp,
-    WhereOp, make_column_method_op)
-from stratum.optimizer.logical._dataframe_ops import extract_dataframe_op
+from stratum.optimizer.logical._dataframe_ops import (
+    extract_dataframe_op, make_column_method_op, make_string_method_op)
 from stratum.optimizer.logical._selection_ops import SelectionOp
 from stratum.optimizer.logical._ops import (
     BinOp, CallOp, GetAttrOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType,
@@ -35,279 +35,6 @@ def _one(test, ops, cls):
     found = [o for o in ops if isinstance(o, cls)]
     test.assertEqual(1, len(found), f"expected exactly one {cls.__name__}")
     return found[0]
-
-
-class TestAssignMapFolding(unittest.TestCase):
-    """df.assign(...) folds into an AssignMapOp with one ColumnExpr per column."""
-
-    def setUp(self):
-        self.df = pd.DataFrame({"c1": [1, 2],
-                                "c2": ["2020-01-01", "2020-02-03"],
-                                "s": ["a1", "bb"]})
-
-    def test_feature_engineering_pattern_folds(self):
-        # The motivating pattern: arithmetic, a datetime conversion via apply_func
-        # and two .dt accessors all fold; the shared date column folds once.
-        src = st.as_data_op(self.df)
-        date_col = src["c2"].skb.apply_func(pd.to_datetime)
-        out = src.assign(c3=src["c1"] + 123, c4=date_col.dt.day, c5=date_col.dt.day)
-        ops = optimize(out, OptConfig(dataframe_ops=True))
-        map_op = _one(self, ops, AssignMapOp)
-        day = DtExpr(DatetimeExpr(Col("c2")), "day")
-        self.assertEqual({"c3": BinOpExpr(operator.add, Col("c1"), Const(123)),
-                          "c4": day, "c5": day}, map_op.entries)
-        # everything private to the assign is absorbed: only source + map remain
-        self.assertEqual(1, len(map_op.inputs))
-        for cls in (GetItemOp, BinOp, DatetimeConversionOp, DatetimeFieldOp, AttributeReadOp):
-            self.assertEqual([], [o for o in ops if isinstance(o, cls)], cls.__name__)
-
-    def test_shared_subexpression_folds_to_same_object(self):
-        # c4 and c5 fold through the shared folder memo: one expression instance.
-        src = st.as_data_op(self.df)
-        date_col = src["c2"].skb.apply_func(pd.to_datetime)
-        out = src.assign(c4=date_col.dt.day, c5=date_col.dt.day)
-        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        self.assertIs(map_op.entries["c4"].operand, map_op.entries["c5"].operand)
-
-    def test_same_root_reused_across_entries(self):
-        src = st.as_data_op(self.df)
-        derived = src["c1"] + 1
-        out = src.assign(first=derived, second=derived)
-        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        self.assertIs(map_op.entries["first"], map_op.entries["second"])
-
-    def test_same_producer_used_for_both_operands(self):
-        src = st.as_data_op(self.df)
-        derived = src["c1"] + 1
-        out = src.assign(total=derived + derived)
-        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        total = map_op.entries["total"]
-        self.assertIsInstance(total, BinOpExpr)
-        self.assertIs(total.left, total.right)
-
-    def test_str_method_folds_to_str_expr(self):
-        src = st.as_data_op(self.df)
-        out = src.assign(c=src["s"].str.count("1"))
-        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        self.assertEqual({"c": StrExpr(Col("s"), "count", {"pat": "1"})}, map_op.entries)
-
-    def test_fillna_astype_chain_folds(self):
-        src = st.as_data_op(self.df)
-        out = src.assign(c=src["c1"].fillna(0).astype("float32"))
-        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        self.assertEqual(AstypeExpr(FillnaExpr(Col("c1"), 0), "float32"),
-                         map_op.entries["c"])
-        self.assertEqual(1, len(map_op.inputs))
-
-    def test_unsupported_astype_options_stay_as_leaf(self):
-        src = st.as_data_op(self.df)
-        converted = src["c1"].astype("float32", errors="ignore")
-        map_op = _one(
-            self,
-            optimize(src.assign(c=converted), OptConfig(dataframe_ops=True)),
-            AssignMapOp,
-        )
-        self.assertIsInstance(map_op.entries["c"], OperandLeaf)
-
-    def test_row_local_methods_fold_with_expression_arguments(self):
-        src = st.as_data_op(self.df)
-        c1 = src["c1"]
-        out = src.assign(
-            clipped=c1.clip(lower=1, upper=2),
-            kept=c1.where(c1 > 1, 0),
-            member=src["s"].isin(["a1", "missing"]),
-            present=c1.notna(),
-        )
-        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-
-        self.assertEqual(1, len(map_op.inputs))
-        self.assertEqual(ClipExpr(Col("c1"), 1, 2), map_op.entries["clipped"])
-        self.assertEqual(
-            WhereExpr(Col("c1"), BinOpExpr(operator.gt, Col("c1"), Const(1)), 0),
-            map_op.entries["kept"])
-        self.assertEqual(IsinExpr(Col("s"), ["a1", "missing"]), map_op.entries["member"])
-        self.assertEqual(NotnaExpr(Col("c1")), map_op.entries["present"])
-
-    def test_unsupported_fillna_options_stay_as_leaf(self):
-        src = st.as_data_op(self.df)
-        filled = src["c1"].fillna(0, limit=1)
-        map_op = _one(
-            self,
-            optimize(src.assign(c=filled), OptConfig(dataframe_ops=True)),
-            AssignMapOp,
-        )
-        self.assertIsInstance(map_op.entries["c"], OperandLeaf)
-
-    def test_scalar_constant_folds_to_const(self):
-        src = st.as_data_op(self.df)
-        out = src.assign(c3=src["c1"] + 1, flag=7)
-        map_op = _one(self, optimize(out, OptConfig(dataframe_ops=True)), AssignMapOp)
-        self.assertEqual(Const(7), map_op.entries["flag"])
-
-    def test_sequence_constant_falls_back_to_assign_op(self):
-        # A list-valued kwarg means "assign these values"; backends spell that
-        # differently, so the opaque AssignOp handles it.
-        src = st.as_data_op(self.df)
-        ops = optimize(src.assign(vals=[10, 20]), OptConfig(dataframe_ops=True))
-        _one(self, ops, AssignOp)
-        self.assertEqual([], [o for o in ops if isinstance(o, AssignMapOp)])
-
-    def test_flag_off_keeps_assign_op(self):
-        src = st.as_data_op(self.df)
-        with make_map_op(False):
-            ops = optimize(src.assign(c3=src["c1"] + 1), OptConfig(dataframe_ops=True))
-        _one(self, ops, AssignOp)
-
-    def test_externally_consumed_producer_stays_as_leaf(self):
-        # The comparison feeds the assign AND a selection, so it cannot be
-        # absorbed: the entry references it via an OperandLeaf.
-        src = st.as_data_op(self.df)
-        mask = src["c1"] > 1
-        out = src[mask].assign(keep=mask)
-        ops = optimize(out, OptConfig(dataframe_ops=True))
-        map_op = _one(self, ops, AssignMapOp)
-        self.assertIsInstance(map_op.entries["keep"], OperandLeaf)
-        self.assertEqual(2, len(map_op.inputs))  # [selection frame, shared mask]
-        self.assertTrue(any(isinstance(o, BinOp) for o in ops))
-
-    def test_transformed_column_stays_as_leaf(self):
-        # A fitted transformer is outside the native-lazy grammar: the apply
-        # stays a graph op and the entry references its output via a leaf.
-        from sklearn.preprocessing import StandardScaler
-        from stratum.optimizer.logical._ops import TransformerOp
-        src = st.as_data_op(self.df)
-        scaled = src.skb.apply(StandardScaler(), cols=["c1"])
-        out = src.assign(keep=scaled["c1"])
-        ops = optimize(out, OptConfig(dataframe_ops=True))
-        map_op = _one(self, ops, AssignMapOp)
-        self.assertIsInstance(map_op.entries["keep"], OperandLeaf)
-        self.assertEqual(2, len(map_op.inputs))  # [src, scaled["c1"]]
-        self.assertTrue(any(isinstance(o, TransformerOp) for o in ops))
-
-    def test_unsupported_datetime_kwargs_stay_as_leaf(self):
-        # An option a DatetimeConversionOp does not hold keeps the call opaque.
-        src = st.as_data_op(self.df)
-        parsed = src["c2"].skb.apply_func(pd.to_datetime, dayfirst=True)
-        ops = optimize(src.assign(parsed=parsed), OptConfig(dataframe_ops=True))
-        map_op = _one(self, ops, AssignMapOp)
-        self.assertIsInstance(map_op.entries["parsed"], OperandLeaf)
-        self.assertFalse([o for o in ops if isinstance(o, DatetimeConversionOp)])
-        call = _one(self, ops, CallOp)
-        self.assertIs(pd.to_datetime, call.func)
-        self.assertIs(OutputType.SERIES, call.output_type)
-
-
-class TestAssignMapProcess(unittest.TestCase):
-    """AssignMapOp evaluates its entries and assigns them per backend."""
-
-    def setUp(self):
-        self.df = pd.DataFrame({"x": [1, 2, 3],
-                                "d": ["2020-01-01", "2020-02-03", "2020-03-05"]})
-
-    def test_expr_entries_pandas(self):
-        op = AssignMapOp(entries={
-            "y": BinOpExpr(operator.add, Col("x"), Const(10)),
-            "day": DtExpr(DatetimeExpr(Col("d")), "day"),
-            "flag": Const(1)})
-        result = run_op(op, self.df)
-        self.assertEqual([11, 12, 13], result["y"].tolist())
-        self.assertEqual([1, 3, 5], result["day"].tolist())
-        self.assertEqual([1, 1, 1], result["flag"].tolist())
-        self.assertEqual(["x", "d", "y", "day", "flag"], list(result.columns))
-
-    def test_datetime_expr_fields(self):
-        frame = pd.DataFrame({"d": ["01/02/2020", "bad"]})
-        for polars in (False, True):
-            with self.subTest(polars=polars), force_polars(polars):
-                op = AssignMapOp(entries={"parsed": DatetimeExpr(
-                    Col("d"), format="%d/%m/%Y", errors="coerce")})
-                result = run_op(op, pl.from_pandas(frame) if polars else frame)
-                parsed = list(result["parsed"])
-                self.assertEqual(pd.Timestamp("2020-02-01"), parsed[0])
-                self.assertTrue(pd.isna(parsed[1]))
-
-    def test_expr_entries_polars(self):
-        op = AssignMapOp(entries={
-            "y": BinOpExpr(operator.add, Col("x"), Const(10)),
-            "day": DtExpr(DatetimeExpr(Col("d")), "day")})
-        with force_polars():
-            result = run_op(op, pl.from_pandas(self.df))
-        self.assertEqual([11, 12, 13], result["y"].to_list())
-        self.assertEqual([1, 3, 5], result["day"].to_list())
-
-    def test_is_month_end_entry_polars(self):
-        frame = pl.DataFrame({
-            "d": pl.Series("d", pd.to_datetime(["2025-01-31", "2025-01-15"]))})
-        op = AssignMapOp(entries={"end": DtExpr(Col("d"), "is_month_end")})
-        with force_polars():
-            result = run_op(op, frame)
-        self.assertEqual([True, False], result["end"].to_list())
-
-    def test_operand_leaf_entry(self):
-        op = AssignMapOp(entries={"ext": OperandLeaf(OperandRef(1))})
-        result = run_op(op, self.df, pd.Series([7, 8, 9]))
-        self.assertEqual([7, 8, 9], result["ext"].tolist())
-
-    def test_pandas_leaf_converts_under_polars(self):
-        # A leaf feeding pandas data into a polars plan is converted, mirroring
-        # the AssignOp behaviour.
-        op = AssignMapOp(entries={"ext": OperandLeaf(OperandRef(1))})
-        with force_polars():
-            result = run_op(op, pl.from_pandas(self.df), pd.Series([7, 8, 9]))
-        self.assertEqual([7, 8, 9], result["ext"].to_list())
-
-    def test_scalar_leaf_broadcasts_under_polars(self):
-        op = AssignMapOp(entries={"ext": OperandLeaf(OperandRef(1))})
-        with force_polars():
-            result = run_op(op, pl.from_pandas(self.df), 7)
-        self.assertEqual([7, 7, 7], result["ext"].to_list())
-
-    def test_list_leaf_becomes_column_under_polars(self):
-        op = AssignMapOp(entries={"ext": OperandLeaf(OperandRef(1))})
-        with force_polars():
-            result = run_op(op, pl.from_pandas(self.df), [7, 8, 9])
-        self.assertEqual([7, 8, 9], result["ext"].to_list())
-
-    def test_clone_shares_immutable_entries(self):
-        op = AssignMapOp(entries={"y": BinOpExpr(operator.add, Col("x"), Const(1))})
-        cloned = op.clone()
-        self.assertIsNot(op.entries, cloned.entries)
-        self.assertIs(op.entries["y"], cloned.entries["y"])
-
-
-class TestMapStructureKey(unittest.TestCase):
-    """MapOps expose structural keys so CSE can dedup identical maps."""
-
-    def test_assign_map_equal_keys(self):
-        src = Op()
-        entries = {"y": BinOpExpr(operator.add, Col("x"), Const(1))}
-        a = AssignMapOp(entries=dict(entries), inputs=[src])
-        b = AssignMapOp(entries=dict(entries), inputs=[src])
-        self.assertEqual(a.structure_key(), b.structure_key())
-
-    def test_assign_map_differs_on_entries(self):
-        src = Op()
-        a = AssignMapOp(entries={"y": Const(1)}, inputs=[src])
-        b = AssignMapOp(entries={"y": Const(2)}, inputs=[src])
-        self.assertNotEqual(a.structure_key(), b.structure_key())
-
-    def test_duplicate_assign_maps_dedup_after_cse(self):
-        df = pd.DataFrame({"x": [1, 2]})
-        data = st.as_data_op(df)
-        root = data.assign(y=data["x"] + 1).skb.concat(
-            [data.assign(y=data["x"] + 1)], axis=0)
-        ops = optimize(root, OptConfig(dataframe_ops=True))
-        self.assertEqual(1, len([o for o in ops if isinstance(o, AssignMapOp)]))
-
-    def test_different_scalar_types_do_not_dedup_after_cse(self):
-        df = pd.DataFrame({"x": [1, 2]})
-        data = st.as_data_op(df)
-        root = data.assign(y=data["x"] * st.as_data_op(1)).skb.concat(
-            [data.assign(y=data["x"] * st.as_data_op(1.0))], axis=0)
-        ops = optimize(root, OptConfig(dataframe_ops=True))
-        self.assertEqual(2, len([o for o in ops if isinstance(o, AssignMapOp)]))
-        result = _api.evaluate(root)
-        self.assertEqual([1.0, 2.0, 1.0, 2.0], list(result["y"]))
 
 
 class TestMapExprRefContract(unittest.TestCase):
@@ -383,7 +110,7 @@ class TestFolderEdgeCases(unittest.TestCase):
         self.assertEqual(set(), absorbable)
 
 
-"""End-to-end: folded maps run through the full optimize + execute path."""
+"""End-to-end: explicit maps and assignments execute through the full plan."""
 
 @pytest.fixture(params=[False, True], ids=["pandas", "polars"])
 def polars(request):
@@ -406,9 +133,9 @@ def test_scalar_comparison_methods_fold_and_evaluate(polars):
     df = pd.DataFrame({"age": [2, 5, 8], "cat": ["A", "B", "A"]})
     src = st.as_data_op(df)
     out = src.assign(recent=src["age"].le(5), category=src["cat"].eq("A"))
-    maps = [op for op in optimize(out) if isinstance(op, AssignMapOp)]
-    assert len(maps) == 1
-    assert all(isinstance(expr, BinOpExpr) for expr in maps[0].entries.values())
+    maps = [op for op in optimize(out) if isinstance(op, ExpressionMapOp)]
+    assert len(maps) == 2
+    assert all(isinstance(op.expr, BinOpExpr) for op in maps)
     result = _api.evaluate(out)
     assert list(result["recent"]) == [True, True, False]
     assert list(result["category"]) == [True, False, True]
@@ -424,31 +151,20 @@ def test_series_comparison_method_keeps_pandas_alignment():
 
 def test_chained_assign_maps_evaluate(polars):
     # Three chained assigns, each reading a column produced by the previous one:
-    # every assign folds into its own map, and Col refs resolve against the
-    # previous map's output frame.
+    # every projection reads the frame produced by the previous assignment.
     df = pd.DataFrame({"x": [1, 2, 3]})
     src = st.as_data_op(df)
     d1 = src.assign(x2=src["x"] * 2)
     d2 = d1.assign(x4=d1["x2"] * 2)
     d3 = d2.assign(x8=d2["x4"] * 2)
     ops = optimize(d3, OptConfig(dataframe_ops=True))
-    assert 3 == len([o for o in ops if isinstance(o, AssignMapOp)])
-    assert 4 == len(ops)  # source + three maps
+    assert 3 == len([o for o in ops if isinstance(o, AssignOp)])
+    assert 3 == len([o for o in ops if isinstance(o, ExpressionMapOp)])
+    assert 3 == len([o for o in ops if isinstance(o, ColumnProjectionOp)])
     result = _api.evaluate(d3)
     assert [2, 4, 6] == list(result["x2"])
     assert [4, 8, 12] == list(result["x4"])
     assert [8, 16, 24] == list(result["x8"])
-
-
-def test_assign_overwrite_and_read_original_column(polars):
-    # One entry overwrites "a" while another reads it: both must see the
-    # ORIGINAL column (assign/with_columns evaluate against the input frame).
-    df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
-    src = st.as_data_op(df)
-    out = src.assign(a=src["a"] * 10, doubled=src["a"] * 2)
-    result = _api.evaluate(out)
-    assert [10.0, 20.0, 30.0] == list(result["a"])
-    assert [2.0, 4.0, 6.0] == list(result["doubled"])
 
 
 def test_deep_arithmetic_expression_evaluates(polars):
@@ -458,7 +174,8 @@ def test_deep_arithmetic_expression_evaluates(polars):
     a, b = src["a"], src["b"]
     out = src.assign(y=-((a + b) ** 2) / 3 + (a * b) % 5 + b // a)
     ops = optimize(out, OptConfig(dataframe_ops=True))
-    assert 2 == len(ops)  # everything private folds: source + map
+    assert 1 == len([op for op in ops if isinstance(op, AssignOp)])
+    assert len([op for op in ops if isinstance(op, ExpressionMapOp)]) > 1
     result = _api.evaluate(out)
     expected = -((df["a"] + df["b"]) ** 2) / 3 + (df["a"] * df["b"]) % 5 + df["b"] // df["a"]
     np.testing.assert_allclose(expected.to_numpy(),
@@ -481,7 +198,7 @@ def test_chained_string_methods_evaluate(polars):
     out = src.assign(up=src["s"].str.strip().str.upper(),
                      n=src["s"].str.strip().str.len() * 10)
     ops = optimize(out, OptConfig(dataframe_ops=True))
-    assert 2 == len(ops)
+    assert 1 == len([op for op in ops if isinstance(op, AssignOp)])
     result = _api.evaluate(out)
     assert ["AB", "C", "DEF"] == list(result["up"])
     assert [20, 10, 30] == list(result["n"])
@@ -495,7 +212,7 @@ def test_datetime_feature_engineering_evaluates(polars):
     out = src.assign(months_since_2020=(date.dt.year - 2020) * 12 + date.dt.month,
                      day=date.dt.day)
     ops = optimize(out, OptConfig(dataframe_ops=True))
-    assert 2 == len(ops)
+    assert 1 == len([op for op in ops if isinstance(op, AssignOp)])
     result = _api.evaluate(out)
     assert [15, 47, 1] == list(result["months_since_2020"])
     assert [5, 20, 31] == list(result["day"])
@@ -543,27 +260,18 @@ def test_weird_column_names_evaluate(polars):
     assert [9, 16] == list(result["größe²"])
 
 
-def test_nan_propagation_evaluates(polars):
-    # NaN flows through a folded arithmetic entry (polars may surface it as null).
-    df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
-    src = st.as_data_op(df)
-    result = _api.evaluate(src.assign(y=src["a"] * 2 + 1))
-    values = list(result["y"])
-    assert 3.0 == values[0] and 7.0 == values[2]
-    assert values[1] is None or np.isnan(values[1])
-
-
 def test_external_scalar_data_op_operand_folds_to_const(polars):
     # A scalar fed from another data-op arrives as a ValueOp input, and is inlined
-    # into the expression as a Const -- the map takes only the source frame.
+    # into the expression as a Const; the map takes the projected column.
     df = pd.DataFrame({"x": [1, 2, 3]})
     src = st.as_data_op(df)
     factor = st.as_data_op(3)
     out = src.assign(scaled=src["x"] * factor)
     map_op = _one(unittest.TestCase(), optimize(out, OptConfig(dataframe_ops=True)),
-                  AssignMapOp)
-    assert 1 == len(map_op.inputs)  # [src]
-    assert BinOpExpr(operator.mul, Col("x"), Const(3)) == map_op.entries["scaled"]
+                  ExpressionMapOp)
+    assert 1 == len(map_op.inputs)
+    assert isinstance(map_op.inputs[0], ColumnProjectionOp)
+    assert BinOpExpr(operator.mul, OperandLeaf(OperandRef(0)), Const(3)) == map_op.expr
     result = _api.evaluate(out)
     assert [3, 6, 9] == list(result["scaled"])
 
@@ -577,8 +285,8 @@ def test_external_container_data_op_operand_stays_leaf(polars):
     factor = st.as_data_op([3, 3, 3])
     out = src.assign(scaled=src["x"] * factor)
     map_op = _one(unittest.TestCase(), optimize(out, OptConfig(dataframe_ops=True)),
-                  AssignMapOp)
-    assert 2 == len(map_op.inputs)  # [src, factor]
+                  ExpressionMapOp)
+    assert 2 == len(map_op.inputs)  # projected column and external operand
     with st.config(implementation_selector="greedy" if polars else "default"):
         result = _api.evaluate(out)
     assert [3, 6, 9] == list(result["scaled"])
@@ -593,7 +301,7 @@ def test_direct_external_scalar_operand_evaluates(polars):
 
 
 def test_filter_then_assign_pipeline_evaluates(polars):
-    # Mask fold + assign fold chained: the pipeline collapses to three ops.
+    # The mask remains folded; assigned computations remain explicit.
     df = pd.DataFrame({
         "qty": [1.0, 2.0, 3.0, 4.0, 5.0],
         "price": [10.0, 20.0, 30.0, 40.0, 50.0],
@@ -607,9 +315,9 @@ def test_filter_then_assign_pipeline_evaluates(polars):
                     month=f["ts"].skb.apply_func(pd.to_datetime).dt.month)
 
     ops = optimize(feat, OptConfig(dataframe_ops=True))
-    assert 3 == len(ops)  # source -> selection -> assign map
+    assert any(isinstance(op, ExpressionMapOp) for op in ops)
     from stratum.optimizer.logical._selection_ops import SelectionOp
-    for cls in (SelectionOp, AssignMapOp):
+    for cls in (SelectionOp, AssignOp):
         assert 1 == len([o for o in ops if isinstance(o, cls)]), cls.__name__
 
     result = _api.evaluate(feat)
@@ -619,35 +327,18 @@ def test_filter_then_assign_pipeline_evaluates(polars):
 
 
 def test_wide_assign_evaluates(polars):
-    # Many entries in one map (mix of shared source columns and constants).
+    # Multiple maps share source projections; assignment also accepts literals.
     df = pd.DataFrame({"x": [1, 2], "y": [3, 4]})
     src = st.as_data_op(df)
     kwargs = {f"c{i}": src["x"] * i + src["y"] for i in range(8)}
     kwargs["marker"] = -1
     out = src.assign(**kwargs)
     ops = optimize(out, OptConfig(dataframe_ops=True))
-    assert 2 == len(ops)
+    assert 1 == len([op for op in ops if isinstance(op, AssignOp)])
     result = _api.evaluate(out)
     for i in range(8):
         assert [1 * i + 3, 2 * i + 4] == list(result[f"c{i}"]), f"c{i}"
     assert [-1, -1] == list(result["marker"])
-
-
-def test_ttt_shaped_wide_fillna_astype_collapses_to_one_map():
-    """The dominant TTT pattern is one map, not three ops per column."""
-    columns = [f"direct_{i}" for i in range(32)]
-    df = pd.DataFrame({name: [1.0, np.nan] for name in columns})
-    src = st.as_data_op(df)
-    out = src.assign(
-        **{name: src[name].fillna(0.0).astype("float32") for name in columns}
-    )
-
-    ops = optimize(out, OptConfig(dataframe_ops=True))
-    map_op = _one(unittest.TestCase(), ops, AssignMapOp)
-
-    assert 2 == len(ops)  # source + one map (formerly 98 logical nodes)
-    assert 32 == len(map_op.entries)
-    assert 1 == len(map_op.inputs)  # no per-column OperandLeaf inputs
 
 
 def test_fillna_astype_pipeline_evaluates(polars):
@@ -656,7 +347,7 @@ def test_fillna_astype_pipeline_evaluates(polars):
     out = src.assign(x=src["x"].fillna(0.0).astype("float32"))
 
     ops = optimize(out, OptConfig(dataframe_ops=True))
-    assert not any(isinstance(op, ColumnMethodOp) for op in ops)
+    assert 2 == len([op for op in ops if isinstance(op, ExpressionMapOp)])
 
     result = _api.evaluate(out)
     np.testing.assert_array_equal(
@@ -669,18 +360,21 @@ def test_fillna_astype_pipeline_evaluates(polars):
         assert np.dtype("float32") == result["x"].dtype
 
 
-def test_folded_fillna_astype_executes_on_polars():
-    expr = AstypeExpr(FillnaExpr(Col("x"), 0.0), "float32")
-    op = AssignMapOp(entries={"x": expr})
-    with force_polars():
-        result = run_op(op, pl.DataFrame({"x": [1.0, float("nan"), None]}))
-    assert [1.0, 0.0, 0.0] == result["x"].to_list()
-    assert pl.Float32 == result.schema["x"]
+def test_expression_fillna_astype_executes_on_polars():
+    from stratum.optimizer.physical._map_execs import PolarsExpressionMapOp
+    expr = AstypeExpr(FillnaExpr(OperandLeaf(OperandRef(0)), 0.0), "float32")
+    op = PolarsExpressionMapOp(expr)
+    source = Op()
+    source.output_schema = pl.Schema({"x": pl.Float64})
+    op.inputs = [source]
+    result = op.process([pl.Series("x", [1.0, float("nan"), None])])
+    assert [1.0, 0.0, 0.0] == result.to_list()
+    assert pl.Float32 == result.dtype
 
 
 def test_standalone_fillna_handles_polars_nan_and_null():
     series = pl.Series("x", [1.0, float("nan"), None])
-    op = FillnaOp(0.0)
+    op = ExpressionMapOp(FillnaExpr(OperandLeaf(OperandRef(0)), 0.0))
     with force_polars():
         result = run_op(op, series)
     assert [1.0, 0.0, 0.0] == result.to_list()
@@ -700,16 +394,9 @@ def test_row_local_method_pipeline_evaluates(use_polars):
         member=src["s"].isin(["yes"]),
         present=x.notna(),
     )
-    map_op = _one(
-        unittest.TestCase(),
-        optimize(out, OptConfig(dataframe_ops=True)),
-        AssignMapOp,
-    )
-
-    input_frame = pl.from_pandas(frame) if use_polars else frame
-    logical_map = AssignMapOp(entries=map_op.entries)
     with force_polars(use_polars):
-        result = run_op(logical_map, input_frame)
+        ops = optimize(out, OptConfig(dataframe_ops=True))
+    result = SequentialScheduler(ops, None).evaluate()
 
     np.testing.assert_allclose(
         np.asarray(list(result["clipped"]), dtype=float),
@@ -719,18 +406,6 @@ def test_row_local_method_pipeline_evaluates(use_polars):
     assert [0.0, 2.0, 0.0] == list(result["kept"])
     assert [True, False, True] == list(result["member"])
     assert [True, True, False] == list(result["present"])
-
-
-def test_notna_is_foldable_in_selection_predicate():
-    frame = pd.DataFrame({"x": [1.0, np.nan, 2.0]})
-    src = st.as_data_op(frame)
-    out = src[src["x"].notna()]
-    ops = optimize(out, OptConfig(dataframe_ops=True))
-    from stratum.optimizer.logical._selection_ops import SelectionOp
-
-    selection = _one(unittest.TestCase(), ops, SelectionOp)
-    assert NotnaExpr(Col("x")) == selection.predicate
-    assert 2 == len(ops)
 
 
 def _series_input():
@@ -754,13 +429,13 @@ class TestMissingValueMethods(unittest.TestCase):
 
     def test_method_extracts(self):
         src = st.as_data_op(self.df)
-        for method, cls in (("isna", IsnaOp), ("isnull", IsnaOp),
-                            ("notna", NotnaOp), ("notnull", NotnaOp)):
+        for method, cls in (("isna", IsnaExpr), ("isnull", IsnaExpr),
+                            ("notna", NotnaExpr), ("notnull", NotnaExpr)):
             with self.subTest(method=method):
                 ops = optimize(getattr(src["a"], method)(),
                                OptConfig(dataframe_ops=True))
-                method_op = _one(self, ops, ColumnMethodOp)
-                self.assertIsInstance(method_op, cls)
+                method_op = _one(self, ops, ExpressionMapOp)
+                self.assertIsInstance(method_op.expr, cls)
                 self.assertIs(OutputType.SERIES, method_op.output_type)
                 self.assertFalse(any(isinstance(op, MethodCallOp) for op in ops))
 
@@ -772,8 +447,8 @@ class TestMissingValueMethods(unittest.TestCase):
             with self.subTest(func=func.__name__):
                 ops = optimize(src["a"].skb.apply_func(func),
                                OptConfig(dataframe_ops=True))
-                method_op = _one(self, ops, ColumnMethodOp)
-                self.assertEqual(method, method_op.method)
+                method_op = _one(self, ops, ExpressionMapOp)
+                self.assertEqual(method, method_op.expr.method)
                 self.assertIs(OutputType.SERIES, method_op.output_type)
                 self.assertFalse(any(isinstance(op, CallOp) for op in ops))
 
@@ -784,7 +459,8 @@ class TestMissingValueMethods(unittest.TestCase):
         root, changed = extract_dataframe_op(call, call)
 
         self.assertTrue(changed)
-        self.assertIsInstance(root, NotnaOp)
+        self.assertIsInstance(root, ExpressionMapOp)
+        self.assertIsInstance(root.expr, NotnaExpr)
         self.assertEqual([src], root.inputs)
         self.assertEqual([root], src.outputs)
 
@@ -830,34 +506,34 @@ class TestMissingValueMethods(unittest.TestCase):
                 ops = optimize(out, OptConfig(dataframe_ops=True))
                 selection = _one(self, ops, SelectionOp)
                 self.assertEqual(expected, selection.predicate)
-                self.assertEqual([], [op for op in ops if isinstance(op, ColumnMethodOp)])
+                self.assertEqual([], [op for op in ops if isinstance(op, ExpressionMapOp)])
 
-    def test_folds_into_assign(self):
+    def test_assign_reads_missing_value_maps(self):
         src = st.as_data_op(self.df)
         out = src.assign(missing=src["a"].isnull(),
                          present=src["a"].skb.apply_func(pd.notnull))
         ops = optimize(out, OptConfig(dataframe_ops=True))
-        map_op = _one(self, ops, AssignMapOp)
-        self.assertEqual({"missing": IsnaExpr(Col("a")),
-                          "present": NotnaExpr(Col("a"))},
-                         map_op.entries)
-        self.assertEqual([], [op for op in ops if isinstance(op, ColumnMethodOp)])
+        map_op = _one(self, ops, AssignOp)
+        self.assertIsInstance(map_op.inputs[map_op.kwargs["missing"].k].expr, IsnaExpr)
+        self.assertIsInstance(map_op.inputs[map_op.kwargs["present"].k].expr, NotnaExpr)
 
     def test_standalone_polars_handles_nan_and_null(self):
         series = pl.Series("a", [1.0, float("nan"), None])
-        for cls, expected in ((IsnaOp, [False, True, True]),
-                              (NotnaOp, [True, False, False])):
+        for cls, expected in ((IsnaExpr, [False, True, True]),
+                              (NotnaExpr, [True, False, False])):
             with self.subTest(cls=cls.__name__), force_polars():
-                self.assertEqual(expected, run_op(cls(), series).to_list())
+                op = ExpressionMapOp(cls(OperandLeaf(OperandRef(0))))
+                self.assertEqual(expected, run_op(op, series).to_list())
 
     def test_standalone_polars_on_non_float(self):
         series = pl.Series("s", ["x", None])
         with force_polars():
-            self.assertEqual([False, True], run_op(IsnaOp(), series).to_list())
+            op = ExpressionMapOp(IsnaExpr(OperandLeaf(OperandRef(0))))
+            self.assertEqual([False, True], run_op(op, series).to_list())
 
 
 class TestColumnMethodFields(unittest.TestCase):
-    """Each admitted column method parses into its subclass's fields."""
+    """Each admitted column method parses into its corresponding expression."""
 
     def _parse(self, method, *args, output_type=OutputType.SERIES, **kwargs):
         src = _series_input()
@@ -866,25 +542,27 @@ class TestColumnMethodFields(unittest.TestCase):
 
     def test_spellings_parse_to_the_same_fields(self):
         cases = [
-            (("astype", "float32"), ("astype",), {"dtype": "float32"}, AstypeOp, ("float32",)),
-            (("fillna", 0), ("fillna",), {"value": 0}, FillnaOp, (0,)),
-            (("clip", 1, 2), ("clip",), {"lower": 1, "upper": 2}, ClipOp, (1, 2)),
+            (("astype", "float32"), ("astype",), {"dtype": "float32"}, AstypeExpr, ("float32",)),
+            (("fillna", 0), ("fillna",), {"value": 0}, FillnaExpr, (0,)),
+            (("clip", 1, 2), ("clip",), {"lower": 1, "upper": 2}, ClipExpr, (1, 2)),
             (("where", OperandRef(0), 0), ("where", OperandRef(0)), {"other": 0},
-             WhereOp, (OperandRef(0), 0)),
-            (("isin", [1]), ("isin",), {"values": [1]}, IsinOp, ([1],)),
-            (("map", {1: 2}), ("map",), {"arg": {1: 2}}, MapValuesOp, ({1: 2}, None)),
+             WhereExpr, (OperandLeaf(OperandRef(0)), 0)),
+            (("isin", [1]), ("isin",), {"values": [1]}, IsinExpr, ([1],)),
+            (("map", {1: 2}), ("map",), {"arg": {1: 2}}, MapValuesExpr, ({1: 2}, None)),
         ]
         for positional, keyword_args, keywords, cls, fields in cases:
             for op in (self._parse(*positional), self._parse(*keyword_args, **keywords)):
                 with self.subTest(method=positional[0]):
-                    self.assertIsInstance(op, cls)
-                    self.assertEqual(fields, tuple(getattr(op, f) for f in op.fields))
+                    self.assertIsInstance(op, ExpressionMapOp)
+                    self.assertIsInstance(op.expr, cls)
+                    self.assertEqual(OperandLeaf(OperandRef(0)), op.expr.operand)
+                    self.assertEqual(fields, tuple(getattr(op.expr, f) for f in cls.__slots__[1:]))
                     self.assertIs(OutputType.SERIES, op.output_type)
 
     def test_a_frame_admits_astype_and_a_per_column_fillna(self):
         frame = OutputType.FRAME
-        self.assertEqual("int32", self._parse("astype", "int32", output_type=frame).dtype)
-        self.assertEqual({"a": 0}, self._parse("fillna", {"a": 0}, output_type=frame).value)
+        self.assertEqual("int32", self._parse("astype", "int32", output_type=frame).expr.dtype)
+        self.assertEqual({"a": 0}, self._parse("fillna", {"a": 0}, output_type=frame).expr.value)
         for method, args in (("fillna", (0,)), ("clip", (1,)), ("isna", ()),
                              ("isin", ([1],)), ("map", ({1: 2},))):
             with self.subTest(method=method):
@@ -910,18 +588,18 @@ class TestColumnMethodFields(unittest.TestCase):
                 self.assertIsNone(self._parse(method, *args, **kwargs))
 
 
-@pytest.mark.parametrize("op, values, expected", [
-    pytest.param(AstypeOp("float32"), [1, 2], [1.0, 2.0], id="astype"),
-    pytest.param(FillnaOp(0.0), [1.0, None], [1.0, 0.0], id="fillna"),
-    pytest.param(ClipOp(lower=1, upper=2), [0, 3], [1, 2], id="clip"),
-    pytest.param(IsinOp([1]), [1, 2], [True, False], id="isin"),
-    pytest.param(IsnaOp(), [1.0, None], [False, True], id="isna"),
-    pytest.param(NotnaOp(), [1.0, None], [True, False], id="notna"),
-    pytest.param(MapValuesOp({1: "a"}), [1, 2], ["a", None], id="map"),
+@pytest.mark.parametrize("expr, values, expected", [
+    pytest.param(AstypeExpr(OperandLeaf(OperandRef(0)), "float32"), [1, 2], [1.0, 2.0], id="astype"),
+    pytest.param(FillnaExpr(OperandLeaf(OperandRef(0)), 0.0), [1.0, None], [1.0, 0.0], id="fillna"),
+    pytest.param(ClipExpr(OperandLeaf(OperandRef(0)), lower=1, upper=2), [0, 3], [1, 2], id="clip"),
+    pytest.param(IsinExpr(OperandLeaf(OperandRef(0)), [1]), [1, 2], [True, False], id="isin"),
+    pytest.param(IsnaExpr(OperandLeaf(OperandRef(0))), [1.0, None], [False, True], id="isna"),
+    pytest.param(NotnaExpr(OperandLeaf(OperandRef(0))), [1.0, None], [True, False], id="notna"),
+    pytest.param(MapValuesExpr(OperandLeaf(OperandRef(0)), {1: "a"}), [1, 2], ["a", None], id="map"),
 ])
-def test_column_methods_run_on_both_backends(polars, op, values, expected):
+def test_column_methods_run_on_both_backends(polars, expr, values, expected):
     series = pl.Series("x", values) if polars else pd.Series(values)
-    result = run_op(op.clone(), series)
+    result = run_op(ExpressionMapOp(expr), series)
     assert expected == [None if pd.isna(v) else v for v in result]
 
 
@@ -929,24 +607,23 @@ def test_where_reads_its_condition_from_the_graph(polars):
     values = [1, 2, 3]
     series = pl.Series("x", values) if polars else pd.Series(values)
     cond = pl.Series([True, False, True]) if polars else pd.Series([True, False, True])
-    assert [1, 0, 3] == list(run_op(WhereOp(OperandRef(1), 0), series, cond))
+    expr = WhereExpr(OperandLeaf(OperandRef(0)), OperandLeaf(OperandRef(1)), 0)
+    assert [1, 0, 3] == list(run_op(ExpressionMapOp(expr), series, cond))
 
 
 _MISSING = pd.DataFrame({"a": [0.0, 1.0, np.nan, 4.0], "b": [0.0, 2.0, 1.0, None],
                          "s": ["x", None, "z", "w"]})
 
 
-def _evaluate_on_polars(plan):
-    """Run ``plan`` end to end, where greedy picks the native polars impls."""
+def _evaluate_greedy(plan, *, unnamed=False):
+    """Use native kernels where they preserve the result, including its name."""
     with st.config(scheduler=True, implementation_selector="greedy"):
         result = _api.evaluate(plan)
+    if unnamed:
+        assert isinstance(result, pd.Series) and result.name is None
+        return result
     assert isinstance(result, (pl.Series, pl.DataFrame))
     return result.to_pandas()
-
-
-_FOLDED_NAN_GAP = pytest.mark.xfail(
-    strict=True, reason="FIXME(#216): a folded operand has no dtype, so polars "
-                        "skips the NaN half")
 
 
 def _cases():
@@ -963,9 +640,7 @@ def _cases():
     }
     for path in ("standalone", "assign", "selection"):
         for name, build in cases.items():
-            gap = name.startswith("computed") and path != "standalone"
-            yield pytest.param(build, path, id=f"{path}-{name}",
-                               marks=[_FOLDED_NAN_GAP] if gap else [])
+            yield pytest.param(build, path, id=f"{path}-{name}")
 
 
 @pytest.mark.parametrize("build,path", _cases())
@@ -979,7 +654,7 @@ def test_missing_value_methods_match_pandas(build, path):
         mask = build(src, lambda x, func: x.skb.apply_func(func))
         plan = {"standalone": mask, "assign": src.assign(m=mask),
                 "selection": src[mask]}[path]
-    result = _evaluate_on_polars(plan)
+    result = _evaluate_greedy(plan, unnamed=path == "standalone" and expected.name is None)
     if path == "standalone":
         assert expected.tolist() == result.tolist()
     else:
@@ -1028,19 +703,17 @@ class TestMapRewrites(unittest.TestCase):
                            month=data["datetime"].dt.month)
         data = data.copy()
         ops = optimize(data)
-        # The column getitem and both fused .dt accessors fold into the assign map.
-        self.assertEqual(5, len(ops))
-        map_op = next(o for o in ops if isinstance(o, AssignMapOp))
-        self.assertEqual({"year": DtExpr(Col("datetime"), "year"),
-                          "month": DtExpr(Col("datetime"), "month")},
-                         map_op.entries)
+        assign = next(o for o in ops if isinstance(o, AssignOp))
+        self.assertEqual({"year", "month"}, set(assign.kwargs))
+        self.assertTrue(all(isinstance(assign.inputs[ref.k], DatetimeFieldOp)
+                            for ref in assign.kwargs.values()))
         self.assertIsInstance(ops[-1], MethodCallOp)  # the trailing .copy()
 
     def test_supported_series_method_gets_typed_op(self):
         data = st.as_data_op(self.df)["x"].astype("float32")
         ops = optimize(data, OptConfig(dataframe_ops=True))
-        method = next(op for op in ops if isinstance(op, ColumnMethodOp))
-        self.assertEqual("astype", method.method)
+        method = _one(self, ops, ExpressionMapOp)
+        self.assertEqual("astype", method.expr.method)
         self.assertIs(OutputType.SERIES, method.output_type)
         self.assertFalse(any(isinstance(op, MethodCallOp) for op in ops))
 
@@ -1130,10 +803,10 @@ class TestAssignOpPolars(PolarsTestCase):
         result = run_op(op, pl.DataFrame({"a": [1, 2]}))
         self.assertIn("b", result.columns)
 
-    def test_pandas_series_converted_to_polars(self):
-        op = AssignOp(args=(), kwargs={"b": pd.Series([10, 20])})
-        result = run_op(op, pl.DataFrame({"a": [1, 2]}))
-        self.assertIn("b", result.columns)
+    def test_literal_pandas_series_requires_alignment(self):
+        from stratum.optimizer.physical._combine_execs import PolarsAssignOp
+        op = AssignOp(kwargs={"b": pd.Series([10, 20], index=[1, 0])})
+        self.assertFalse(PolarsAssignOp.supports(op, None))
 
 
 class TestDatetimeConversionOp(unittest.TestCase):
@@ -1466,7 +1139,7 @@ def test_to_datetime_resolves_graph_fed_format(polars):
     assert pd.to_datetime(_DATES["s"]).tolist() == result.tolist()
 
 
-class TestStringMethodOp(unittest.TestCase):
+class TestStringExpressionMaps(unittest.TestCase):
     """`col.str.<method>(...)` fuses the .str accessor and the call into one op."""
 
     def setUp(self):
@@ -1478,29 +1151,29 @@ class TestStringMethodOp(unittest.TestCase):
         return found[0]
 
     def test_str_method_fuses_accessor_away(self):
-        # A str call used as a column projection (here assigned) becomes a single
-        # StringMethodOp; the AttributeReadOp(["str"]) accessor drops out.
-        # Map folding is disabled so the intermediate op stays observable (with it
-        # on, the assign absorbs the call into a StrExpr entry -- see test_map_ops).
+        # String extraction also runs when arithmetic Map extraction is disabled.
+        # The column feeds the Map directly; the accessor is removed.
         data = st.as_data_op(self.df)
         with make_map_op(False):
             ops = optimize(data.assign(c=data["s"].str.upper()),
                            OptConfig(dataframe_ops=True))
-        sm = self._one(ops, StringMethodOp)
-        self.assertEqual("upper", sm.method)
+        sm = self._one(ops, ExpressionMapOp)
+        self.assertIsInstance(sm.expr, StrExpr)
+        self.assertEqual("upper", sm.expr.method)
         self.assertIs(OutputType.SERIES, sm.output_type)
         self.assertIsInstance(sm.inputs[0], ColumnProjectionOp)  # the column, not the accessor
         self.assertEqual([], [o for o in ops if isinstance(o, AttributeReadOp)])
 
     def test_shared_accessor_detached_after_last_call(self):
         # When the same `.str` accessor feeds two calls, each folds to its own
-        # StringMethodOp and the accessor is removed once its last consumer is fused.
+        # expression Map and the accessor is removed after its last consumer.
         data = st.as_data_op(self.df)
         acc = data["s"].str
         with make_map_op(False):
             ops = optimize(data.assign(a=acc.count("1"), b=acc.upper()),
                            OptConfig(dataframe_ops=True))
-        self.assertEqual(2, len([o for o in ops if isinstance(o, StringMethodOp)]))
+        self.assertEqual(2, len([o for o in ops if isinstance(o, ExpressionMapOp)
+                                and isinstance(o.expr, StrExpr)]))
         self.assertEqual([], [o for o in ops if isinstance(o, AttributeReadOp)])
 
     def test_arguments_bind_to_pandas_parameter_names(self):
@@ -1509,9 +1182,9 @@ class TestStringMethodOp(unittest.TestCase):
                      data["s"].str.replace(pat="1", repl="2", regex=False),
                      data["s"].str.replace("1", repl="2", regex=False)):
             with self.subTest(call=call), make_map_op(False):
-                sm = self._one(optimize(call, OptConfig(dataframe_ops=True)), StringMethodOp)
-                self.assertEqual({"pat": "1", "repl": "2", "regex": False}, sm.params)
-                self.assertEqual(["pat", "repl", "regex"], list(sm.params))
+                sm = self._one(optimize(call, OptConfig(dataframe_ops=True)), ExpressionMapOp)
+                self.assertEqual({"pat": "1", "repl": "2", "regex": False}, sm.expr.params)
+                self.assertEqual(["pat", "repl", "regex"], list(sm.expr.params))
 
     def test_calls_pandas_rejects_stay_opaque(self):
         column = Op()
@@ -1522,36 +1195,6 @@ class TestStringMethodOp(unittest.TestCase):
                 accessor = AttributeReadOp(attr_name=["str"], inputs=[column], outputs=[])
                 call = _wire(MethodCallOp(method, args=args, kwargs=kwargs), accessor)
                 self.assertIsNone(make_string_method_op(call))
-
-    def test_process_pandas(self):
-        op = StringMethodOp(method="count", params={"pat": "1"})
-        result = run_op(op, pd.Series(["a1", "bb", "c1"]))
-        self.assertEqual([1, 0, 1], result.tolist())
-
-    def test_process_polars_renames_method(self):
-        # polars spells .str.count as .str.count_matches.
-        with force_polars():
-            op = StringMethodOp(method="count", params={"pat": "1"})
-            result = run_op(op, pl.Series(["a1", "bb", "c1"]))
-        self.assertEqual([1, 0, 1], result.to_list())
-
-    def test_graph_argument_is_rewired_to_fused_method(self):
-        column = Op()
-        column.output_type = OutputType.SERIES
-        accessor = AttributeReadOp(
-            attr_name=["str"], inputs=[column], outputs=[])
-        argument = Op()
-        call = MethodCallOp(
-            method_name="contains", args=(OperandRef(1),), kwargs={})
-        call.inputs = [accessor, argument]
-        accessor.outputs = [call]
-        argument.outputs = [call]
-        column.outputs = [accessor]
-
-        new_op = make_string_method_op(call)
-
-        self.assertIn(new_op, argument.outputs)
-        self.assertNotIn(call, argument.outputs)
 
 
 class TestMakeDatetimeConversionOp(unittest.TestCase):

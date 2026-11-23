@@ -1,4 +1,5 @@
 import unittest
+import operator
 import stratum as st
 import numpy as np
 import pandas as pd
@@ -8,6 +9,7 @@ from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical.rewrites._algebraic_rewrites import AlgebraicRewritesConfig
 from stratum.optimizer.logical.rewrites._numeric_rewrites import match_self_operation
 from stratum.optimizer.logical._numeric_ops import NumericOp, NumericOpType
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._ops import OperandRef, ValueOp
 
 class TestCSE(unittest.TestCase):
@@ -1046,10 +1048,12 @@ class TestPowByOne(unittest.TestCase):
         self.assertEqual(out[1].process([out[0].value]), 25)
 
     def test_self_multiply_dataframe_operand(self):
-        """The fold works on frame data, not just scalars."""
+        """Frame arithmetic remains an elementwise map with repeated operands."""
         df = st.as_data_op(pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]}))
         out, *_ = optimize(df * df)
-        self.assertIs(out[-1].type, NumericOpType.SQUARE)
+        self.assertIsInstance(out[-1], ExpressionMapOp)
+        self.assertIs(out[-1].expr.op, operator.mul)
+        self.assertEqual(out[-1].expr.left, out[-1].expr.right)
         # A frame source lowers to an in-memory source op, so read it via process().
         result = out[-1].process([out[0].process([])])
         assert_frame_equal(result, pd.DataFrame({"a": [1.0, 4.0], "b": [9.0, 16.0]}))

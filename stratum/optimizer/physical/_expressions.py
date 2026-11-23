@@ -2,10 +2,11 @@
 
 The logical expression nodes are pure data; this module compiles them:
 
-* :func:`to_pandas` evaluates a tree eagerly against a pandas frame;
+* :func:`to_pandas` evaluates a tree eagerly against pandas inputs;
 * :func:`to_pandas_query` compiles a predicate to a ``DataFrame.query()`` string,
   or returns ``None`` when it cannot;
-* :func:`to_polars` compiles a tree into one lazy ``pl.Expr``;
+* :func:`to_polars` evaluates explicit inputs or compiles source-column reads
+  into a lazy ``pl.Expr``;
 * :func:`polars_unsupported` says why ``to_polars`` cannot express a tree
   exactly, so a polars impl can refuse it at plan time (#226).
 
@@ -18,16 +19,17 @@ from functools import singledispatch
 
 import pandas as pd
 import polars as pl
+import polars.selectors as cs
 
 from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.logical._column_expr import (
-    BINARY_SYMBOLS, UNARY_SYMBOLS, AggExpr, AllCols, AstypeExpr, BinOpExpr, Col,
-    ColumnExpr, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, OperandLeaf, StrExpr, UnaryOpExpr,
+    BINARY_SYMBOLS, UNARY_SYMBOLS, UFUNCS, UfuncExpr, AggExpr, AllCols, AstypeExpr, BinOpExpr, Col,
+    ColumnExpr, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, FillnaExpr, OperandLeaf, StrExpr, UnaryOpExpr,
     map_exprs)
-from stratum.optimizer.logical._column_methods import normalize_dtype
+from stratum.optimizer.logical._schema import normalize_dtype
 from stratum.optimizer.logical._ops import apply_binary
 from stratum.optimizer.physical._polars_translate import (
-    polars_column_method, polars_dt_attribute,
+    polars_column_method, polars_dt_attribute, polars_frame_fillna_unsupported,
     polars_dt_attribute_unsupported, polars_str_method_unsupported,
     polars_string_method, polars_to_datetime)
 
@@ -35,16 +37,19 @@ from stratum.optimizer.physical._polars_translate import (
 class EvalContext:
     """Everything a column expression needs at evaluation time.
 
-    ``frame`` is the operator's primary operand; ``inputs`` are its resolved
+    ``frame`` is the source frame for compiled expressions, or None for a map
+    over explicit values; ``inputs`` are its resolved
     input values (read by :class:`OperandLeaf`). ``mode`` is the execution mode,
     such as ``fit_transform`` or ``predict``; the stateless grammar does not use it.
     """
-    __slots__ = ("frame", "inputs", "mode")
+    __slots__ = ("frame", "inputs", "mode", "dtypes")
 
     def __init__(self, frame, inputs, mode: str = "fit_transform"):
         self.frame = frame
         self.inputs = inputs
         self.mode = mode
+        # Execution-local metadata; do not retain borrowed inputs on operators.
+        self.dtypes = {}
 
     @classmethod
     def of(cls, inputs: list, mode: str) -> "EvalContext":
@@ -91,9 +96,15 @@ def _(expr: UnaryOpExpr, ctx):
 
 
 @to_pandas.register
+def _(expr: UfuncExpr, ctx):
+    return UFUNCS[expr.func](to_pandas(expr.operand, ctx))
+
+
+@to_pandas.register
 def _(expr: StrExpr, ctx):
     obj = to_pandas(expr.operand, ctx)
-    return getattr(obj.str, expr.method)(**expr.params)
+    params = map_exprs(expr.params, lambda value: to_pandas(value, ctx))
+    return getattr(obj.str, expr.method)(**params)
 
 
 @to_pandas.register
@@ -206,13 +217,14 @@ def _(expr: UnaryOpExpr, params):
 
 @singledispatch
 def to_polars(expr: ColumnExpr, ctx: EvalContext):
-    """Compile ``expr`` into a lazy ``pl.Expr`` over ``ctx.frame``."""
+    """Evaluate explicit inputs, or compile source-column reads over ``ctx.frame``."""
     raise NotImplementedError(f"no polars compilation for {type(expr).__name__}")
 
 
 @to_polars.register
 def _(expr: Col, ctx):
-    return pl.col(expr.name)
+    # Col is a literal name; wildcard expansion belongs to AllCols.
+    return cs.by_name(expr.name).as_expr()
 
 
 @to_polars.register
@@ -222,7 +234,7 @@ def _(expr: AllCols, ctx):
 
 @to_polars.register
 def _(expr: Const, ctx):
-    return pl.lit(expr.value)
+    return expr.value if ctx.frame is None else pl.lit(expr.value)
 
 
 @to_polars.register
@@ -246,8 +258,15 @@ def _(expr: UnaryOpExpr, ctx):
 
 
 @to_polars.register
+def _(expr: UfuncExpr, ctx):
+    # Use the NumPy kernel: native Polars log/exp can round differently.
+    return UFUNCS[expr.func](to_polars(expr.operand, ctx))
+
+
+@to_polars.register
 def _(expr: StrExpr, ctx):
-    return polars_string_method(to_polars(expr.operand, ctx), expr.method, expr.params)
+    params = map_exprs(expr.params, lambda value: to_polars(value, ctx))
+    return polars_string_method(to_polars(expr.operand, ctx), expr.method, params)
 
 
 @to_polars.register
@@ -257,9 +276,10 @@ def _(expr: DtExpr, ctx):
 
 @to_polars.register
 def _(expr: DatetimeExpr, ctx):
-    return polars_to_datetime(to_polars(expr.operand, ctx), expr.format, expr.exact,
+    obj = to_polars(expr.operand, ctx)
+    return polars_to_datetime(obj, expr.format, expr.exact,
                               expr.cache, expr.errors,
-                              obj_dtype=_polars_expr_dtype(expr.operand, ctx))
+                              obj_dtype=_polars_expr_dtype(expr.operand, obj, ctx))
 
 
 # Reduction -> polars ``Expr`` method. `sem` has no translation here, and
@@ -328,15 +348,21 @@ def _(expr: AggExpr, ctx):
     return getattr(obj, _AGG_POLARS_METHODS[expr.func])(**kwargs)
 
 
-def _polars_expr_dtype(expr, ctx):
-    # FIXME(#216): resolve dtypes for derived expressions as well as Col/AstypeExpr.
-    # Returning None makes _polars_fillna/_polars_notna skip NaN handling.
-    # Consider compiling the expression and resolving its output schema through
-    # ctx.frame.lazy().select(...).collect_schema(), without executing the plan.
+def _polars_expr_dtype(expr, obj, ctx):
+    """Resolve a column's runtime dtype without materializing its expression."""
+    if isinstance(obj, pl.Series):
+        return obj.dtype
     if isinstance(expr, Col) and isinstance(ctx.frame, pl.DataFrame):
         return ctx.frame.schema.get(expr.name)
     if isinstance(expr, AstypeExpr) and not isinstance(expr.dtype, ColumnExpr):
         return normalize_dtype(expr.dtype)
+    if isinstance(obj, pl.Expr) and isinstance(ctx.frame, pl.DataFrame):
+        key = id(expr)
+        if key not in ctx.dtypes:
+            schema = ctx.frame.lazy().select(obj).collect_schema()
+            # A wildcard can describe several columns with different dtypes.
+            ctx.dtypes[key] = schema.dtypes()[0] if len(schema) == 1 else None
+        return ctx.dtypes[key]
     return None
 
 
@@ -344,36 +370,38 @@ def _polars_expr_dtype(expr, ctx):
 def _(expr: ColumnMethodExpr, ctx):
     obj = to_polars(expr.operand, ctx)
     fields = map_exprs(method_fields(expr), lambda e: to_polars(e, ctx))
-    return polars_column_method(expr.method, obj, fields,
-                                _polars_expr_dtype(expr.operand, ctx))
+    dtype = (_polars_expr_dtype(expr.operand, obj, ctx)
+             if expr.method in {"fillna", "isna", "notna"} else None)
+    return polars_column_method(expr.method, obj, fields, dtype)
 
 
-def polars_unsupported(expr: ColumnExpr) -> str | None:
+def polars_unsupported(expr: ColumnExpr, input_schemas=()) -> str | None:
     """Why :func:`to_polars` cannot evaluate ``expr`` exactly, or ``None``.
 
     Checked at plan time by the polars impls' ``supports`` (#226), so an
     expression the polars compiler cannot express binds the pandas impl
     instead of failing -- or silently differing -- during execution. The
-    first offending node is named.
+    first offending node is named. ``input_schemas`` optionally describes
+    explicit operands for checks that need column dtypes.
     """
-    reason = _polars_unsupported_here(expr)
+    reason = _polars_unsupported_here(expr, input_schemas)
     if reason is not None:
         return f"{expr!r}: {reason}"
     for child in expr.children():
-        reason = polars_unsupported(child)
+        reason = polars_unsupported(child, input_schemas)
         if reason is not None:
             return reason
     return None
 
 
 @singledispatch
-def _polars_unsupported_here(expr: ColumnExpr) -> str | None:
+def _polars_unsupported_here(expr: ColumnExpr, input_schemas) -> str | None:
     """This node's own polars restriction; children are checked separately."""
     return None
 
 
 @_polars_unsupported_here.register
-def _(expr: Const):
+def _(expr: Const, input_schemas):
     try:
         pl.lit(expr.value)
     except Exception as exc:  # noqa: BLE001 - any refusal means no literal
@@ -383,24 +411,36 @@ def _(expr: Const):
 
 
 @_polars_unsupported_here.register
-def _(expr: StrExpr):
+def _(expr: StrExpr, input_schemas):
+    if expr.has_parameter_exprs:
+        # Graph-fed options are checked when the call runs. Replace depends on
+        # both the pattern and replacement; other calls can check the method.
+        return None if expr.method == "replace" else polars_str_method_unsupported(expr.method)
     return polars_str_method_unsupported(expr.method, expr.params)
 
 
 @_polars_unsupported_here.register
-def _(expr: DtExpr):
+def _(expr: DtExpr, input_schemas):
     return polars_dt_attribute_unsupported(expr.attr)
 
 
 @_polars_unsupported_here.register
-def _(expr: AggExpr):
+def _(expr: AggExpr, input_schemas):
     return None if _agg_supports_polars(expr) else f"no polars lowering for {expr.func!r}"
+
+
+@_polars_unsupported_here.register
+def _(expr: FillnaExpr, input_schemas):
+    schema = (input_schemas[expr.operand.ref.k]
+              if isinstance(expr.operand, OperandLeaf) and input_schemas else None)
+    return polars_frame_fillna_unsupported(expr.value, schema)
 
 
 def refuse_unsupported_exprs(op: IRNode, exprs) -> bool:
     """``supports`` helper for polars impls; records the refusal reason on ``op``."""
+    input_schemas = [source.output_schema for source in op.inputs]
     for expr in exprs:
-        reason = polars_unsupported(expr)
+        reason = polars_unsupported(expr, input_schemas)
         if reason is not None:
             op._unsupported_reason = reason
             return False

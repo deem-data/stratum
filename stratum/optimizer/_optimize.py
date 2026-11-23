@@ -6,6 +6,7 @@ from .logical.rewrites._common_subexpression_elimination import apply_op_cse
 from .logical.rewrites._candidate_construction import install_candidate_set
 from .logical.rewrites._choice_unrolling import choice_unrolling
 from .logical.rewrites._schema_propagation import propagate_output_schema
+from .logical.rewrites._selection_extraction import extract_mask_selections
 from .logical._dataframe_ops import extract_dataframe_op, add_splitting_op
 from .logical.rewrites._literal_inlining import literal_inlining
 from .logical._numeric_ops import extract_numeric_op
@@ -19,6 +20,7 @@ from .physical.rewrites._train_test_unrolling import unroll_train_test
 from .physical.rewrites._dead_code_elimination import eliminate_dead_code
 from .physical.rewrites._lifetime_planning import compute_pinned_ops, plan_input_removals
 from .physical.rewrites._reuse_planning import apply_reuse_cache
+from .physical.rewrites._map_fusion import fuse_maps
 from .physical._plan_context import PlanContext
 from .physical._lowering import lower_to_physical
 from .physical._impl_selection import (ImplementationSelector, get_implementation_selector, select_implementations)
@@ -56,10 +58,10 @@ class OptConfig():
         algebraic_rewrite_config: AlgebraicRewritesConfig | None = None,
         propagate_schema: bool = True,
         semi_join_rewrite: bool = True,
-        projection_pushup: bool = True,
         selector: ImplementationSelector | None = None,
         pandas_query: bool = False,
         literal_inlining: bool = True,
+        map_fusion: bool = True,
     ):
         """Configure optimization and implementation selection for one plan.
 
@@ -70,6 +72,8 @@ class OptConfig():
           masks whose predicates compile to query strings. This optimizer-only
           setting selects between pandas kernels; ``set_config`` does not expose
           it, and ``make_grid_search`` uses the default.
+        - ``map_fusion`` combines eligible selected Polars maps and assignments.
+          Disable it to inspect or compare the unfused physical plan.
         """
         self.cse = cse
         self.dataframe_ops = dataframe_ops
@@ -77,7 +81,6 @@ class OptConfig():
         self.numeric_ops = numeric_ops
         self.algebraic_rewrites = algebraic_rewrites
         self.semi_join_rewrite = semi_join_rewrite
-        self.projection_pushup = projection_pushup
         if algebraic_rewrite_config is None:
             algebraic_rewrite_config = AlgebraicRewritesConfig()
         self.algebraic_rewrite_config = algebraic_rewrite_config
@@ -85,6 +88,7 @@ class OptConfig():
         self.selector = selector
         self.pandas_query = pandas_query
         self.literal_inlining = literal_inlining
+        self.map_fusion = map_fusion
 
 def _debug_show_graph(root: Op, name: str):
     if diagnostics_enabled():
@@ -129,7 +133,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
        unrolling, algebraic rewrites).
     2. :func:`~stratum.optimizer.physical._lowering.lower_to_physical` -- lower
        logical operators to registered physical operator families.
-    3. :func:`physical_optimize` -- select implementations, unroll train/test,
+    3. :func:`physical_optimize` -- select implementations, fuse Polars maps, unroll train/test,
        eliminate dead code and optionally prune work found in ``reuse_cache``,
        then linearize and plan intermediate lifetimes.
 
@@ -155,8 +159,7 @@ def optimize(dag_root: DataOp, config: OptConfig = None, env: dict = None,
     _debug_show_graph(root, "lowered")
     _debug_explain_dag("physical", root)
 
-    # Step 3: physical optimization (implementation selection + linearization).
-    # TODO: May need physical-level rewrites before or after operator selection
+    # Step 3: implementation selection, physical rewrites, and linearization.
     selector = config.selector
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
@@ -185,6 +188,10 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
     # Extract specialized operators from generic MethodCallOp / CallOp.
     if config.dataframe_ops:
         root = extract_frame_operators(root)
+        # Fold mask predicates after their producers have been typed and extracted.
+        root = extract_mask_selections(root, fold=FLAGS.make_selection_op)
+        _debug_validate_dag(root)
+        _debug_show_graph(root, "selection_extraction")
     if config.numeric_ops:
         root = extract_numeric_operators(root)
 
@@ -205,15 +212,14 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
         root = algebraic_rewrites(root, config.algebraic_rewrite_config)
         _debug_show_graph(root, "algebraic_rewrite")
 
-    # Projection pushup reads schemas, so propagate them before relational rewrites.
+    # Relational rewrites read schemas propagated through the explicit DAG.
     # These rewrites must maintain schemas for the operators they create or change.
     if config.propagate_schema:
         propagate_output_schema(root)
 
     # Run relational rewrites after expression rewrites and CSE so a converted
     # join can reuse the build-side operator shared by other consumers.
-    root = relational_rewrites(root, semi_join=config.semi_join_rewrite,
-                               projection_pushup=config.projection_pushup)
+    root = relational_rewrites(root, semi_join=config.semi_join_rewrite)
     _debug_show_graph(root, "relational_rewrite")
 
     # Install the candidate sink after logical rewrites, which operate on the
@@ -234,7 +240,7 @@ def logical_optimize(dag_root: DataOp, config: OptConfig, env: dict = None,
 def physical_optimize(root: Op, ctx: PlanContext, registry=None,
                       selector: ImplementationSelector | None = None,
                       reuse_cache: "ReuseCache | None" = None):
-    """Select implementations, unroll train/test, eliminate dead code, then plan
+    """Select implementations, fuse maps, unroll train/test, then plan
     reuse, execution order and lifetimes.
 
     Unrolling copies selected implementations so train and test stages share the
@@ -242,10 +248,13 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
     linearization, so lifetime planning sees the pruned graph.
     """
 
-    # TODO: add physical rewrites here (or afterwards)
     if selector is None:
         selector = get_implementation_selector(ctx.implementation_selector)
     root = select_implementations(root, ctx, registry=registry, selector=selector)
+    if ctx.map_fusion:
+        root = fuse_maps(root)
+        _debug_validate_dag(root)
+        _debug_show_graph(root, "map_fusion")
     # TODO: Revisit this order when stage-specific costs justify independent
     # train/test implementation choices. Selection after unrolling must enforce
     # fitted-state compatibility; fold recompilation needs stable stage identities
@@ -284,9 +293,10 @@ def run_op_cse_pass(root: Op) -> Op:
 def extract_frame_operators(root):
     """Extract specialized dataframe operators from generic calls in the DAG."""
     start = start_time()
-    for op in topological_iterator(root):
-        root, _ = extract_dataframe_op(op, root, FLAGS.make_selection_op,
-                                       FLAGS.make_map_op, FLAGS.make_column_projection)
+    # Replacements can add literal operands or remove absorbed producers.
+    for op in list(topological_iterator(root)):
+        root, _ = extract_dataframe_op(op, root, map_op=FLAGS.make_map_op,
+                                       column_projection=FLAGS.make_column_projection)
     log_time("dataframe_rewrite took", start)
     _debug_show_graph(root, "frame_rewrite")
     return root

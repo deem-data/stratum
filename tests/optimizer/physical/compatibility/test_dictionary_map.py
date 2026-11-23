@@ -9,7 +9,9 @@ import stratum
 from stratum.frontend._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
-from stratum.optimizer.logical._column_methods import ColumnMethodOp
+from stratum.optimizer.logical._column_expr import MapValuesExpr
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedMapOp
 
 STRINGS = pd.DataFrame({"k": ["MN", "BX", "unknown", None, "MN"]})
 INTS = pd.DataFrame({"k": [1, 2, 3, 1, 5]})
@@ -39,7 +41,8 @@ def test_dictionary_map_matches_pandas(frame, mapping, call, path):
                 source.assign(mapped=mapped) if path == "assign" else source[mapped.notna()])
     with stratum.config(scheduler=True, implementation_selector="greedy"):
         ops, *_ = optimize(plan, env=get_data(plan))
-        assert any(isinstance(op, ColumnMethodOp) and op.method == "map" for op in ops) \
+        assert any(isinstance(op, PolarsFusedMapOp)
+                   or isinstance(op, ExpressionMapOp) and isinstance(op.expr, MapValuesExpr) for op in ops) \
             or path != "standalone"
         result = evaluate(plan).to_pandas()
     if path == "selection":
@@ -68,7 +71,7 @@ def test_other_mappings_are_not_folded(mapping):
         plan = skrub.var("frame", STRINGS)["k"].map(mapping)
     with stratum.config(scheduler=True):
         ops, *_ = optimize(plan, env=get_data(plan))
-    assert not any(isinstance(op, ColumnMethodOp) for op in ops)
+    assert not any(isinstance(op, ExpressionMapOp) and isinstance(op.expr, MapValuesExpr) for op in ops)
 
 
 @pytest.mark.parametrize("mapping", [{"MN": "1", "BX": "2"}, lambda v: v])

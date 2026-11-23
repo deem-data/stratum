@@ -20,17 +20,17 @@ from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import (
-    AggExpr, BinOpExpr, Col, Const, OperandLeaf)
+    AggExpr, BinOpExpr, Col, Const)
 from stratum.optimizer.logical._join_ops import JoinOp
-from stratum.optimizer.logical._map_ops import AssignMapOp
+from stratum.optimizer.logical._combine_ops import AssignOp
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._metadata_ops import RenameOp
-from stratum.optimizer.logical._ops import OperandRef
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SliceSelectionOp
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
 from stratum.optimizer.physical._join_execs import PolarsJoinOp
-from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp
 from stratum.optimizer.physical._metadata_execs import PolarsRenameOp
 from stratum.optimizer.physical._projection_execs import PolarsColumnProjectionOp
 from stratum.optimizer.physical._selection_execs import (
@@ -249,33 +249,37 @@ def test_q3_plan_folds_joins(polars):
         assert all(isinstance(o, PolarsJoinOp) for o in joins)
 
 
-def test_q3_filter_inlines_segment_and_shares_the_date(polars):
-    """The single-use segment becomes a ``Const``; the shared date does not.
-
-    ``var2`` feeds both date comparisons, so each fold sees an external
-    consumer and both predicates reference the one shared date input.
-    """
+def test_q3_filters_inline_scalar_operands(polars):
+    """Map extraction inlines the segment and date before predicate folding."""
     ops = _plan(build_q3(**make_q3_tables()))
     filters = [o for o in ops if isinstance(o, MaskSelectionOp)]
 
     assert [BinOpExpr(operator.eq, Col("c_mktsegment"), Const("BUILDING")),
-            BinOpExpr(operator.lt, Col("o_orderdate"), OperandLeaf(OperandRef(1))),
-            BinOpExpr(operator.gt, Col("l_shipdate"), OperandLeaf(OperandRef(1)))] \
+            BinOpExpr(operator.lt, Col("o_orderdate"), Const(CUTOFF)),
+            BinOpExpr(operator.gt, Col("l_shipdate"), Const(CUTOFF))] \
         == [o.predicate for o in filters]
-    assert filters[1].inputs[1] is filters[2].inputs[1]
+    assert all(len(op.inputs) == 1 for op in filters)
     if polars:
         assert all(isinstance(o, PolarsMaskSelectionOp) for o in filters)
 
 
 def test_q3_folds_the_revenue(polars):
-    """The revenue column collapses to one assign map."""
-    amo = _one(_plan(build_q3_prefix(**make_q3_tables())), AssignMapOp)
+    """Assignment reads the computed revenue column."""
+    amo = next(op for op in _plan(build_q3_prefix(**make_q3_tables()))
+               if isinstance(op, (AssignOp, PolarsFusedAssignOp)))
 
-    assert {"revenue": BinOpExpr(
-        operator.mul, Col("l_extendedprice"),
-        BinOpExpr(operator.sub, Const(1), Col("l_discount")))} == amo.entries
     if polars:
-        assert isinstance(amo, PolarsAssignMapOp)
+        assert isinstance(amo, PolarsFusedAssignOp)
+        assert list(amo.entries) == ["revenue"]
+        assert isinstance(amo.entries["revenue"], BinOpExpr)
+        assert amo.entries["revenue"].op is operator.mul
+        assert len(amo.inputs) == 1
+    else:
+        assert list(amo.kwargs) == ["revenue"]
+        revenue = amo.inputs[amo.kwargs["revenue"].k]
+        assert isinstance(revenue, ExpressionMapOp)
+        assert revenue.expr.op is operator.mul
+        assert len(amo.inputs) == 2
 
 
 def test_q3_folds_the_grouped_aggregation(polars):
@@ -320,7 +324,8 @@ def test_q3_folds_the_rename_sort_and_limit(polars):
     tables.update(orders_ds=orders, line_item_ds=line_items)
 
     ops = _plan(build_q3(**tables))
-    projection = _one(ops, ColumnProjectionOp)
+    projection = next(op for op in ops if isinstance(op, ColumnProjectionOp)
+                      and isinstance(op.key, list))
     rename = _one(ops, RenameOp)
     sort = _one(ops, SortOp)
     head = _one(ops, SliceSelectionOp)
@@ -350,9 +355,8 @@ def test_q3_folds_the_rename_sort_and_limit(polars):
 def test_q3_filter_binds_query_impl_under_flag():
     """``pandas_query`` picks the impl at plan time; both filter correctly.
 
-    Only the segment can use the query fast path: its value is inlined, while
-    the shared date stays an ``OperandLeaf``, which makes ``to_pandas_query``
-    return ``None`` for both date filters. Pandas-only, so no fixture.
+    Segment and cutoff dates are expression constants, so all three predicates
+    can use the query fast path. Pandas-only, so no fixture.
     """
     from stratum.optimizer.physical._selection_execs import (
         PandasIndexSelectionOp, PandasQuerySelectionOp)
@@ -387,19 +391,15 @@ def test_q3_filter_binds_query_impl_under_flag():
         segment = by_predicate(
             ops, BinOpExpr(operator.eq, Col("c_mktsegment"), Const("BUILDING")))
         ordered = by_predicate(
-            ops, BinOpExpr(operator.lt, Col("o_orderdate"),
-                           OperandLeaf(OperandRef(1))))
+            ops, BinOpExpr(operator.lt, Col("o_orderdate"), Const(CUTOFF)))
         shipped = by_predicate(
-            ops, BinOpExpr(operator.gt, Col("l_shipdate"),
-                           OperandLeaf(OperandRef(1))))
+            ops, BinOpExpr(operator.gt, Col("l_shipdate"), Const(CUTOFF)))
         assert isinstance(segment, impl)
-        assert isinstance(ordered, PandasIndexSelectionOp)
-        assert isinstance(shipped, PandasIndexSelectionOp)
-        # The date selections take the shared date as a second input, which
-        # the runtime resolves from the ValueOp; pass it directly here.
+        assert isinstance(ordered, impl)
+        assert isinstance(shipped, impl)
         result = segment.process([df])
         for sel in (ordered, shipped):
-            result = sel.process([result, CUTOFF])
+            result = sel.process([result])
         pd.testing.assert_frame_equal(
             expected, pd.DataFrame(result).reset_index(drop=True), check_dtype=False)
 

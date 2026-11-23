@@ -28,7 +28,6 @@ class JoinOp(Op):
         inputs: list[Op] | None = None,
         outputs: list[Op] | None = None,
     ):
-        # Renders as the bare family label.
         super().__init__(name="", inputs=inputs, outputs=outputs)
         if how in ("semi", "anti"):
             raise ValueError(f"how={how!r} is a filtering join: use FilteringJoinOp.")
@@ -132,7 +131,6 @@ class FilteringJoinOp(Op):
         inputs: list[Op] | None = None,
         outputs: list[Op] | None = None,
     ):
-        # "Join" alone cannot tell a semi from an anti, so name the direction.
         super().__init__(name="anti" if anti else "semi", inputs=inputs, outputs=outputs)
         self.anti = anti
         self.left_on = left_on

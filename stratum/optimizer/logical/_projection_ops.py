@@ -2,13 +2,13 @@
 
 A projection keeps the rows and the values of its input and only restricts (or
 reorders) the column set: ``df[["a", "b"]]``, ``skb.select(...)``,
-``df.drop(columns=...)``. Anything that changes column values or adds columns is
-a map (:mod:`stratum.optimizer.logical._map_ops`).
+``df.drop(columns=...)``. Maps compute values; Combine operators assign or concatenate columns.
 """
 import pandas as pd
 
 from stratum.optimizer.logical._base import IndexEffect
-from stratum.optimizer.logical._ops import OutputType, MethodCallOp, Op, TransformerOp, substitute_op
+from stratum.optimizer.logical._ops import (
+    OutputType, MethodCallOp, Op, TransformerOp, substitute_op)
 from stratum.optimizer.logical import _schema
 
 
@@ -16,6 +16,8 @@ class ProjectionOp(Op):
     """Base for projection operators: keeps rows and values, selects columns."""
     logical_family = "Projection"
     index_effect = IndexEffect.KEEP
+    # Graph-fed column names and selectors do not pair rows with the receiver.
+    aligns_by_label = False
 
     def __init__(self, name: str = "", inputs: list[Op] = None, outputs: list[Op] = None):
         super().__init__(name=name, inputs=inputs, outputs=outputs)

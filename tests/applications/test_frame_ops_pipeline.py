@@ -5,9 +5,8 @@ A supervised pipeline over order data exercises the following operators:
 - a source read, ``pd.read_csv``, lowered to a source operator;
 - a selection, ``df[predicate]``, that folds a boolean expression tree
   into one :class:`MaskSelectionOp` (``stratum.optimizer.logical._selection_ops``);
-- a column map, ``df.assign(...)``, with arithmetic and a ``.dt`` accessor
-  over a parsed date, folded into one :class:`AssignMapOp`
-  (``stratum.optimizer.logical._map_ops``);
+- an assignment, ``df.assign(...)``, that combines explicit arithmetic,
+  datetime-conversion, and datetime-field maps;
 - a literal column projection, ``df[[...]]``, represented by :class:`ColumnProjectionOp`,
   and two ``skb.select(...)`` operations represented by :class:`ColumnSelectorOp`
   (``stratum.optimizer.logical._projection_ops``);
@@ -25,9 +24,10 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import make_scorer, r2_score
 
 import stratum as st
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
-from stratum.optimizer.logical._map_ops import AssignMapOp
+from stratum.optimizer.logical._combine_ops import AssignOp
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp)
 from stratum.optimizer.logical._dataframe_ops import ConcatOp
@@ -75,7 +75,7 @@ def build_pipeline(file_path, model=None):
     y = active["satisfaction"].skb.mark_as_y()
 
     # (2) MAP: derive numeric features. Arithmetic and a `.dt` accessor over a
-    # parsed date are represented lazily and fold into one AssignMapOp.
+    # parsed date remain explicit inputs of AssignOp.
     order_date = active["order_date"].skb.apply_func(pd.to_datetime)
     featured = active.assign(
         revenue=active["quantity"] * active["unit_price"],
@@ -123,7 +123,8 @@ def test_frame_ops_pipeline_plan(backend):
         ops = _optimize(build_pipeline(path), backend)
 
     # Each expected frame operator has a physical implementation.
-    for cls in (SelectionOp, AssignMapOp, ColumnProjectionOp, ColumnSelectorOp):
+    assert any(isinstance(op, (AssignOp, PolarsFusedAssignOp)) for op in ops)
+    for cls in (SelectionOp, ColumnProjectionOp, ColumnSelectorOp):
         matches = [o for o in ops if isinstance(o, cls)]
         assert matches, f"no {cls.__name__} in plan"
         assert all(isinstance(o, PhysicalOp) for o in matches), \

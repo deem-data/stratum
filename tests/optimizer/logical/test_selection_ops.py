@@ -12,6 +12,7 @@ from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._dataframe_ops import (
     ColumnProjectionOp, DropDuplicatesSelectionOp, DropMissingSelectionOp, MaskSelectionOp,
     SampleSelectionOp, SelectionOp, SliceSelectionOp)
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._ops import (
     BinOp, GetItemOp, UnaryOp, Op, OperandRef, OutputType, ValueOp)
 from stratum.optimizer.logical._column_expr import (
@@ -212,8 +213,8 @@ class TestMaskFolding(unittest.TestCase):
             self._mask(ops).predicate)
 
     def test_arithmetic_in_mask_folds(self):
-        # df[df["x"] + df["y"] > 5] : arithmetic is still a BinOp during frame
-        # extraction (before the numeric pass), so it folds into the predicate.
+        # Frame extraction creates expression Maps; selection extraction folds
+        # their private arithmetic into the predicate before the numeric pass.
         data = st.as_data_op(self.df)
         ops = optimize(data[data["x"] + data["y"] > 5], OptConfig(dataframe_ops=True))
         self.assertEqual(
@@ -240,9 +241,8 @@ class TestMaskFolding(unittest.TestCase):
             self._mask(ops).predicate)
 
     def test_graph_fed_scalar_operand_folds_to_const(self):
-        # df[df["x"] > thr] where `thr` is another data-op: it reaches the fold as a
-        # ValueOp input rather than an inline literal, but a scalar ValueOp is
-        # absorbed as a Const, so the selection keeps the source as its only input.
+        # Map extraction inlines a known scalar operand before predicate folding,
+        # so the selection keeps the source as its only input.
         data = st.as_data_op(self.df)
         thr = st.as_data_op(1)
         ops = optimize(data[data["x"] > thr], OptConfig(dataframe_ops=True))
@@ -275,18 +275,17 @@ class TestMaskFolding(unittest.TestCase):
             sel.predicate)
         self.assertEqual(2, len(sel.inputs))  # [src, thr]
 
-    def test_shared_graph_fed_constant_stays_leaf(self):
-        # The ValueOp also feeds an assign, so it has a consumer outside the mask and
-        # is not absorbed -- the general external-consumer rule still applies.
+    def test_shared_graph_fed_constant_inlines_without_removing_other_uses(self):
+        # Map extraction can inline a scalar while its ValueOp still feeds assign.
         data = st.as_data_op(self.df)
         thr = st.as_data_op(1)
         ops = optimize(data[data["x"] > thr].assign(base=thr),
                        OptConfig(dataframe_ops=True, literal_inlining=False))
         sel = self._mask(ops)
         self.assertEqual(
-            BinOpExpr(operator.gt, Col("x"), OperandLeaf(OperandRef(1))),
+            BinOpExpr(operator.gt, Col("x"), Const(1)),
             sel.predicate)
-        self.assertEqual(2, len(sel.inputs))  # [src, thr]
+        self.assertEqual(1, len(sel.inputs))  # [src]
         self.assertEqual(1, len([o for o in ops if isinstance(o, ValueOp)]))
 
     def test_duplicate_masks_dedup_after_cse(self):
@@ -309,7 +308,7 @@ class TestMaskFolding(unittest.TestCase):
         sel = self._mask(ops)
         self.assertIsInstance(sel.predicate, OperandLeaf)
         self.assertEqual(2, len(sel.inputs))            # [src, shared comparison]
-        self.assertTrue(any(isinstance(o, BinOp) for o in ops))  # comparison kept
+        self.assertTrue(any(isinstance(o, ExpressionMapOp) for o in ops))  # shared comparison
 
     def test_get_item_multiple_consumers(self):
         # The shared column df["x"] feeds two comparisons, but both live inside the

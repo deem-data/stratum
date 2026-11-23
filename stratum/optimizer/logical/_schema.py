@@ -26,13 +26,13 @@ rule reads as intent rather than an oversight:
   ``has_nulls``, a user ``filter``) would answer from a zero-row frame without
   erroring, i.e. silently wrong. See the TODO on ``resolve_selector_columns``
   (``physical/_projection_execs.py``).
-* ``MapOp`` (the base) -- each kind opts in by overriding, as ``AssignMapOp`` does.
+* ``MapOp`` (the base) -- each kind opts in by overriding, as ``ExpressionMapOp`` does.
 * ``NumericOp`` -- numeric extraction does not propagate named column schemas.
 * ``ChoiceOp`` -- alternatives can have different schemas. Choice unrolling
   resolves internal alternatives before schema propagation.
 
 A rule covers an *operation*, not an operation family, wherever the family is not
-uniformly column preserving: see ``StringMethodOp.ONE_TO_ONE_METHODS``,
+uniformly column preserving: see ``StrExpr.ONE_TO_ONE_METHODS``,
 ``DatetimeFieldOp.FIELDS`` and ``DatetimeConversionOp``, each of which admits only the members that map one
 input column to one output column.
 """
@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import operator
 
+import numpy as np
 import pandas as pd
 import polars as pl
 
@@ -65,6 +66,46 @@ _COMPARISON_OPS = frozenset({operator.gt, operator.lt, operator.ge, operator.le,
 # are listed because `operator.inv is operator.invert` is False.
 _LOGICAL_OPS = frozenset({operator.and_, operator.or_, operator.xor,
                           operator.invert, operator.inv})
+
+
+# Supported pandas astype targets in the schema's dtype representation.
+_DTYPES = {
+    str: pl.String,
+    bool: pl.Boolean,
+    int: pl.Int64,
+    float: pl.Float64,
+    "str": pl.String,
+    "string": pl.String,
+    "bool": pl.Boolean,
+    "boolean": pl.Boolean,
+    "int8": pl.Int8,
+    "int16": pl.Int16,
+    "int32": pl.Int32,
+    "int64": pl.Int64,
+    "uint8": pl.UInt8,
+    "uint16": pl.UInt16,
+    "uint32": pl.UInt32,
+    "uint64": pl.UInt64,
+    "float32": pl.Float32,
+    "float64": pl.Float64,
+}
+
+
+def normalize_dtype(dtype):
+    """The schema dtype for a pandas ``astype`` target, or ``None`` if not admitted."""
+    if isinstance(dtype, pl.DataType):
+        return dtype
+    try:
+        translated = _DTYPES.get(dtype)
+    except TypeError:
+        translated = None
+    if translated is not None:
+        return translated
+    try:
+        numpy_dtype = np.dtype(dtype)
+    except (TypeError, ValueError):
+        return None
+    return _DTYPES.get(numpy_dtype.name)
 
 
 def elementwise_result_dtype(op, operand_dtypes) -> pl.DataType:

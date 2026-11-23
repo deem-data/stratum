@@ -109,6 +109,34 @@ def test_evaluation_reuses_only_before_the_split(csv_path, backend, spill_direct
 
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_a_map_consumes_a_cached_map_after_its_inputs_are_pruned(
+        csv_path, backend, spill_directory):
+    from stratum.optimizer.logical._map_ops import ExpressionMapOp
+    from stratum.optimizer.physical._fused_map_execs import PolarsFusedMapOp
+
+    def column():
+        return st.deferred(pd.read_csv)(str(csv_path))["a"] + 1
+
+    def combined():
+        prefix = column()
+        # An outside consumer preserves this materialization boundary even
+        # when physical fusion is enabled.
+        return st.deferred(lambda original, transformed: transformed)(prefix, prefix * 2)
+
+    cache = ReuseCache()
+    scheduler_for(column(), cache, backend).evaluate()
+    expected = scheduler_for(combined(), backend=backend).evaluate()
+    warm = scheduler_for(combined(), cache, backend)
+    [cached] = hits(warm.linearized_dag)
+    assert isinstance(cached, (ExpressionMapOp, PolarsFusedMapOp)) and not cached.inputs
+    cached.process = Mock(side_effect=AssertionError("cached map executed"))
+    result = warm.evaluate()
+    assert_equal(result, expected)
+    assert result.name == expected.name
+    assert_released(warm, spill_directory)
+
+
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_an_evaluated_prefix_serves_cross_validation(csv_path, backend, spill_directory):
     cache = ReuseCache()
     scheduler_for(features(csv_path), cache, backend).evaluate()
@@ -158,7 +186,8 @@ def test_full_data_predictions_and_fitted_state_are_cached(csv_path):
 def test_a_cached_fit_output_does_not_replace_required_state(csv_path):
     from sklearn.preprocessing import StandardScaler
     from stratum.optimizer._lineage import compute_lineage_keys
-    from stratum.optimizer.physical.rewrites._reuse_planning import apply_reuse_cache, cacheable_region
+    from stratum.optimizer.physical.rewrites._reuse_planning import (
+        apply_reuse_cache, cacheable_region)
     from stratum.optimizer.physical.rewrites._lifetime_planning import plan_input_removals
     from stratum.optimizer.physical.rewrites._linearization import linearize_dag
 

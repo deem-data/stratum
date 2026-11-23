@@ -201,7 +201,7 @@ def config_key(value):
     if isinstance(value, dict):
         # The type is part of the key: a defaultdict is not the same argument
         # as a plain dict with the same items.
-        # TODO: Preserve item order for configurations such as AssignMapOp.entries;
+        # TODO: Preserve item order for configurations that depend on dictionary order;
         # different insertion orders can produce different output column orders.
         return ("__dict__", type(value),
                 frozenset((k, config_key(v)) for k, v in value.items()))

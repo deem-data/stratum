@@ -14,11 +14,9 @@ from stratum.adapters.string_encoder import supports_rust_string_encoder
 from stratum.adapters.table_vectorizer import (
     StratumFusedTableVectorizer as FusedTableVectorizerAdapter,
 )
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp
 from stratum.optimizer._optimize import optimize
-from stratum.optimizer.physical._map_execs import (
-    PandasAssignMapOp,
-    PolarsAssignMapOp,
-)
+from stratum.optimizer.physical._combine_execs import PandasAssignOp, PolarsAssignOp
 from stratum.optimizer.physical._projection_execs import (
     PandasColumnProjectionOp,
     PolarsColumnProjectionOp,
@@ -173,13 +171,13 @@ def test_table_vectorizer_pipeline_scores_end_to_end_for_each_selector(
 
                 if selector == "default":
                     assert any(isinstance(op, PandasReadCSV) for op in ops)
-                    assert any(isinstance(op, PandasAssignMapOp) for op in ops)
+                    assert any(isinstance(op, PandasAssignOp) for op in ops)
                     assert any(isinstance(op, PandasColumnProjectionOp) for op in ops)
                     assert isinstance(table_op, SkrubTableVectorizer)
                     uses_rust = False
                 else:
                     assert any(isinstance(op, PolarsReadCSV) for op in ops)
-                    assert any(isinstance(op, PolarsAssignMapOp) for op in ops)
+                    assert any(isinstance(op, (PolarsAssignOp, PolarsFusedAssignOp)) for op in ops)
                     assert any(isinstance(op, PolarsColumnProjectionOp) for op in ops)
                     expected_table_op = (
                         StratumFusedTableVectorizer

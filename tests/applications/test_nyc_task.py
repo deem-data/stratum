@@ -15,8 +15,8 @@ import pandas as pd
 import stratum as st
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer._optimize import OptConfig, logical_optimize
-from stratum.optimizer.logical._column_expr import ColumnExpr, OperandLeaf
-from stratum.optimizer.logical._map_ops import AssignMapOp
+from stratum.optimizer.logical._column_expr import ColumnExpr
+from stratum.optimizer.logical._combine_ops import AssignOp
 from stratum.optimizer.logical._ops import MethodCallOp
 from tests.applications._nyc_task import (
     apply_hgb,
@@ -113,47 +113,20 @@ def build_pipeline(lake):
         return apply_hgb(model_features(features), y)
 
 
-def _leaves(expr):
-    if isinstance(expr, OperandLeaf):
-        yield expr
-    for slot in getattr(type(expr), "__slots__", ()):
-        value = getattr(expr, slot, None)
-        values = (
-            value.values()
-            if isinstance(value, dict)
-            else value
-            if isinstance(value, (list, tuple))
-            else (value,)
-        )
-        for item in values:
-            if isinstance(item, ColumnExpr):
-                yield from _leaves(item)
-
-
-def test_nyc_plan_folds_assigns(tmp_path):
+def test_nyc_plan_extracts_assignments(tmp_path):
     pipeline = build_pipeline(make_nyc_lake(tmp_path / "lake"))
     root = logical_optimize(pipeline, OptConfig(), None)
     ops = list(topological_iterator(root))
-    maps = [op for op in ops if isinstance(op, AssignMapOp) and not op.was_cloned]
+    maps = [op for op in ops if isinstance(op, AssignOp) and not op.was_cloned]
     generic_assigns = [
         op for op in ops if isinstance(op, MethodCallOp) and op.method_name == "assign"
     ]
 
     assert len(maps) == 16
     assert not generic_assigns
-    # Three maps depend on another frame (event assembly and
-    # label alignment); every other assignment is row-local to its source.
-    assert (
-        sum(
-            any(
-                leaf.ref.k != 0
-                for entry in op.entries.values()
-                for leaf in _leaves(entry)
-            )
-            for op in maps
-        )
-        == 3
-    )
+    assert all(op.inputs and op.kwargs for op in maps)
+    assert all(not isinstance(value, ColumnExpr)
+               for op in maps for value in op.kwargs.values())
 
 
 def test_nyc_pipeline_scores_two_future_cutoffs(tmp_path, capfd):

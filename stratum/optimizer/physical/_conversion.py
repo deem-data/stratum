@@ -7,6 +7,8 @@ producer must run on pandas. Strings convert to pandas' ``str`` dtype.
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import pandas as pd
 import polars as pl
 
@@ -61,24 +63,27 @@ def to_pandas(value):
 
 # --- index lineage ------------------------------------------------------------
 #
-# Index origin: the op that last determined a value's row set and order, or
-# DEFAULT for a fresh RangeIndex. Row-preserving ops inherit it. Equal origins
-# imply positional pairing (polars) == label alignment (pandas).
+# Index identity and default labels are separate properties: two RangeIndexes
+# can have different lengths. Row-preserving operators inherit both properties.
 
-DEFAULT = "default"
+
+class _IndexOrigin(NamedTuple):
+    """Index identity, with a proof of default labels when available."""
+    producer: int
+    default: bool = False
 
 
 def has_default_index(op: IRNode, memo: dict | None = None) -> bool:
-    """Whether ``op``'s pandas output has a default RangeIndex."""
-    return index_origin(op, memo) == DEFAULT
+    """Whether ``op``'s pandas output is known to have a default RangeIndex."""
+    return index_origin(op, memo).default
 
 
-def index_origin(op: IRNode, memo: dict | None = None):
-    """``DEFAULT`` or the id of the origin op. Unknown ops start a new origin."""
+def index_origin(op: IRNode, memo: dict | None = None) -> _IndexOrigin:
+    """Index provenance; equality proves matching row labels and order."""
     memo = {} if memo is None else memo
     key = id(op)
     if key not in memo:
-        memo[key] = key  # cycle guard
+        memo[key] = _IndexOrigin(key)  # cycle guard
         memo[key] = _index_origin(op, memo)
     return memo[key]
 
@@ -87,20 +92,50 @@ def _index_origin(op: IRNode, memo: dict):
     """Follow ``op``'s declared :class:`IndexEffect`."""
     effect = op.index_effect
     if effect is IndexEffect.DEFAULT:
-        return DEFAULT
+        return _IndexOrigin(id(op), default=True)
     if effect is IndexEffect.COMMON:
         return _common_origin(op, memo)
-    first = index_origin(op.inputs[0], memo) if op.inputs else id(op)
+    first = index_origin(op.inputs[0], memo) if op.inputs else _IndexOrigin(id(op))
     if effect is IndexEffect.KEEP:
         return first
-    if effect is IndexEffect.PREFIX and first == DEFAULT:
-        return DEFAULT
-    return id(op)
+    if effect is IndexEffect.PREFIX:
+        return _IndexOrigin(id(op), default=first.default)
+    return _IndexOrigin(id(op))
+
+
+def _structure_value(op: IRNode) -> bool:
+    """Shape or column metadata, optionally indexed or converted to a list."""
+    from stratum.optimizer.logical._metadata_ops import ColumnNamesOp, ShapeOp
+    from stratum.optimizer.logical._ops import GetItemOp, MethodCallOp
+
+    while op.inputs and (isinstance(op, GetItemOp)
+                         or isinstance(op, MethodCallOp) and op.method_name == "tolist"):
+        op = op.inputs[0]
+    return isinstance(op, (ColumnNamesOp, ShapeOp))
+
+
+def index_inputs(op: IRNode):
+    """Data operands that carry, or may carry, pandas row labels."""
+    from stratum.optimizer.logical._ops import ValueOp
+
+    for k, source in enumerate(op.inputs):
+        if op.reads_state(k):
+            continue
+        if source.output_type not in FRAME_TYPES and source.output_type.name != "UNKNOWN":
+            continue
+        if _structure_value(source):
+            continue
+        # Scalars and positional array/list operands carry no row labels.
+        if (isinstance(source, ValueOp)
+                and not isinstance(source.value, (pd.Series, pd.DataFrame, pl.Series, pl.DataFrame))):
+            continue
+        yield source
 
 
 def _common_origin(op: IRNode, memo: dict):
-    """Elementwise op: differing origins align on a label union (new origin)."""
-    origins = {index_origin(i, memo) for k, i in enumerate(op.inputs)
-               if (i.output_type in FRAME_TYPES or i.output_type.name == "UNKNOWN")
-               and not op.reads_state(k)}
-    return origins.pop() if len(origins) == 1 else id(op)
+    """A common index, or the new index formed by label alignment."""
+    origins = {index_origin(source, memo) for source in index_inputs(op)}
+    if len(origins) == 1:
+        return origins.pop()
+    # A union of 0..n-1 indexes remains default, but its length may change.
+    return _IndexOrigin(id(op), default=bool(origins) and all(o.default for o in origins))

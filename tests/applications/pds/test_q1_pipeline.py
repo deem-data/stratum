@@ -21,13 +21,14 @@ from stratum.frontend import _api
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import AggExpr, BinOpExpr, Col, Const
-from stratum.optimizer.logical._map_ops import AssignMapOp
+from stratum.optimizer.logical._combine_ops import AssignOp
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._ops import MethodCallOp, ValueOp
 from stratum.optimizer.logical._selection_ops import MaskSelectionOp, SelectionOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._selection_execs import PolarsMaskSelectionOp
-from stratum.optimizer.physical._map_execs import PolarsAssignMapOp
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp
 from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
 from stratum.frontend._skrub_graph import get_data
 
@@ -185,33 +186,36 @@ def test_q1_prefix_runs_on_polars():
 # --- the folded plan ------------------------------------------------------
 
 def test_q1_plan_folds_filter_and_map(polars):
-    """The filter and the two derived columns each collapse to one physical op.
-
-    Both derived columns are pure column arithmetic, so neither needs an
-    ``OperandLeaf`` and the map takes only the filtered frame.
-    """
+    """Selection folds; Polars also fuses the assigned column expressions."""
     ops = _plan(build_q1_prefix(make_lineitem()))
     sel = _one(ops, SelectionOp)
-    amo = _one(ops, AssignMapOp)
+    amo = next(op for op in ops if isinstance(op, (AssignOp, PolarsFusedAssignOp)))
 
     assert isinstance(sel, MaskSelectionOp)
 
-    disc_price = BinOpExpr(operator.mul,
-                           Col("l_extendedprice"),
-                           BinOpExpr(operator.sub, Const(1.0), Col("l_discount")))
-    assert ["disc_price", "charge"] == list(amo.entries)
-    assert disc_price == amo.entries["disc_price"]
-    assert BinOpExpr(operator.mul, disc_price,
-                     BinOpExpr(operator.add, Const(1.0), Col("l_tax"))) \
-        == amo.entries["charge"]
-    assert len(amo.inputs) == 1, "the map should need only the filtered frame"
+    if polars:
+        disc_price = BinOpExpr(operator.mul, Col("l_extendedprice"),
+                               BinOpExpr(operator.sub, Const(1.0), Col("l_discount")))
+        assert list(amo.entries) == ["disc_price", "charge"]
+        assert amo.entries["disc_price"] == disc_price
+        assert amo.entries["charge"] == BinOpExpr(
+            operator.mul, disc_price, BinOpExpr(operator.add, Const(1.0), Col("l_tax")))
+        assert len(amo.inputs) == 1
+    else:
+        assert ["disc_price", "charge"] == list(amo.kwargs)
+        disc_price = amo.inputs[amo.kwargs["disc_price"].k]
+        charge = amo.inputs[amo.kwargs["charge"].k]
+        assert isinstance(disc_price, ExpressionMapOp)
+        assert isinstance(charge, ExpressionMapOp)
+        assert disc_price in charge.inputs
+        assert len(amo.inputs) == 3
 
     for op in (sel, amo):
         assert isinstance(op, PhysicalOp), \
             f"{type(op).__name__} was not bound to a physical implementation"
     if polars:
         assert isinstance(sel, PolarsMaskSelectionOp)
-        assert isinstance(amo, PolarsAssignMapOp)
+        assert isinstance(amo, PolarsFusedAssignOp)
 
 
 def test_q1_filter_inlines_the_date_constant(polars):

@@ -11,22 +11,21 @@ import stratum as st
 from stratum.optimizer._optimize import OptConfig, logical_optimize
 from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.logical._dataframe_ops import (
-    AggregateOp, AssignMapOp, AssignOp, ColumnProjectionOp, ConcatOp, InMemoryFrameOp,
-    ReadCSVOp, ReadParquetOp,
-    DatetimeConversionOp, DatetimeFieldOp, DropOp, AttributeReadOp, JoinOp, RenameOp,
-    ResetIndexOp,
-    DropLabelsSelectionOp, SelectionOp, SliceSelectionOp, SplitOp, SplitOutput)
+    AggregateOp, AssignOp, ColumnProjectionOp, ConcatOp, InMemoryFrameOp, ReadCSVOp,
+    ReadParquetOp, DatetimeConversionOp, DatetimeFieldOp, DropOp, AttributeReadOp, JoinOp,
+    RenameOp, ResetIndexOp, DropLabelsSelectionOp, SelectionOp, SliceSelectionOp, SplitOp,
+    SplitOutput)
 from stratum.optimizer.logical._source_ops import make_read_op
 from stratum.optimizer.logical._ops import (
     CallOp,
     BinOp, ChoiceOp, GetItemOp, MethodCallOp, Op, OperandRef, OutputType, UnaryOp)
-from stratum.optimizer.logical._map_ops import StringMethodOp
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._metadata_ops import make_rename_op
 from stratum.optimizer._optimize import optimize as optimize_full
 from stratum.optimizer.logical._candidate_ops import ScoreCandidatesOp
-from stratum.optimizer.logical._column_methods import COLUMN_METHODS, FillnaOp
 from stratum.optimizer.logical._column_expr import (
-    AggExpr, AllCols, BinOpExpr, Col, DtExpr)
+    AggExpr, AllCols, AstypeExpr, BinOpExpr, ClipExpr, Col, DtExpr, FillnaExpr,
+    IsinExpr, IsnaExpr, NotnaExpr, OperandLeaf, StrExpr, WhereExpr)
 from stratum.optimizer.logical._scoring import Metric
 from tests._helpers import csv_file
 
@@ -221,7 +220,7 @@ class TestSchemaPropagation(unittest.TestCase):
         self.assertFalse([o for o in ops if isinstance(o, (DropOp, SelectionOp))])
 
     def test_assign_adds_unknown_typed_column(self):
-        op = _schema_op(st.as_data_op(self.df).assign(w=1), AssignMapOp)
+        op = _schema_op(st.as_data_op(self.df).assign(w=1), AssignOp)
         self.assertEqual(["x", "y", "z", "w"], list(op.output_schema.keys()))
         self.assertEqual(pl.Unknown, op.output_schema["w"])
 
@@ -888,7 +887,7 @@ class TestSchemaPropagation(unittest.TestCase):
         # `.str.<method>` is elementwise: names survive, dtype varies by method
         # (contains->bool, len->int, lower->str) and the backends disagree, so it
         # is left Unknown.
-        op = StringMethodOp(method="lower")
+        op = ExpressionMapOp(StrExpr(OperandLeaf(OperandRef(0)), method="lower"))
         op.inputs = [_stub(pl.Schema({"s": pl.String}))]
         op.propagate_output_schema()
         self.assertEqual(["s"], list(op.output_schema.keys()))
@@ -904,26 +903,29 @@ class TestSchemaPropagation(unittest.TestCase):
             self.assertEqual("bool", str(getattr(column, method)().dtype))
         self.assertEqual("float64", str(column.where(column > 1).dtype))
 
-        for method, expected in [("isin", pl.Boolean), ("isna", pl.Boolean),
-                                 ("isnull", pl.Boolean), ("notna", pl.Boolean),
-                                 ("notnull", pl.Boolean),
-                                 ("fillna", pl.Unknown), ("clip", pl.Unknown),
-                                 ("where", pl.Unknown), ("astype", pl.Unknown)]:
-            with self.subTest(method=method):
-                op = COLUMN_METHODS[method][0]()
+        operand = OperandLeaf(OperandRef(0))
+        for expr, expected in [(IsinExpr(operand, [1]), pl.Boolean),
+                               (IsnaExpr(operand), pl.Boolean),
+                               (NotnaExpr(operand), pl.Boolean),
+                               (FillnaExpr(operand, 0), pl.Unknown),
+                               (ClipExpr(operand, lower=0), pl.Unknown),
+                               (WhereExpr(operand, True, 0), pl.Unknown),
+                               (AstypeExpr(operand, "float32"), pl.Unknown)]:
+            with self.subTest(expr=expr):
+                op = ExpressionMapOp(expr)
                 op.inputs = [_stub(pl.Schema({"x": pl.Int64}), OutputType.SERIES)]
                 op.propagate_output_schema()
                 self.assertEqual(["x"], list(op.output_schema.keys()))
                 self.assertEqual(expected, op.output_schema["x"])
 
     def test_column_method_unknown_input_propagates(self):
-        op = FillnaOp()
+        op = ExpressionMapOp(FillnaExpr(OperandLeaf(OperandRef(0)), 0))
         op.inputs = [_stub(None)]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
 
     def test_string_method_unknown_input_propagates(self):
-        op = StringMethodOp(method="lower")
+        op = ExpressionMapOp(StrExpr(OperandLeaf(OperandRef(0)), method="lower"))
         op.inputs = [_stub(None)]
         op.propagate_output_schema()
         self.assertIsNone(op.output_schema)
@@ -935,7 +937,7 @@ class TestSchemaPropagation(unittest.TestCase):
         for method in ("extract", "extractall", "get_dummies", "partition",
                        "rpartition", "split", "rsplit", "cat"):
             with self.subTest(method=method):
-                op = StringMethodOp(method=method)
+                op = ExpressionMapOp(StrExpr(OperandLeaf(OperandRef(0)), method=method))
                 op.inputs = [_stub(pl.Schema({"s": pl.String}))]
                 op.propagate_output_schema()
                 self.assertIsNone(op.output_schema)
@@ -943,7 +945,7 @@ class TestSchemaPropagation(unittest.TestCase):
     def test_string_method_one_to_one_methods_are_all_scalar(self):
         # Guards the allow-list against a member that isn't actually one-to-one.
         col = pd.Series(["a-b", "c-d"])
-        for method in StringMethodOp.ONE_TO_ONE_METHODS:
+        for method in StrExpr.ONE_TO_ONE_METHODS:
             with self.subTest(method=method):
                 func = getattr(col.str, method)
                 result = None

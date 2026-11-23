@@ -40,8 +40,10 @@ class RenameOp(MetadataOp):
     ``errors``: ``"raise"`` when a mapped label is absent, ``"ignore"`` to skip it.
     """
     fields = ["columns", "index", "errors"]
-    # TODO: Use IndexEffect.NEW when renaming the index; its labels can change.
-    index_effect = IndexEffect.KEEP
+
+    @property
+    def index_effect(self):
+        return IndexEffect.KEEP if self.index is None else IndexEffect.NEW
 
     def __init__(self, columns=None, index=None, errors="ignore",
                  inputs: list[Op] = None, outputs: list[Op] = None):

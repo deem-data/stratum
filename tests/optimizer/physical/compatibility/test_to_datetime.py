@@ -8,7 +8,10 @@ import stratum
 from stratum.frontend._api import evaluate
 from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
-from stratum.optimizer.physical._map_execs import PolarsAssignMapOp, PolarsDatetimeConversionOp
+from stratum.optimizer.physical._map_execs import (
+    PolarsDatetimeConversionOp)
+from stratum.optimizer.physical._combine_execs import PolarsAssignOp
+from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp, PolarsFusedMapOp
 
 FRAME = pd.DataFrame({"d": pd.to_datetime(["2020-01-31 10:00", None, "2021-06-01 00:00"])})
 
@@ -33,7 +36,8 @@ def test_a_datetime_column_is_returned_as_it_is(source, path, kwargs):
     with stratum.config(scheduler=True, implementation_selector="greedy"):
         ops, *_ = optimize(plan, env=get_data(plan))
         result = evaluate(plan)
-    native = PolarsDatetimeConversionOp if path == "standalone" else PolarsAssignMapOp
+    native = ((PolarsDatetimeConversionOp, PolarsFusedMapOp) if path == "standalone"
+              else (PolarsAssignOp, PolarsFusedAssignOp))
     assert any(isinstance(op, native) for op in ops)
     assert isinstance(result, (pl.Series, pl.DataFrame))
     result = result.to_pandas()

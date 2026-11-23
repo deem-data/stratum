@@ -58,14 +58,15 @@ def test_a_translated_expression_runs_on_polars(source):
 def test_an_untranslatable_expression_runs_on_pandas(source):
     plan = source.assign(c=source["s"].str.replace(r"(\d)", r"\1\1", regex=True))
     ops = _optimize(plan, "greedy")
-    assign = next(op for op in ops if type(op).__name__.endswith("AssignMapOp"))
-    assert type(assign).__name__ == "PandasAssignMapOp"
-    assert "not portable" in dict(assign._refusals)["polars"]
+    assign = next(op for op in ops if type(op).__name__.endswith("AssignOp"))
+    assert type(assign).__name__ == "PolarsAssignOp"
+    method = next(op for op in ops if type(op).__name__ == "PandasExpressionMapOp")
+    assert "not portable" in dict(method._refusals)["polars"]
     with st.config(scheduler=True, implementation_selector="greedy"):
         result = evaluate(plan)
     with st.config(scheduler=True):
         expected = evaluate(plan)
-    pd.testing.assert_frame_equal(result, expected)
+    pd.testing.assert_frame_equal(result.to_pandas(), expected)
 
 
 @pytest.mark.parametrize("selector", ["default", "greedy"])

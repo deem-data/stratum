@@ -137,7 +137,7 @@ def test_columns_of_the_same_frame_stay_on_polars(source):
     filtered = source[source["k"] > 1]
     plan = filtered.assign(y=filtered["x"] * 2, z=filtered["x"].where(filtered["x"] > 0))
     ops, result = _greedy(plan)
-    assign = next(op for op in ops if type(op).__name__.endswith("AssignMapOp"))
+    assign = next(op for op in ops if type(op).__name__.endswith("AssignOp"))
     assert frame_lib(assign) is FrameLib.POLARS
     pd.testing.assert_frame_equal(_as_pandas(result).reset_index(drop=True),
                                   _pandas(plan).reset_index(drop=True), check_dtype=False)
@@ -219,7 +219,7 @@ def test_a_row_dropped_column_is_aligned_by_label():
     pd.testing.assert_frame_equal(_as_pandas(result), expected, check_dtype=False)
 
 
-_FRAME_MODULES = ["_aggregation_ops", "_column_methods", "_dataframe_ops", "_index_ops",
+_FRAME_MODULES = ["_aggregation_ops", "_dataframe_ops", "_index_ops",
                   "_join_ops", "_map_ops", "_metadata_ops", "_projection_ops",
                   "_selection_ops", "_sort_ops", "_source_ops"]
 

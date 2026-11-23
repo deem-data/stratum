@@ -9,6 +9,7 @@ from stratum.optimizer.logical._dataframe_ops import (
     ApplyUDFOp, AttributeReadOp, ColumnProjectionOp, DatetimeConversionOp, DatetimeFieldOp)
 from stratum.optimizer.logical._ops import GetItemOp, OutputType, BinOp
 from stratum.optimizer.logical._source_ops import LoadNumpyOp
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from tests._helpers import npy_file
 from .test_dataframe_ops import optimize
 
@@ -50,7 +51,7 @@ class TestOutputTypeInference(unittest.TestCase):
     def test_comparison_on_column_is_series(self):
         # df["x"] > 1 : the column is a SERIES, so the comparison is a SERIES too.
         ops = optimize(st.as_data_op(self.df)["x"] > 1, OptConfig(dataframe_ops=True))
-        binops = self._find(ops, BinOp)
+        binops = self._find(ops, ExpressionMapOp)
         self.assertEqual(1, len(binops))
         self.assertIs(OutputType.SERIES, binops[0].output_type)
 
@@ -65,9 +66,9 @@ class TestOutputTypeInference(unittest.TestCase):
 
     def test_frame_comparison_is_frame(self):
         # df > 1 : the operand is a whole frame -> the comparison is a FRAME.
-        # (Arithmetic BinOps are consumed by the numeric path; comparisons stay.)
+        # Both arithmetic and comparisons extract as expression maps.
         ops = optimize(st.as_data_op(self.df) > 1, OptConfig(dataframe_ops=True))
-        self.assertIs(OutputType.FRAME, self._one(ops, BinOp).output_type)
+        self.assertIs(OutputType.FRAME, self._one(ops, ExpressionMapOp).output_type)
 
     def test_datetime_conversion_on_column_is_series(self):
         # X["datetime"] is a SERIES; pd.to_datetime over it produces a
@@ -103,14 +104,12 @@ class TestOutputTypeInference(unittest.TestCase):
                        OptConfig(dataframe_ops=True))
         self.assertIs(OutputType.FRAME, self._one(ops, ApplyUDFOp).output_type)
 
-    def test_column_arithmetic_is_series_before_numeric_folding(self):
-        # Numeric-op parsing runs *after* frame parsing, so during frame parsing
-        # `df["x"] + df["y"]` is still a BinOp over columns (pandas/polars world,
-        # not a matrix) -> SERIES. Disable numeric_ops to observe it pre-folding.
+    def test_column_arithmetic_is_a_series_map(self):
+        # Column arithmetic is represented independently of numeric extraction.
         data = st.as_data_op(self.df)
         ops = optimize(data["x"] + data["y"],
                        OptConfig(dataframe_ops=True, numeric_ops=False))
-        self.assertIs(OutputType.SERIES, self._one(ops, BinOp).output_type)
+        self.assertIs(OutputType.SERIES, self._one(ops, ExpressionMapOp).output_type)
 
     def test_two_axis_loc_with_a_column_list_is_frame(self):
         # `df.loc[mask, ["x"]]` restricts rows *and* columns; a column list keeps a
