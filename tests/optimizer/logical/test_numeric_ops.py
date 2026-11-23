@@ -14,7 +14,7 @@ from stratum.optimizer.physical._generic_execs import CallExec
 def _run_plan(ops):
     results = {}
     for op in ops:
-        results[op] = op.process("fit_transform", [results[in_op] for in_op in op.inputs])
+        results[op] = op.process([results[in_op] for in_op in op.inputs])
     return results[ops[-1]]
 
 class TestNumericOps(unittest.TestCase):
