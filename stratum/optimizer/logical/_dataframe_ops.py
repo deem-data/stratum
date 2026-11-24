@@ -32,7 +32,8 @@ from stratum.optimizer.logical._projection_ops import (
     drop_targets_columns, make_column_projection_op, make_column_selector_op,
     make_drop_op)
 from stratum.optimizer.logical._metadata_ops import (
-    MetadataOp, RenameOp, ResetIndexOp, make_rename_op, make_reset_index_op)
+    MetadataOp, RenameOp, RowLabelsOp, make_rename_op, make_reset_index_op,
+    make_set_axis_op, make_set_index_op, make_to_frame_op)
 from stratum.optimizer.logical._map_ops import (
     MapOp, ApplyUDFOp, ExpressionMapOp, AttributeReadOp, DatetimeConversionOp,
     DatetimeFieldOp,
@@ -418,6 +419,12 @@ def extract_dataframe_op(op: Op, root: Op, map_op = True,
                 new_op = make_value_counts_ops(op)
             elif op.method_name == "reset_index":
                 new_op = make_reset_index_op(op)
+            elif op.method_name == "set_index":
+                new_op = make_set_index_op(op)
+            elif op.method_name == "set_axis":
+                new_op = make_set_axis_op(op)
+            elif op.method_name == "to_frame":
+                new_op = make_to_frame_op(op)
             elif op.method_name == "sort_values":
                 new_op = make_sort_op(op)
             elif op.method_name == "rename":

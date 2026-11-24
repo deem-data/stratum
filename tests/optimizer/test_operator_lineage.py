@@ -32,7 +32,7 @@ from stratum.optimizer.logical._map_ops import (
 from stratum.optimizer.logical._combine_ops import AssignOp
 from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._metadata_ops import (
-    ColumnNamesOp, RenameOp, ResetIndexOp, ShapeOp,
+    ColumnNamesOp, RenameOp, RowLabelsOp, ShapeOp,
 )
 from stratum.optimizer.logical._ops import CallOp, GetItemOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp, ColumnSelectorOp, DropOp
@@ -105,7 +105,7 @@ def test_result_affecting_options_are_part_of_lineage(left, right):
 
 
 def test_parameterless_operations_remain_distinct():
-    ops = [IndexAccessOp(), ResetIndexOp(), ShapeOp(), ColumnNamesOp(),
+    ops = [IndexAccessOp(), RowLabelsOp(), ShapeOp(), ColumnNamesOp(),
            ExpressionMapOp(IsnaExpr(OperandLeaf(OperandRef(0)))),
            ExpressionMapOp(NotnaExpr(OperandLeaf(OperandRef(0))))]
     keys = [lineage_key(op, ["source"]) for op in ops]

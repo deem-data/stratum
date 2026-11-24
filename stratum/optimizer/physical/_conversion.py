@@ -90,6 +90,10 @@ def index_origin(op: IRNode, memo: dict | None = None) -> _IndexOrigin:
 
 def _index_origin(op: IRNode, memo: dict):
     """Follow ``op``'s declared :class:`IndexEffect`."""
+    labels_source = getattr(op, "labels_source", None)
+    if labels_source is not None:
+        # set_axis(x.index) takes x's labels in the same order.
+        return index_origin(labels_source, memo)
     effect = op.index_effect
     if effect is IndexEffect.DEFAULT:
         return _IndexOrigin(id(op), default=True)

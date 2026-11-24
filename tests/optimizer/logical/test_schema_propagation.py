@@ -13,7 +13,7 @@ from stratum.optimizer._op_utils import topological_iterator
 from stratum.optimizer.logical._dataframe_ops import (
     AggregateOp, AssignOp, ColumnProjectionOp, ConcatOp, InMemoryFrameOp, ReadCSVOp,
     ReadParquetOp, DatetimeConversionOp, DatetimeFieldOp, DropOp, AttributeReadOp, JoinOp,
-    RenameOp, ResetIndexOp, DropLabelsSelectionOp, SelectionOp, SliceSelectionOp, SplitOp,
+    RenameOp, RowLabelsOp, DropLabelsSelectionOp, SelectionOp, SliceSelectionOp, SplitOp,
     SplitOutput)
 from stratum.optimizer.logical._source_ops import make_read_op
 from stratum.optimizer.logical._ops import (
@@ -236,7 +236,7 @@ class TestSchemaPropagation(unittest.TestCase):
 
     def test_reset_index_keeps_the_columns(self):
         # only the dropping form is extracted: the old labels do not become a column.
-        op = _schema_op(st.as_data_op(self.df).reset_index(drop=True), ResetIndexOp)
+        op = _schema_op(st.as_data_op(self.df).reset_index(drop=True), RowLabelsOp)
         self.assertEqual(["x", "y", "z"], list(op.output_schema.keys()))
 
     def test_single_column_selection_is_one_column_schema(self):
