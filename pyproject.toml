@@ -43,16 +43,17 @@ test = [
     "pytest-cov",
     "coverage[toml]",
     "lightgbm>=4.6.0",
-    "xgboost>=3.1.1",
+    # 3.1 cannot fit pandas 3 string categories; 3.4 can, but needs Python 3.12.
+    "xgboost>=3.4.1; python_version >= '3.12'",
+    "xgboost>=3.1.1; python_version < '3.12'",
     "catboost>=1.2.10",
+    "skorch>=1.4.0",
     "pytest-xdist>=3.8.0",
     "stratum-ai[server]",
 ]
-# torch is only needed by tests/applications/test_ttt_task.py, and which build of
-# it you want depends on the machine, so it rides in its own extra rather than
-# in `test`. Pick exactly one alongside `test`: `cpu` on CI and on any box
-# without an NVIDIA GPU, `cu126` on the GPU box. They are declared conflicting
-# below so uv resolves a separate lock branch for each.
+# The TTT application test and NYC trajectory need torch. Select one extra
+# alongside `test`: `cpu` for CI or machines without an NVIDIA GPU, `cu126` for
+# CUDA. These extras conflict so uv resolves them separately.
 cpu = [
     "torch>=2.13.0",
 ]

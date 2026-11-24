@@ -105,7 +105,7 @@ jobs:
         shell: bash
         run: |
           source .venv/bin/activate
-          pytest -v --cov=stratum --cov-config=pyproject.toml --cov-branch --cov-report=term-missing --cov-report=xml tests
+          pytest -v --cov=stratum --cov-config=pyproject.toml --cov-branch --cov-report=term-missing --cov-report=xml --ignore=tests/applications/trajectories tests
 
       - name: Run Python tests
         if: matrix.os != 'ubuntu-latest' || matrix.python-version != '3.12'
@@ -116,7 +116,7 @@ jobs:
           else
             source .venv/bin/activate
           fi
-          pytest -v tests
+          pytest -v --ignore=tests/applications/trajectories tests
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
