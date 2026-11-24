@@ -28,12 +28,12 @@ def _optimize(plan, selector):
         return optimize(plan, env=get_data(plan))[0]
 
 
-def test_an_opaque_call_fed_polars_gets_converted_input(source):
-    # #226, first example: `where` without `other` stays the recorded pandas
-    # call; the greedy plan converts its polars inputs explicitly (#227).
+def test_a_pandas_expression_fed_polars_gets_converted_input(source):
+    # A missing replacement requires pandas; its Polars inputs are converted.
     plan = source.assign(c=source["x"].where(source["x"] > 0))
     ops = _optimize(plan, "greedy")
-    where = next(op for op in ops if type(op).__name__ == "MethodCallExec")
+    where = next(op for op in ops if type(op).__name__ == "PandasExpressionMapOp"
+                 and op.expr.method == "where")
     assert all(isinstance(i, ConversionOp) and i.target is FrameLib.PANDAS
                for i in where.inputs)
     with st.config(scheduler=True, implementation_selector="greedy"):

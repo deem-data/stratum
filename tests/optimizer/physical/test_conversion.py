@@ -79,7 +79,8 @@ def test_a_series_converts_with_its_name():
 def test_a_pandas_call_on_a_default_index_reads_a_conversion(source):
     plan = source.assign(c=source["x"].where(source["x"] > 0))
     ops, result = _greedy(plan)
-    where = next(op for op in ops if type(op).__name__ == "MethodCallExec")
+    where = next(op for op in ops if type(op).__name__ == "PandasExpressionMapOp"
+                 and op.expr.method == "where")
     assert all(isinstance(i, ConversionOp) and i.target is FrameLib.PANDAS
                for i in where.inputs)
     # and back, explicitly, into the polars assign

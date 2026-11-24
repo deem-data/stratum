@@ -25,7 +25,7 @@ from stratum.optimizer.logical._base import IRNode
 from stratum.optimizer.logical._column_expr import (
     BINARY_SYMBOLS, UNARY_SYMBOLS, UFUNCS, UfuncExpr, AggExpr, AllCols, AstypeExpr, BinOpExpr, Col,
     ColumnExpr, ColumnMethodExpr, Const, DatetimeExpr, DtExpr, FillnaExpr, OperandLeaf, StrExpr, UnaryOpExpr,
-    map_exprs)
+    WhereExpr, map_exprs)
 from stratum.optimizer.logical._schema import normalize_dtype
 from stratum.optimizer.logical._ops import apply_binary
 from stratum.optimizer.physical._polars_translate import (
@@ -422,6 +422,17 @@ def _(expr: StrExpr, input_schemas):
 @_polars_unsupported_here.register
 def _(expr: DtExpr, input_schemas):
     return polars_dt_attribute_unsupported(expr.attr)
+
+
+@_polars_unsupported_here.register
+def _(expr: WhereExpr, input_schemas):
+    # Missing replacements need pandas dtype promotion (int -> float,
+    # bool -> object) and nullable dtypes' missing values. This check applies
+    # to both standalone and fused expressions.
+    other = expr.other.value if isinstance(expr.other, Const) else expr.other
+    if pd.api.types.is_scalar(other) and pd.isna(other):
+        return "a missing `other` requires pandas dtype-dependent filling"
+    return None
 
 
 @_polars_unsupported_here.register

@@ -242,11 +242,10 @@ def _clip_fields(call: dict, frame: bool) -> dict | None:
 
 
 def _where_fields(call: dict, frame: bool) -> dict | None:
-    # Without `other`, pandas fills NaN, which not every polars dtype can hold.
-    if (frame or call.keys() != {"cond", "other"}
+    if (frame or "cond" not in call or call.keys() - {"cond", "other"}
             or not all(_is_ref_or_scalar(v) for v in call.values())):
         return None
-    return dict(cond=call["cond"], other=call["other"])
+    return dict(cond=call["cond"], other=call.get("other", np.nan))
 
 
 def _isin_fields(call: dict, frame: bool) -> dict | None:

@@ -576,7 +576,6 @@ class TestColumnMethodFields(unittest.TestCase):
             ("fillna", ([0, 1],), {}),
             ("clip", (), {}),
             ("clip", (1,), {"axis": 0}),
-            ("where", (OperandRef(0),), {}),  # pandas' implicit NaN
             ("isin", ("ab",), {}),
             ("map", (lambda v: v,), {}),
             ("map", ({1: 2},), {"na_action": "all"}),
