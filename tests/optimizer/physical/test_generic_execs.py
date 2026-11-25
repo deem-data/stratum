@@ -44,3 +44,37 @@ def test_generic_transformer_lowers_in_place():
     assert " [df]" not in str(lowered)
     result = lowered.process([pd.DataFrame({"x": [1.0, 2.0]})])
     assert result.output.shape == (2, 1)
+
+
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+@pytest.mark.parametrize("no_wrap", [False, True])
+def test_column_transformer_selects_named_columns(tmp_path, selector, no_wrap):
+    import numpy as np
+    import skrub
+    from sklearn.compose import ColumnTransformer
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+    import stratum as st
+    from stratum.frontend._api import evaluate
+
+    path = tmp_path / "columns.csv"
+    pd.DataFrame({"a": np.arange(30, dtype=float),
+                  "b": np.arange(30, dtype=float) % 3,
+                  "y": np.arange(30, dtype=float) * 2}).to_csv(path, index=False)
+    with skrub.config_context(eager_data_ops=False):
+        data = st.as_data_op(str(path)).skb.apply_func(pd.read_csv)
+        X = data.drop(columns="y").skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        transformer = ColumnTransformer([
+            ("scaled", StandardScaler(), ["a", "b"]),
+        ]).set_output(transform="pandas")
+        features = X.skb.apply(transformer, no_wrap=no_wrap)
+        pred = features.skb.apply(Ridge(), y=y)
+    with st.config(scheduler=True, implementation_selector=selector, reuse_cache=False):
+        actual = evaluate(pred, seed=42, test_size=0.2)
+    with st.config(scheduler=False):
+        splits = pred.skb.train_test_split(random_state=42, test_size=0.2)
+        learner = pred.skb.make_learner()
+        learner.fit(splits["train"])
+        expected = learner.predict(splits["test"])
+    np.testing.assert_allclose(actual, expected)

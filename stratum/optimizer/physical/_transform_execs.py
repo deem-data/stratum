@@ -14,6 +14,7 @@ transformer implementation.
 from __future__ import annotations
 
 from sklearn.base import clone
+from sklearn.compose import ColumnTransformer as _SklearnColumnTransformer
 from sklearn.impute import SimpleImputer as _SklearnSimpleImputer
 from sklearn.feature_extraction.text import CountVectorizer as _SklearnCountVectorizer
 from sklearn.preprocessing import StandardScaler as _SklearnStandardScaler
@@ -46,6 +47,7 @@ from stratum.adapters.count_vectorizer import (
 from stratum.adapters.simple_imputer import RustySimpleImputer, supports_rust_simple_imputer
 from stratum.optimizer.logical._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
+from stratum.optimizer.physical._representation import FrameLib
 from stratum.optimizer.physical._physical_ops import (
     PhysicalOp,
     EstimatorExecution,
@@ -69,6 +71,14 @@ class _TransformerExecution(EstimatorExecution):
 
 class PassthroughTransformer(_TransformerExecution, TransformerOp, PhysicalOp):
     """Execute an estimator through the standard Skrub transformer task."""
+
+    @classmethod
+    def accepts_input_lib(cls, op, index, lib) -> bool:
+        # sklearn resolves named columns through the dataframe interchange
+        # protocol or pandas Index.get_loc; Polars 2 no longer has __dataframe__.
+        if index == 0 and isinstance(op.original_estimator, _SklearnColumnTransformer):
+            return lib is FrameLib.PANDAS
+        return super().accepts_input_lib(op, index, lib)
 
 
 class TableVectorizerOp(_TransformerExecution, TransformerOp, PhysicalOp):
