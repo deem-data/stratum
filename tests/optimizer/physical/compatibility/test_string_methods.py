@@ -100,6 +100,19 @@ def test_translated_method_matches_pandas(method, args, kwargs, path):
     _assert_matches(result, _expected(method, args, kwargs, path))
 
 
+@pytest.mark.parametrize("na", [False, True])
+def test_translated_boolean_na_matches_pandas(na):
+    frame = pd.DataFrame({"s": pd.Series(["ab", "ba", None], dtype="str")})
+    with skrub.config_context(eager_data_ops=False):
+        source = skrub.var("frame", frame)
+        called = source["s"].str.contains("a", na=na)
+
+    ops, result = _evaluate(called)
+    assert any(isinstance(op, (PolarsExpressionMapOp, PolarsFusedMapOp)) for op in ops)
+    assert isinstance(result, pl.Series)
+    _assert_matches(result, frame["s"].str.contains("a", na=na))
+
+
 @pytest.mark.parametrize("path", ["standalone", "assign"])
 @pytest.mark.parametrize("method,args,kwargs", REFUSED)
 def test_untranslatable_method_runs_on_pandas(method, args, kwargs, path):
