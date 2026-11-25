@@ -98,6 +98,24 @@ def _translate_contains(params):
     return lambda obj: obj.str.contains(pat, literal=not regex)
 
 
+def _translate_match(params):
+    _only(params, "pat", "case", "flags", "na")
+    pat = params.get("pat")
+    _require(isinstance(pat, str), "only a string pattern translates")
+    _require(params.get("case", True) is True and not params.get("flags", 0),
+             "case=/flags= are not translated")
+    # Check the caller's pattern before adding our own noncapturing group.
+    reason = _regex_unsupported(pat)
+    _require(reason is None, reason)
+    anchored = rf"\A(?:{pat})"
+
+    if "na" not in params:
+        return lambda obj: obj.str.contains(anchored)
+    na = params["na"]
+    _require(isinstance(na, bool), "only boolean na= translates")
+    return lambda obj: obj.str.contains(anchored).fill_null(na)
+
+
 def _translate_count(params):
     # pandas counts regex matches.
     _only(params, "pat", "flags")
@@ -209,6 +227,7 @@ _STR_TRANSLATORS = {
     "startswith": _translate_affix("starts_with"),
     "endswith": _translate_affix("ends_with"),
     "contains": _translate_contains,
+    "match": _translate_match,
     "count": _translate_count,
     "replace": _translate_replace,
     "slice": _translate_slice,

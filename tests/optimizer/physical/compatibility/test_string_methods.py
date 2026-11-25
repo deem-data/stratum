@@ -31,6 +31,8 @@ TRANSLATED = [
     ("contains", ("b",), {}),
     ("contains", ("b.",), {"regex": True}),
     ("contains", (".",), {"regex": False}),
+    ("match", ("ab|[,-]",), {}),
+    ("match", ("a.",), {}),
     ("count", ("[ab]",), {}),
     # pandas slices [start:stop], polars by offset and length.
     ("slice", (1, 3), {}),
@@ -45,6 +47,7 @@ TRANSLATED = [
 REFUSED = [
     ("find", ("c",), {}),  # misses to -1 in pandas, null in polars
     ("contains", ("B",), {"case": False}),
+    ("match", ("AB",), {"case": False}),
     ("startswith", (("a", "b"),), {}),
     ("count", ("(?i)a",), {}),
     ("slice", (0, -1), {}),
@@ -98,6 +101,44 @@ def test_translated_method_matches_pandas(method, args, kwargs, path):
     assert any(isinstance(op, native) for op in ops)
     assert isinstance(result, (pl.Series, pl.DataFrame))
     _assert_matches(result, _expected(method, args, kwargs, path))
+
+
+@pytest.mark.parametrize("na", [False, True])
+def test_translated_match_boolean_na_matches_pandas(na):
+    frame = pd.DataFrame({"s": pd.Series(["ab", "ba", None], dtype="str")})
+    with skrub.config_context(eager_data_ops=False):
+        source = skrub.var("frame", frame)
+        called = source["s"].str.match("a", na=na)
+
+    ops, result = _evaluate(called)
+    assert any(isinstance(op, (PolarsExpressionMapOp, PolarsFusedMapOp)) for op in ops)
+    assert isinstance(result, pl.Series)
+    _assert_matches(result, frame["s"].str.match("a", na=na))
+
+
+def test_translated_match_anchoring():
+    """``match`` anchors every alternative at the start without full-matching.
+
+    Verify that match correctly handles regex alternatives.
+    that it rejects non-prefix matches and accepts partial prefix matches.
+    """
+    frame = pd.DataFrame({
+        "s": pd.Series(
+            ["ab", "cd", "xab", "xcd", "abc", "cde", "xyz", ""],
+            dtype="str",
+        )
+    })
+    with skrub.config_context(eager_data_ops=False):
+        source = skrub.var("frame", frame)
+        called = source["s"].str.match("ab|cd")
+
+    ops, result = _evaluate(called)
+    assert any(
+        isinstance(op, (PolarsExpressionMapOp, PolarsFusedMapOp))
+        for op in ops
+    )
+    assert isinstance(result, pl.Series)
+    _assert_matches(result, frame["s"].str.match("ab|cd"))
 
 
 @pytest.mark.parametrize("path", ["standalone", "assign"])
