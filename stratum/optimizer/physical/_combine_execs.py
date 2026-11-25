@@ -3,8 +3,10 @@ import pandas as pd
 import polars as pl
 
 from stratum.optimizer.logical._base import OperandRef, OutputType, _resolve_args, _resolve_kwargs
+from stratum.optimizer.logical._column_expr import Const
 from stratum.optimizer.logical._ops import ValueOp
 from stratum.optimizer.logical._combine_ops import AssignOp
+from stratum.optimizer.physical._expressions import polars_unsupported
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.optimizer.physical._registry import physical_impl
 
@@ -45,6 +47,11 @@ class PolarsAssignOp(AssignOp, PhysicalOp):
             if isinstance(value, (pd.Series, pd.DataFrame)):
                 op._unsupported_reason = "literal pandas assignments require label alignment"
                 return False
+            if pd.api.types.is_scalar(value):
+                reason = polars_unsupported(Const(value))
+                if reason is not None:
+                    op._unsupported_reason = reason
+                    return False
         return True
 
     def process(self, inputs: list):

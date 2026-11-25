@@ -90,6 +90,19 @@ def test_assign_compiles_to_one_with_columns(monkeypatch):
                                                       label="constant", sequence=[1, 2, 3]))
 
 
+@pytest.mark.parametrize("value", [pd.NA, pd.NaT])
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("literal_inlining", [False, True])
+def test_unsupported_assignment_literals_use_pandas(value, fused, literal_inlining):
+    from stratum.optimizer.physical._combine_execs import PandasAssignOp
+
+    ops, result = execute(lambda df: df.assign(c=df["a"] + 1, missing=value), fused=fused,
+                          literal_inlining=literal_inlining)
+    assert isinstance(ops[-1], PandasAssignOp)
+    assert "no polars literal" in dict(ops[-1]._refusals)["polars"]
+    pd.testing.assert_frame_equal(result, FRAME.assign(c=FRAME["a"] + 1, missing=value))
+
+
 def test_standalone_chain_compiles_to_one_select():
     ops, result = execute(lambda df: (df["a"] + 2) * 3)
     assert len(ops) == 2 and isinstance(ops[-1], PolarsFusedMapOp)

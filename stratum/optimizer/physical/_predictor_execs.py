@@ -59,6 +59,7 @@ from stratum.optimizer.logical._ops import PredictorOp
 from stratum.optimizer.physical._lowering import lowering_rule
 from stratum.optimizer.physical._physical_ops import PhysicalOp, EstimatorExecution
 from stratum.optimizer.physical._registry import rust_impl, sklearn_skrub_impl
+from stratum.optimizer.physical._representation import FrameLib
 
 
 class _PredictorExecution(EstimatorExecution, PredictorOp, PhysicalOp):
@@ -214,6 +215,15 @@ class HistGradientBoostingOp(_PredictorExecution):
 class SklearnHistGradientBoosting(HistGradientBoostingOp):
     """Reference impl: runs the scikit-learn histogram gradient boosting as-is."""
     is_abstract = False
+
+    @classmethod
+    def accepts_input_lib(cls, op, index: int, lib) -> bool:
+        """Require pandas feature frames for categorical dtype detection.
+
+        Polars 2 removed the interchange protocol used by scikit-learn 1.8.
+        The planner converts feature frames before fitting and inference.
+        """
+        return index != 0 or lib is FrameLib.PANDAS
 
 
 # --- Nearest neighbors -------------------------------------------------------

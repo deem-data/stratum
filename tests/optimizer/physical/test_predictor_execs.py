@@ -11,9 +11,12 @@ import sys
 import numpy as np
 import pandas as pd
 import pytest
+import skrub
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.datasets import make_classification, make_regression
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestClassifier
+from sklearn.ensemble import (GradientBoostingRegressor,
+                              HistGradientBoostingClassifier,
+                              HistGradientBoostingRegressor, RandomForestClassifier)
 from sklearn.linear_model import (LassoCV, LogisticRegressionCV, MultiTaskElasticNet,
                                   MultiTaskLasso, Ridge, RidgeCV)
 from sklearn.neighbors import RadiusNeighborsClassifier
@@ -25,9 +28,11 @@ import stratum as st
 from tests.optimizer.physical._execution import inference_op
 from stratum.adapters.tree_classifier import RustRandomForestClassifier
 from stratum.frontend._api import evaluate
+from stratum.frontend._skrub_graph import get_data
 from stratum.optimizer._optimize import optimize
 from stratum.optimizer.logical._base import All
 from stratum.optimizer.logical._ops import OperandRef, PredictorOp
+from stratum.optimizer.physical._conversion import ConversionOp
 from stratum.optimizer.physical._impl_selection import (
     DefaultImplementationSelector,
     FlagBasedSelector,
@@ -74,6 +79,7 @@ from stratum.optimizer.physical._registry import (PhysicalImpl, PhysicalRegistry
                                                   _placeholder_cost,
                                                   _placeholder_exec_mem,
                                                   build_default_physical_registry)
+from stratum.optimizer.physical._representation import FrameLib, frame_lib
 
 
 def _ctx():
@@ -451,3 +457,49 @@ def test_plan_predicts_like_skrub(task, module, name, params, impl):
     learner = pred.skb.make_learner()
     learner.fit(splits["train"])
     np.testing.assert_array_equal(learner.predict(splits["test"]), preds)
+
+
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+@pytest.mark.parametrize("estimator", [HistGradientBoostingClassifier,
+                                        HistGradientBoostingRegressor])
+def test_hist_gradient_boosting_detects_categorical_dtypes(tmp_path, selector, estimator):
+    frame = pd.DataFrame({
+        "category": ["X", "A", "B", None] * 40,
+        "numeric": np.random.default_rng(0).normal(size=160),
+        "y": [1, 0, 0, 1] * 40,
+    })
+    path = tmp_path / "categorical.parquet"
+    frame.to_parquet(path, index=False)
+    with skrub.config_context(eager_data_ops=False):
+        data = st.as_data_op(str(path)).skb.apply_func(pd.read_parquet)
+        X = data.drop(columns="y").skb.mark_as_X()
+        y = data["y"].skb.mark_as_y()
+        encoded = X.skb.apply(skrub.TableVectorizer(
+            low_cardinality=skrub.ToCategorical(),
+            high_cardinality=skrub.StringEncoder(random_state=0),
+        ))
+        pred = encoded.skb.apply(estimator(max_iter=5, random_state=0), y=y)
+
+    with st.config(scheduler=True, implementation_selector=selector):
+        ops, _ = optimize(pred, env=get_data(pred))
+        predictions = evaluate(pred, seed=42, test_size=0.2)
+
+    predictors = [op for op in ops if isinstance(op, SklearnHistGradientBoosting)]
+    assert sorted(op.mode for op in predictors) == ["fit", "predict"]
+    for op in predictors:
+        assert op.original_estimator.categorical_features == "from_dtype"
+        assert frame_lib(op.inputs[0]) is FrameLib.PANDAS
+    conversions = [op for op in ops if isinstance(op, ConversionOp)]
+    if selector == "greedy":
+        # Conversions may precede the split to preserve pandas row labels.
+        assert conversions
+        assert all(op.target is FrameLib.PANDAS
+                   and frame_lib(op.inputs[0]) is FrameLib.POLARS
+                   for op in conversions)
+    else:
+        assert not conversions
+
+    splits = pred.skb.train_test_split(random_state=42, test_size=0.2)
+    learner = pred.skb.make_learner()
+    learner.fit(splits["train"])
+    np.testing.assert_array_equal(learner.predict(splits["test"]), predictions)
