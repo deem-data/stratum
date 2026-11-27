@@ -41,6 +41,8 @@ class PlanContext:
         (rust/polars-first).
     map_fusion:
         Fuse compatible selected Polars maps before runtime planning.
+    map_aggregate_fusion:
+        Allow the map fusion pass to fuse a map into a scalar aggregate.
     """
 
     pandas_query: bool
@@ -50,6 +52,7 @@ class PlanContext:
     allow_patch: bool
     implementation_selector: str = "default"
     map_fusion: bool = True
+    map_aggregate_fusion: bool = False
 
     @property
     def prefer_rust(self) -> bool:
@@ -71,4 +74,5 @@ class PlanContext:
             allow_patch=bool(FLAGS.allow_patch),
             implementation_selector=FLAGS.implementation_selector,
             map_fusion=bool(config.map_fusion) if config is not None else True,
+            map_aggregate_fusion=bool(config.map_aggregate_fusion) if config is not None else False,
         )

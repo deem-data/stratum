@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 import stratum as st
 
-from stratum.optimizer._optimize import OptConfig
+from stratum.optimizer._optimize import OptConfig, optimize as optimize_plan
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._column_expr import AggExpr, AllCols, BinOpExpr, Col
 from stratum.optimizer.logical._map_ops import ExpressionMapOp
@@ -15,6 +15,7 @@ from stratum.optimizer.logical._ops import OutputType
 from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
 from stratum.optimizer.physical._join_execs import (
     PandasIsInSemiJoinOp, PandasMergeSemiJoinOp, PolarsFilteringJoinOp)
+from stratum.runtime._scheduler import SequentialScheduler
 from .test_dataframe_ops import optimize, run_op, force_polars
 
 
@@ -24,6 +25,41 @@ def execute(expression, env=None):
     for op in ops:
         values[id(op)] = op.process([values[id(i)] for i in op.inputs])
     return values[id(ops[-1])], ops
+
+
+def plan_and_evaluate(build, frame, selector):
+    dag = build(st.var("frame"))
+    with st.config(implementation_selector=selector):
+        ops, split = optimize_plan(dag, OptConfig(), env={"frame": frame})
+    result = SequentialScheduler(ops, split).evaluate()
+    if isinstance(result, (pl.DataFrame, pl.Series)):
+        result = result.to_pandas()
+    return result, ops
+
+
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+@pytest.mark.parametrize("build", [
+    lambda d: d.sum(), lambda d: d.agg(func="mean"),
+    lambda d: d.mean(skipna=False), lambda d: d.sum(min_count=3),
+    lambda d: d.agg("std", ddof=0), lambda d: d.agg({"w": "mean", "v": "max"}),
+    lambda d: d[["w", "v"]].sum(), lambda d: d[["v", "w"]].agg({"v": "std"}, ddof=0),
+    lambda d: d[d["w"] > 4].sum(),
+])
+def test_ungrouped_frame_aggregations(build, selector):
+    frame = pd.DataFrame({"v": [1., None, 3.], "w": [4., 5., 6.]})
+    result, ops = plan_and_evaluate(build, frame, selector)
+    assert isinstance(ops[-1], AggregateOp) and ops[-1].output_type is OutputType.SERIES
+    pd.testing.assert_series_equal(result, build(frame))
+
+
+def test_frame_reduction_preserves_numeric_only_and_dict_column_labels():
+    frame = pd.DataFrame({"v": [1., 3.], "s": ["a", "b"]})
+    result, ops = execute(st.var("frame").mean(numeric_only=True), {"frame": frame})
+    assert isinstance(ops[-1], AggregateOp)
+    pd.testing.assert_series_equal(result, frame.mean(numeric_only=True))
+    frame.columns = pd.Index(["v", "v"], name="feature")
+    result, ops = execute(st.var("frame").agg({"v": "max"}), {"frame": frame})
+    pd.testing.assert_series_equal(result, frame.agg({"v": "max"}))
 
 
 @pytest.mark.parametrize("reduce", [
@@ -60,11 +96,76 @@ def test_scalar_reduction_preserves_numeric_only():
         execute(st.var("s").sum(numeric_only=True), env={"s": series})
 
 
-def test_series_aggregation_with_labels_stays_a_pandas_call():
+def test_labelled_reduction_of_a_bound_series():
     series = pd.Series([1, 2], name="v")
     result, ops = execute(st.var("s").agg({"total": "sum"}), env={"s": series})
-    assert not any(isinstance(op, AggregateOp) for op in ops)
+    assert isinstance(ops[-1], AggregateOp) and ops[-1].labelled()
     pd.testing.assert_series_equal(result, series.agg({"total": "sum"}))
+
+
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("build", [
+    lambda d: d["v"].agg(ddof="std"),
+    lambda d: (d["v"] * d["w"]).agg(total="sum", avg="mean"),
+    lambda d: d["v"].agg({"spread": "std"}, ddof=0),
+    lambda d: d.groupby("g")["v"].agg(total="sum"),
+    lambda d: d.groupby("g", as_index=False)["v"].agg(total="sum", avg="mean"),
+    lambda d: (d["v"] * d["w"]).groupby(d["g"]).agg(total="sum"),
+])
+def test_labelled_series_reductions_preserve_result_shape(build, empty):
+    frame = pd.DataFrame({"g": ["a", "b", "a"], "v": [1., None, 3.], "w": [2., 5., 6.]},
+                         index=[7, 3, 9])
+    if empty:
+        frame = frame.iloc[:0]
+    result, ops = plan_and_evaluate(build, frame, "default")
+    expected = build(frame)
+    assert isinstance(ops[-1], AggregateOp) and ops[-1].labelled()
+    if isinstance(expected, pd.Series):
+        assert ops[-1].output_type is OutputType.SERIES
+        pd.testing.assert_series_equal(result, expected)
+    else:
+        assert ops[-1].output_type is OutputType.FRAME
+        pd.testing.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+@pytest.mark.parametrize("reduce,params", [
+    (lambda g: g.agg({"v": "std"}, ddof=0), {}),
+    (lambda g: g.aggregate(func={"v": "std"}, ddof=0), {}),
+    (lambda g: g.agg("std", ddof=0), {"ddof": 0}),
+], ids=["dict", "keyword-dict", "function"])
+def test_grouped_aggregation_binds_parameters_by_spec(selector, reduce, params):
+    frame = pd.DataFrame({"g": ["a", "a", "b"], "v": [0., 2., 3.]})
+    dag = reduce(st.var("frame").groupby("g", as_index=False))
+    with st.config(implementation_selector=selector):
+        ops, split = optimize_plan(dag, OptConfig(), env={"frame": frame})
+    (agg,) = [op for op in ops if isinstance(op, AggregateOp)]
+    assert agg.aggregations[0][1].params == params
+    result = SequentialScheduler(ops, split).evaluate()
+    if isinstance(result, pl.DataFrame):
+        result = result.to_pandas()
+    pd.testing.assert_frame_equal(result, reduce(frame.groupby("g", as_index=False)))
+
+
+@pytest.mark.parametrize("build,error", [
+    (lambda d: d["v"].groupby(d["g"]).agg({"v": "std"}, ddof=0), pd.errors.SpecificationError),
+    (lambda d: d.groupby("g").agg({}, ddof=0), ValueError),
+    (lambda d: d.groupby("g").agg({"v": "std"}, axis="invalid"), ValueError),
+    (lambda d: d.groupby("g").agg({"v": "std"}, func="std"), TypeError),
+], ids=["series-groupby", "empty-dict", "invalid-axis", "duplicate-func"])
+def test_invalid_grouped_dict_aggregations_preserve_pandas_errors(build, error):
+    frame = pd.DataFrame({"g": ["a", "a"], "v": [0., 2.]})
+    with pytest.raises(error):
+        build(frame)
+    with pytest.raises(error):
+        execute(build(st.var("frame")), env={"frame": frame})
+
+
+def test_grouped_dict_aggregation_evaluates_dynamic_keyword_operand():
+    frame = pd.DataFrame({"g": ["a", "a"], "v": [0., 2.]})
+    dag = st.var("frame").groupby("g").agg({"v": "std"}, ddof=st.var("params")["ddof"])
+    with pytest.raises(KeyError, match="ddof"):
+        execute(dag, env={"frame": frame, "params": {}})
 
 
 def test_shared_grouped_series_keeps_one_result_per_group():
@@ -75,6 +176,41 @@ def test_shared_grouped_series_keeps_one_result_per_group():
     expected = frame.groupby("g")["v"]
     pd.testing.assert_series_equal(result[0], expected.sum())
     pd.testing.assert_series_equal(result[1], expected.max())
+
+
+@pytest.mark.parametrize("selector", ["default", "greedy"])
+@pytest.mark.parametrize("reduce", [
+    lambda g: g.agg({"w": "std"}, ddof=0),
+    lambda g: g.agg(top=("w", "max"), total=("v", "sum")),
+    lambda g: g.agg(spread=pd.NamedAgg("w", "std")),
+])
+def test_grouped_projection_binds_input_columns_and_output_labels(selector, reduce):
+    frame = pd.DataFrame({"g": ["a", "a", "b"], "v": [0., 2., 3.], "w": [1., 5., 7.]})
+    def build(d):
+        return reduce(d.groupby("g", as_index=False)[["v", "w"]])
+    result, ops = plan_and_evaluate(build, frame, selector)
+    assert isinstance(ops[-1], AggregateOp)
+    pd.testing.assert_frame_equal(result, build(frame))
+
+
+@pytest.mark.parametrize("columns,reduction", [
+    (["v"], {"w": "sum"}), (["v", "missing"], {"v": "sum"}),
+])
+def test_grouped_projection_preserves_column_validation(columns, reduction):
+    frame = pd.DataFrame({"g": ["a"], "v": [1], "w": [2]})
+    dag = st.var("frame").groupby("g")[columns].agg(reduction)
+    with pytest.raises(KeyError):
+        execute(dag, {"frame": frame})
+
+
+def test_parameterized_named_agg_preserves_pandas_callable_validation():
+    frame = pd.DataFrame({"g": ["a", "a"], "v": [1., 2.]})
+    def build(d):
+        return d.groupby("g")[["v"]].agg(spread=pd.NamedAgg("v", "std", ddof=0))
+    with pytest.raises(TypeError):
+        build(frame)
+    with pytest.raises(TypeError):
+        execute(build(st.var("frame")), {"frame": frame})
 
 
 def test_cse_keeps_series_and_frame_aggregations_distinct():

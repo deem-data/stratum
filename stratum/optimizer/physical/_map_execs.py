@@ -49,17 +49,23 @@ class PandasExpressionMapOp(ExpressionMapOp, PhysicalOp):
 
 def _map_name_is_read(op, memo=None):
     """Whether a consumer observes the name, possibly through arithmetic maps."""
+    from stratum.optimizer.logical._aggregation_ops import AggregateOp
     from stratum.optimizer.logical._combine_ops import AssignOp
     from stratum.optimizer.logical._selection_ops import MaskSelectionOp
+    from stratum.optimizer.physical._aggregation_execs import PolarsScalarAggregateOp
 
     memo = {} if memo is None else memo
     if op in memo:
         return memo[op]
-    result = not op.outputs or any(
-        _map_name_is_read(out, memo) if isinstance(
-            out, (ExpressionMapOp, DatetimeConversionOp, DatetimeFieldOp))
-        else not (isinstance(out, (AssignOp, MaskSelectionOp)) and out.inputs[0] is not op)
-        for out in op.outputs)
+
+    def reads_name(out):
+        if isinstance(out, (ExpressionMapOp, DatetimeConversionOp, DatetimeFieldOp)):
+            return _map_name_is_read(out, memo)
+        if isinstance(out, AggregateOp) and PolarsScalarAggregateOp.supports(out):
+            return False
+        return not (isinstance(out, (AssignOp, MaskSelectionOp)) and out.inputs[0] is not op)
+
+    result = not op.outputs or any(reads_name(out) for out in op.outputs)
     memo[op] = result
     return result
 

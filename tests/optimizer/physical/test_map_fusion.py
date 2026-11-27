@@ -30,10 +30,12 @@ FRAME = pd.DataFrame({"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, 6.0],
                       "s": ["a1", "b", "c"], "d": ["2020-01-01", "2020-02-02", "2020-03-03"]})
 
 
-def plan(build, *, fused=True, selector="greedy", frame=FRAME, literal_inlining=True):
+def plan(build, *, fused=True, selector="greedy", frame=FRAME, literal_inlining=True,
+         map_aggregate_fusion=False):
     with skrub.config_context(eager_data_ops=False):
         dag = build(skrub.var("frame", frame))
     return optimize(dag, OptConfig(map_fusion=fused,
+                                  map_aggregate_fusion=map_aggregate_fusion,
                                   literal_inlining=literal_inlining,
                                   selector=get_implementation_selector(selector)),
                     env={"frame": frame})
@@ -65,7 +67,10 @@ def test_config_is_snapshotted_and_logical_ir_stays_explicit():
     assert not fused_ops(ops)
     ctx = PlanContext.from_flags(config)
     config.map_fusion = False
-    assert ctx.map_fusion and not PlanContext.from_flags(config).map_fusion
+    config.map_aggregate_fusion = True
+    updated = PlanContext.from_flags(config)
+    assert ctx.map_fusion and not ctx.map_aggregate_fusion
+    assert not updated.map_fusion and updated.map_aggregate_fusion
 
 
 def test_assign_compiles_to_one_with_columns(monkeypatch):

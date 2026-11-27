@@ -25,7 +25,7 @@ from stratum.optimizer.logical._selection_ops import (
 from stratum.optimizer.logical._aggregation_ops import (
     AggregateOp, _AGG_METHODS, _AGG_FUNCS, _SERIES_REDUCTIONS, _is_groupby_op,
     _is_aggregation, _is_value_counts, _extract_grouping, _extract_aggregations,
-    make_aggregate_op, make_scalar_aggregate_op, make_value_counts_ops)
+    make_aggregate_op, make_ungrouped_aggregate_op, make_value_counts_ops)
 from stratum.optimizer.logical._sort_ops import SortOp, make_sort_op
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, ProjectionOp, DropOp,
@@ -355,8 +355,8 @@ def make_string_method_op(op: MethodCallOp) -> ExpressionMapOp | None:
 def extract_dataframe_op(op: Op, root: Op, map_op = True,
                          column_projection = True) -> tuple[Op, bool]:
     new_op = None
-    if isinstance(op, MethodCallOp) and (scalar := make_scalar_aggregate_op(op)) is not None:
-        new_op = scalar
+    if isinstance(op, MethodCallOp) and (aggregate := make_ungrouped_aggregate_op(op)) is not None:
+        new_op = aggregate
     elif isinstance(op, ConcatOp):
         # Concat is built when the skrub graph is converted; its operands' kinds
         # are only known here.

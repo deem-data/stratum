@@ -5,17 +5,25 @@ The implementations subclass the logical ``AggregateOp``:
 - Polars translates ``AggExpr`` nodes into expressions passed to
   ``group_by(...).agg(...)`` or ``select(...)``. A computed aggregation such as
   ``SUM(a * b)`` remains one expression tree.
+- A scalar aggregate over a numeric Series reduces its input directly in Polars.
 - The pandas grouped path materializes each aggregation's row-wise child in a
   working frame, then reduces it by column.
 """
 from __future__ import annotations
 
+import operator
+
+import numpy as np
 import pandas as pd
 import polars as pl
 
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
 from stratum.optimizer.logical._base import OutputType
-from stratum.optimizer.logical._column_expr import AllCols, Col
+from stratum.optimizer.logical._column_expr import AllCols, BinOpExpr, Col, OperandLeaf
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
+from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
+from stratum.optimizer.logical._selection_ops import SelectionOp
+from stratum.optimizer.logical._source_ops import InMemoryFrameOp
 from stratum.optimizer.physical._expressions import (
     EvalContext, refuse_unsupported_exprs, to_pandas, to_polars)
 from stratum.optimizer.physical._physical_ops import PhysicalOp
@@ -35,6 +43,13 @@ class PandasAggregateOp(AggregateOp, PhysicalOp):
         if self._is_wildcard_only():
             _, agg = self.aggregations[0]
             return to_pandas(agg, ctx)
+        if isinstance(ctx.frame, pd.Series) and self.labelled():
+            return ctx.frame.agg({name: agg.func for name, agg in self.aggregations})
+        if (self.output_type is OutputType.SERIES and self.aggregations
+                and all(name is None and isinstance(agg.child, Col) and not agg.params
+                        for name, agg in self.aggregations)):
+            # pandas resolves dictionary keys against the column index, including duplicates.
+            return ctx.frame.agg({agg.child.name: agg.func for _, agg in self.aggregations})
         results = {self.entry_name(i): to_pandas(agg, ctx)
                    for i, (_, agg) in enumerate(self.aggregations)}
         if self.output_type is OutputType.SERIES:
@@ -92,6 +107,109 @@ class PandasAggregateOp(AggregateOp, PhysicalOp):
         return (len(self.aggregations) == 1
                 and self.aggregations[0][0] is None
                 and isinstance(self.aggregations[0][1].child, AllCols))
+
+
+def _projected_dtype(op):
+    """Supported pandas dtype of a projected column, including after row selections."""
+    if (not isinstance(op, ColumnProjectionOp) or op.output_type is not OutputType.SERIES
+            or not op.inputs):
+        return None
+    source = op.inputs[0]
+    while isinstance(source, SelectionOp) and source.inputs:
+        source = source.inputs[0]
+    if not isinstance(source, InMemoryFrameOp) or not isinstance(source.data, pd.DataFrame):
+        return None
+    columns = source.data.columns
+    if columns.nlevels != 1 or not columns.is_unique or op.key not in columns:
+        return None
+    # The logical schema collapses NumPy, Arrow and pandas nullable dtypes.
+    # Their scalar types and their handling of valid NaNs differ.
+    dtype = source.data[op.key].dtype
+    width = getattr(dtype, "itemsize", None)
+    if (dtype.kind in "iu" and width in (1, 2, 4, 8)) or (dtype.kind == "f" and width == 8):
+        return dtype
+    return None
+
+
+def _scalar_input_dtype(source):
+    """Infer the input dtype used to select the accumulator and result scalar types."""
+    if isinstance(source, ExpressionMapOp):
+        expr = source.expr
+        if (not isinstance(expr, BinOpExpr)
+                or expr.op not in (operator.add, operator.sub, operator.mul, operator.truediv)
+                or not all(isinstance(operand, OperandLeaf) for operand in expr.children())):
+            return None
+        left = _projected_dtype(source.inputs[expr.left.ref.k])
+        right = _projected_dtype(source.inputs[expr.right.ref.k])
+        return left if left is not None and left.kind == "f" and left == right else None
+    return _projected_dtype(source)
+
+
+@physical_impl(of=AggregateOp, backend="polars", input_format="series", output_format="scalar")
+class PolarsScalarAggregateOp(AggregateOp, PhysicalOp):
+    """Reduce a numeric Series with pandas' accumulator and scalar result types."""
+
+    @classmethod
+    def supports(cls, op: AggregateOp, ctx=None) -> bool:
+        if (op.grouped or op.output_type is not OutputType.SCALAR or len(op.inputs) != 1
+                or len(op.aggregations) != 1):
+            return False
+        name, agg = op.aggregations[0]
+        if name is not None or not isinstance(agg.child, AllCols) or agg.params:
+            return False
+        source = op.inputs[0]
+        return (agg.func in ("sum", "min") and source.output_type is OutputType.SERIES
+                and _scalar_input_dtype(source) is not None)
+
+    def on_impl_selected(self, ctx):
+        self._dtype = _scalar_input_dtype(self.inputs[0])
+        self._arithmetic = isinstance(self.inputs[0], ExpressionMapOp)
+
+    def _reduce(self, values):
+        """Lower the reduction over a Polars Series or a fused expression."""
+        if self._arithmetic:
+            # pandas arithmetic masks NaNs, including on Arrow and nullable floats.
+            values = values.fill_nan(None)
+        if self.aggregations[0][1].func == "min":
+            return values.min()
+        if self._dtype.kind in "iu":
+            values = values.cast(pl.UInt64 if self._dtype.kind == "u" else pl.Int64)
+        return values.sum()
+
+    def _as_scalar(self, value, length):
+        if value is None:
+            if isinstance(self._dtype, pd.api.extensions.ExtensionDtype):
+                return pd.NA
+            # An empty NumPy-backed Series returns a Python float NaN.
+            return np.float64(np.nan) if length else float("nan")
+        if isinstance(self._dtype, pd.ArrowDtype):
+            return value
+        if self.aggregations[0][1].func == "min":
+            return self._dtype.type(value)
+        if self._dtype.kind == "f":
+            if isinstance(self._dtype, pd.Float64Dtype) and np.isnan(value):
+                return pd.NA
+            return np.float64(value)
+        return np.uint64(value) if self._dtype.kind == "u" else np.int64(value)
+
+    def process(self, inputs: list):
+        series = inputs[0]
+        # A valid NaN in a projected nullable float column propagates to pd.NA.
+        if (self.aggregations[0][1].func == "min" and isinstance(self._dtype, pd.Float64Dtype)
+                and not self._arithmetic and series.is_nan().any()):
+            return pd.NA
+        return self._as_scalar(self._reduce(series), len(series))
+
+
+class PolarsFusedScalarAggregateOp(PolarsScalarAggregateOp):
+    """Evaluate a row-wise expression and its scalar reduction in one frame select."""
+
+    def process(self, inputs: list):
+        _, agg = self.aggregations[0]
+        values = to_polars(agg.child, EvalContext.of(inputs, self.mode))
+        frame = inputs[0]
+        return self._as_scalar(frame.select(self._reduce(values)).item(), frame.height)
+
 
 @physical_impl(of=AggregateOp, backend="polars")
 class PolarsAggregateOp(AggregateOp, PhysicalOp):

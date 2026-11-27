@@ -10,9 +10,10 @@ from stratum.optimizer._op_utils import _iter_operand_refs, topological_iterator
 from stratum.optimizer.logical import _schema
 from stratum.optimizer.logical._base import OperandRef, OutputType
 from stratum.optimizer.logical._column_expr import (
-    Col, DatetimeExpr, DtExpr, OperandLeaf, StrExpr)
+    AggExpr, Col, DatetimeExpr, DtExpr, OperandLeaf, StrExpr)
 from stratum.optimizer.logical._map_ops import (
     DatetimeConversionOp, DatetimeFieldOp, ExpressionMapOp, series_name)
+from stratum.optimizer.physical._aggregation_execs import PolarsFusedScalarAggregateOp, PolarsScalarAggregateOp
 from stratum.optimizer.physical._combine_execs import PolarsAssignOp
 from stratum.optimizer.physical._expressions import polars_unsupported
 from stratum.optimizer.physical._fused_map_execs import PolarsFusedAssignOp, PolarsFusedMapOp
@@ -146,7 +147,7 @@ class _Fusion:
                     node.detach_and_prune()
 
 
-def fuse_maps(root):
+def fuse_maps(root, *, map_aggregate_fusion: bool = False):
     """Fuse selected Polars maps before unrolling and runtime lifetime planning."""
     for op in reversed(list(topological_iterator(root))):
         if not op.outputs and op is not root:
@@ -165,6 +166,22 @@ def fuse_maps(root):
                        for name, value in op.kwargs.items()}
             fusion.install(PolarsFusedAssignOp)
             op.entries, op.columns, op.name = entries, columns, "assign"
+        elif (map_aggregate_fusion and isinstance(op, PolarsScalarAggregateOp)
+              and _template(op.inputs[0]) is not None):
+            series = op.inputs[0]
+            source = _find_source(series)
+            if source is None:
+                continue
+            fusion = _Fusion(source, op, [series])
+            expr = fusion.expression(series)
+            # A fused scalar aggregate reads one input relation. Shared producers and
+            # columns from other relations remain explicit operands.
+            if len(fusion.inputs) != 1:
+                continue
+            fusion.install(PolarsFusedScalarAggregateOp)
+            name, agg = op.aggregations[0]
+            op.aggregations = ((name, AggExpr(agg.func, expr, agg.params)),)
+            op.update_name()
         elif _template(op) is not None:
             source = _find_source(op)
             if source is None:

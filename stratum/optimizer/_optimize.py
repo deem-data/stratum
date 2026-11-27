@@ -62,6 +62,7 @@ class OptConfig():
         pandas_query: bool = False,
         literal_inlining: bool = True,
         map_fusion: bool = True,
+        map_aggregate_fusion: bool = False,
     ):
         """Configure optimization and implementation selection for one plan.
 
@@ -72,8 +73,9 @@ class OptConfig():
           masks whose predicates compile to query strings. This optimizer-only
           setting selects between pandas kernels; ``set_config`` does not expose
           it, and ``make_grid_search`` uses the default.
-        - ``map_fusion`` combines eligible selected Polars maps and assignments.
-          Disable it to inspect or compare the unfused physical plan.
+        - ``map_fusion`` enables physical fusion of Polars projections, maps and
+          assignments. With ``map_aggregate_fusion=True``, the same pass can
+          also fuse a map into its scalar reduction.
         """
         self.cse = cse
         self.dataframe_ops = dataframe_ops
@@ -89,6 +91,7 @@ class OptConfig():
         self.pandas_query = pandas_query
         self.literal_inlining = literal_inlining
         self.map_fusion = map_fusion
+        self.map_aggregate_fusion = map_aggregate_fusion
 
 def _debug_show_graph(root: Op, name: str):
     if diagnostics_enabled():
@@ -252,7 +255,7 @@ def physical_optimize(root: Op, ctx: PlanContext, registry=None,
         selector = get_implementation_selector(ctx.implementation_selector)
     root = select_implementations(root, ctx, registry=registry, selector=selector)
     if ctx.map_fusion:
-        root = fuse_maps(root)
+        root = fuse_maps(root, map_aggregate_fusion=ctx.map_aggregate_fusion)
         _debug_validate_dag(root)
         _debug_show_graph(root, "map_fusion")
     # TODO: Revisit this order when stage-specific costs justify independent

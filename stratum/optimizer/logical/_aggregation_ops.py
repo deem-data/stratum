@@ -11,6 +11,7 @@ from stratum.optimizer.logical._ops import (
     substitute_op)
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
+from stratum.optimizer.logical._source_ops import InMemoryFrameOp
 from stratum.optimizer.logical import _schema
 
 
@@ -19,11 +20,14 @@ class AggregateOp(Op):
 
     Models both ``groupby(by).agg(...)`` and a bare reduction such as
     ``df.sum()``. The aggregation itself is a tuple of ``(name, AggExpr)``
-    entries, so ``.sum()`` and ``.agg("sum")`` normalize to the same value and
-    compare equal under CSE, and a computed aggregation like ``SUM(a * b)`` needs
-    no separate map op. ``name`` is ``None`` when the output name comes from the
-    entry's own expression (``Col("v")`` names it ``"v"``; :class:`AllCols` names
-    one output per source column).
+    entries, so ``.sum()`` and ``.agg("sum")`` compare equal under CSE.
+    A grouped entry can reduce a row-wise expression. An ungrouped scalar
+    reduction reads its Series input, which lets other consumers reuse a
+    computed Series. Physical map fusion can evaluate both operations together.
+
+    An explicit ``name`` labels the output. An unnamed column reduction inherits
+    its column name. An ungrouped wildcard reduces a Series to a scalar or a
+    DataFrame to a Series indexed by column name.
 
     ``grouping`` holds the grouping keys as expressions, which is what lets
     ``value_counts`` (group by the series' own values) and expression grouping
@@ -108,6 +112,8 @@ class AggregateOp(Op):
         if not self.grouped:
             if src is OutputType.FRAME:
                 return OutputType.SERIES
+            if src is OutputType.SERIES and self.labelled():
+                return OutputType.SERIES
             if src is OutputType.SERIES and len(self.aggregations) == 1:
                 name, agg = self.aggregations[0]
                 if (name is None and isinstance(agg.child, AllCols)
@@ -116,7 +122,7 @@ class AggregateOp(Op):
             return OutputType.UNKNOWN
         # Grouped: a frame aggregation stays a frame, a series aggregation stays a
         # series unless several entries widen it to a column each.
-        if src is OutputType.SERIES and len(self.aggregations) > 1:
+        if src is OutputType.SERIES and (self.labelled() or len(self.aggregations) > 1):
             return OutputType.FRAME
         return src
 
@@ -125,6 +131,10 @@ class AggregateOp(Op):
         # The groups label the rows, unless the keys become columns.
         return (IndexEffect.DEFAULT if self.grouped and self.keys_as_columns
                 else IndexEffect.NEW)
+
+    def labelled(self) -> bool:
+        """Whether any aggregate has an explicit output label."""
+        return any(name is not None for name, _ in self.aggregations)
 
     def counts_group_rows(self) -> bool:
         """A single unnamed ``size`` over every column: the rows per group.
@@ -262,7 +272,27 @@ def _is_aggregation(op: MethodCallOp) -> bool:
     # no spec at all is not an aggregation.
     return (op.method_name in _AGG_FUNCS
             and (_extract_aggregations(op) is not None
-                 or _named_aggregation_entries(op) is not None))
+                 or _named_aggregation_entries(op) is not None
+                 or _grouped_series_labels(op) is not None))
+
+
+def _grouped_series_labels(op):
+    """Output labels in a SeriesGroupBy keyword aggregation."""
+    if op.method_name not in _AGG_FUNCS or op.args or "func" in (op.kwargs or {}):
+        return None
+    labels = {k: v for k, v in (op.kwargs or {}).items() if k not in _EXECUTION_HINTS}
+    return labels if labels and all(isinstance(f, str) for f in labels.values()) else None
+
+
+def _labelled_series_entries(labels, child):
+    """Bind each output label to a reduction over the same input expression."""
+    if not labels or not all(isinstance(k, str) and isinstance(f, str)
+                             for k, f in labels.items()):
+        return None
+    try:
+        return tuple((k, AggExpr(f, child)) for k, f in labels.items())
+    except NotImplementedError:
+        return None
 
 
 def _named_aggregation_entries(op: MethodCallOp) -> tuple | None:
@@ -349,32 +379,48 @@ def _extract_aggregations(op: MethodCallOp) -> str | list[str] | OperandRef | No
     return op.method_name
 
 
-def make_scalar_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
-    """Recognize a single reduction over an ungrouped Series, keeping its producer."""
-    func = _extract_aggregations(op)
-    if not isinstance(func, str) or func not in _SERIES_REDUCTIONS or len(op.inputs) != 1:
+def make_ungrouped_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
+    """Extract an ungrouped reduction over a Series or the columns of a frame."""
+    if op.method_name not in _SERIES_REDUCTIONS | _AGG_FUNCS or len(op.inputs) != 1:
         return None
     src = op.inputs[0]
-    # A bound Series is a ValueOp. Accessors and indexes can also be tagged
-    # SERIES, and a selection on a groupby still denotes a grouped reduction.
-    if not (src.output_type is OutputType.SERIES
-            or isinstance(src, ValueOp) and isinstance(src.value, pd.Series)):
-        return None
     if isinstance(src, (AttributeReadOp, IndexAccessOp)) or _reads_a_groupby(op):
         return None
-    params = op.bind_pandas(owner=pd.Series)
+    if src.output_type is OutputType.FRAME:
+        owner, result = pd.DataFrame, OutputType.SERIES
+    elif (src.output_type is OutputType.SERIES
+          or isinstance(src, ValueOp) and isinstance(src.value, pd.Series)):
+        owner, result = pd.Series, OutputType.SCALAR
+    else:
+        return None
+    spec = _extract_aggregations(op)
+    params = op.bind_pandas(owner=owner)
     if params is None:
         return None
     if op.method_name in _AGG_FUNCS:
         if params.keys() - {"func", "kwargs"}:
             return None
         params = params.get("kwargs", {})
+        if spec is None and owner is pd.Series:
+            spec = params
+    if isinstance(spec, dict):
+        if not spec or not all(isinstance(f, str) and f in _SERIES_REDUCTIONS
+                               for f in spec.values()):
+            return None
+        if owner is pd.Series:
+            entries = _labelled_series_entries(spec, AllCols())
+            if entries is None:
+                return None
+            return substitute_op(op, AggregateOp(aggregations=entries, output_type=OutputType.SERIES))
+        params = {}
+    elif not isinstance(spec, str) or spec not in _SERIES_REDUCTIONS:
+        return None
     if not all(pd.api.types.is_scalar(v) for v in params.values()):
         return None
-    entries = _aggregation_entries(func, params)
+    entries = _aggregation_entries(spec, params)
     if entries is None:
         return None
-    return substitute_op(op, AggregateOp(aggregations=entries, output_type=OutputType.SCALAR))
+    return substitute_op(op, AggregateOp(aggregations=entries, output_type=result))
 
 
 def _grouping_exprs(groupby_op: MethodCallOp, folder: _Folder) -> tuple:
@@ -410,21 +456,22 @@ def _grouping_key_expr(root: Op, expr):
 
 
 def _aggregation_params(op: MethodCallOp) -> dict | None:
-    """Reduction parameters from the aggregation call, or ``None`` if unrepresentable.
-
-    Both spellings put the reduction's parameters in kwargs: a direct
-    ``.std(ddof=0)`` takes them itself, and ``.agg(spec, **kwargs)`` forwards them
-    to the reduction. Discard execution hints so the physical layer can select
-    the aggregation implementation.
-    """
+    """Bind reduction parameters for a direct method or a grouped aggregation spec."""
+    kwargs = op.kwargs or {}
     if ((op.method_name in _AGG_FUNCS and len(op.args or ()) > 1)
             or (op.method_name not in _AGG_FUNCS and op.args)):
         # Direct methods and agg forward positional reduction parameters.
         # Until normalized by signature, preserve the original call.
         return None
+    if isinstance(_extract_aggregations(op), dict):
+        # Each input column binds to a reduction with its default parameters.
+        # Preserve axis validation, duplicate func errors and dynamic argument evaluation.
+        if "axis" in kwargs or (op.args and _AGG_SPEC_KWARG in kwargs) or len(op.inputs) > 1:
+            return None
+        return {}
     skip = _EXECUTION_HINTS | ({_AGG_SPEC_KWARG} if op.method_name in _AGG_FUNCS
                               else set())
-    params = {k: v for k, v in (op.kwargs or {}).items() if k not in skip}
+    params = {k: v for k, v in kwargs.items() if k not in skip}
     if any(isinstance(v, OperandRef) for v in params.values()):
         # A graph-fed parameter isn't representable in the expression, the same
         # way `_Folder` keeps a graph-fed StrExpr argument as a leaf.
@@ -451,10 +498,6 @@ def _aggregation_entries(spec, params: dict, columns: tuple | None = None) -> tu
             # One reduction applied to every column.
             return ((None, AggExpr(spec, AllCols(), params)),)
         if isinstance(spec, dict):
-            if columns is not None:
-                # This parser does not validate dict keys against an earlier
-                # column selection, so leave that combination unfused.
-                return None
             entries = []
             for col, func in spec.items():
                 if not isinstance(col, str) or not isinstance(func, str):
@@ -513,24 +556,55 @@ def make_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
     columns = _selected_columns(selection)
     if selection is not None and columns is None:
         return None
-    if (_extract_aggregations(op) == "size" and selection is not None
+    if columns is not None and len(set(columns)) != len(columns):
+        return None
+    spec = _extract_aggregations(op)
+    if isinstance(spec, dict) and (not spec or df.output_type is not OutputType.FRAME):
+        return None
+    if (spec == "size" and selection is not None
             and not isinstance(selection.key, str)):
         # A frame-shaped selection does not change a row count: pandas'
         # `groupby(k)[["v"]].size()` is `groupby(k).size()`. A single-column
         # selection is kept, since it names the resulting series.
         columns = None
     named_entries = _named_aggregation_entries(op)
-    if named_entries is not None and selection is not None:
+    # pandas invokes a parameterized NamedAgg as a callable. A string function
+    # in that position raises TypeError, even when it names a valid reduction.
+    if named_entries and any(agg.params for _, agg in named_entries):
         return None
-    if named_entries is not None:
+    column_spec = named_entries is not None or isinstance(spec, dict)
+    if column_spec and (df.output_type is OutputType.SERIES
+                        or selection is not None and isinstance(selection.key, str)):
+        return None
+    labels = _grouped_series_labels(op)
+    if labels is not None:
+        if len(op.inputs) != 1:
+            return None
+        if selection is not None and isinstance(selection.key, str):
+            child = Col(selection.key)
+        elif selection is None and df.output_type is OutputType.SERIES:
+            child = AllCols()
+        else:
+            return None
+        entries = _labelled_series_entries(labels, child)
+    elif named_entries is not None:
         entries = named_entries
     else:
         params = _aggregation_params(op)
         if params is None:
             return None
-        entries = _aggregation_entries(_extract_aggregations(op), params, columns)
+        entries = _aggregation_entries(spec, params, columns)
     if entries is None:
         return None
+    if columns is not None and column_spec:
+        referenced = {agg.child.name for _, agg in entries}
+        if not referenced.issubset(columns):
+            return None
+        # Folding a projection also removes validation of its unused columns.
+        # Preserve that validation when their presence cannot be proven.
+        available = df.data.columns if isinstance(df, InMemoryFrameOp) else referenced
+        if not set(columns).issubset(available):
+            return None
 
     # Fold reduction and grouping roots together: shared column producers may
     # belong to both subgraphs and must be counted in one discovery pass.
