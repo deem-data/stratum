@@ -8,7 +8,8 @@ import stratum as st
 
 from stratum.optimizer._optimize import OptConfig
 from stratum.optimizer.logical._aggregation_ops import AggregateOp
-from stratum.optimizer.logical._column_expr import AggExpr, BinOpExpr, Col
+from stratum.optimizer.logical._column_expr import AggExpr, AllCols, BinOpExpr, Col
+from stratum.optimizer.logical._map_ops import ExpressionMapOp
 from stratum.optimizer.logical._numeric_ops import NumericOp
 from stratum.optimizer.logical._ops import OutputType
 from stratum.optimizer.physical._aggregation_execs import PolarsAggregateOp
@@ -17,12 +18,63 @@ from stratum.optimizer.physical._join_execs import (
 from .test_dataframe_ops import optimize, run_op, force_polars
 
 
-def execute(expression):
-    ops = optimize(expression, OptConfig(dataframe_ops=True))
+def execute(expression, env=None):
+    ops = optimize(expression, OptConfig(dataframe_ops=True), env=env)
     values = {}
     for op in ops:
         values[id(op)] = op.process([values[id(i)] for i in op.inputs])
     return values[id(ops[-1])], ops
+
+
+@pytest.mark.parametrize("reduce", [
+    lambda s: s.std(ddof=0), lambda s: s.agg("std", ddof=0),
+    lambda s: s.aggregate(func="std", ddof=0),
+])
+def test_scalar_reduction_of_a_bound_series(reduce):
+    series = pd.Series([2., None, 6.], index=[4, 1, 7])
+    result, ops = execute(reduce(st.var("s")), env={"s": series})
+    agg = ops[-1]
+    assert isinstance(agg, AggregateOp) and not agg.grouped
+    assert agg.output_type is OutputType.SCALAR
+    assert agg.aggregations == ((None, AggExpr("std", AllCols(), {"ddof": 0})),)
+    assert result == reduce(series)
+
+
+def test_scalar_reduction_keeps_the_computed_series_as_its_input():
+    frame = pd.DataFrame({"price": [2., None, 4.], "quantity": [3, 4, 5]})
+    d = st.as_data_op(frame)
+    product = d["price"] * d["quantity"]
+    result, ops = execute(st.deferred(tuple)([product, product.sum(), product.agg("sum")]))
+    (agg,) = [op for op in ops if isinstance(op, AggregateOp)]
+    assert isinstance(agg.inputs[0], ExpressionMapOp)
+    expected = frame["price"] * frame["quantity"]
+    pd.testing.assert_series_equal(result[0], expected)
+    assert result[1:] == (expected.sum(), expected.sum())
+
+
+def test_scalar_reduction_preserves_numeric_only():
+    series = pd.Series([1, 2], dtype=object)
+    with pytest.raises(TypeError):
+        series.sum(numeric_only=True)
+    with pytest.raises(TypeError):
+        execute(st.var("s").sum(numeric_only=True), env={"s": series})
+
+
+def test_series_aggregation_with_labels_stays_a_pandas_call():
+    series = pd.Series([1, 2], name="v")
+    result, ops = execute(st.var("s").agg({"total": "sum"}), env={"s": series})
+    assert not any(isinstance(op, AggregateOp) for op in ops)
+    pd.testing.assert_series_equal(result, series.agg({"total": "sum"}))
+
+
+def test_shared_grouped_series_keeps_one_result_per_group():
+    frame = pd.DataFrame({"g": ["a", "a", "b"], "v": [1, 2, 5]})
+    grouped = st.as_data_op(frame).groupby("g")["v"]
+    result, ops = execute(st.deferred(tuple)([grouped.sum(), grouped.max()]))
+    assert not any(isinstance(op, AggregateOp) and not op.grouped for op in ops)
+    expected = frame.groupby("g")["v"]
+    pd.testing.assert_series_equal(result[0], expected.sum())
+    pd.testing.assert_series_equal(result[1], expected.max())
 
 
 def test_cse_keeps_series_and_frame_aggregations_distinct():

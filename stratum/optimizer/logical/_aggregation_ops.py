@@ -4,9 +4,11 @@ from stratum.optimizer.logical._base import IndexEffect
 from stratum.optimizer.logical._column_expr import (
     AggExpr, AllCols, BinOpExpr, Col, OperandLeaf, UnaryOpExpr)
 from stratum.optimizer.logical._expr_folding import _Folder
-from stratum.optimizer.logical._map_ops import ExpressionMapOp
+from stratum.optimizer.logical._index_ops import IndexAccessOp
+from stratum.optimizer.logical._map_ops import AttributeReadOp, ExpressionMapOp
 from stratum.optimizer.logical._ops import (
-    BinOp, UnaryOp, GetItemOp, OperandRef, OutputType, MethodCallOp, Op, ValueOp)
+    BinOp, UnaryOp, GetItemOp, OperandRef, OutputType, MethodCallOp, Op, ValueOp,
+    substitute_op)
 from stratum.optimizer.logical._sort_ops import SortOp
 from stratum.optimizer.logical._projection_ops import ColumnProjectionOp
 from stratum.optimizer.logical import _schema
@@ -82,8 +84,7 @@ class AggregateOp(Op):
         """The kind of value this aggregation produces.
 
         Distinguish FRAME and SERIES for downstream extraction, including
-        ``_getitem_output_type`` and ``is_mask_selection``. Scalar reductions
-        currently use ``UNKNOWN``.
+        ``_getitem_output_type`` and ``is_mask_selection``.
 
         ``src_type`` overrides the kind read off ``inputs[0]``. Absorbing a column
         selection needs it: in ``groupby(k)["v"].sum()`` the frame underneath is a
@@ -105,9 +106,14 @@ class AggregateOp(Op):
         if src is OutputType.UNKNOWN:
             return OutputType.FRAME
         if not self.grouped:
-            # A whole-object reduction drops one level: a frame collapses to one
-            # value per column (a series), a series collapses to a scalar.
-            return OutputType.SERIES if src is OutputType.FRAME else OutputType.UNKNOWN
+            if src is OutputType.FRAME:
+                return OutputType.SERIES
+            if src is OutputType.SERIES and len(self.aggregations) == 1:
+                name, agg = self.aggregations[0]
+                if (name is None and isinstance(agg.child, AllCols)
+                        and agg.func in _SERIES_REDUCTIONS):
+                    return OutputType.SCALAR
+            return OutputType.UNKNOWN
         # Grouped: a frame aggregation stays a frame, a series aggregation stays a
         # series unless several entries widen it to a column each.
         if src is OutputType.SERIES and len(self.aggregations) > 1:
@@ -183,6 +189,11 @@ _AGG_METHODS = {"sum", "mean", "count", "min", "max", "median", "std", "var",
                 "first", "last", "prod", "size", "nunique", "sem"}
 # Generic aggregation entrypoints that take the aggregation spec as an argument.
 _AGG_FUNCS = {"agg", "aggregate"}
+# These reductions return one scalar when applied to a Series.
+_SERIES_REDUCTIONS = frozenset({
+    "all", "any", "count", "max", "mean", "median", "min", "nunique", "prod", "sem",
+    "std", "sum", "var",
+})
 # `.agg(spec)` also spells its spec as a keyword, and that keyword is the spec
 # itself rather than a parameter of the reduction, so it is read separately.
 _AGG_SPEC_KWARG = "func"
@@ -336,6 +347,34 @@ def _extract_aggregations(op: MethodCallOp) -> str | list[str] | OperandRef | No
         return (op.kwargs or {}).get(_AGG_SPEC_KWARG)
     # direct method such as .mean()/.sum()/.count() -> normalize to its name
     return op.method_name
+
+
+def make_scalar_aggregate_op(op: MethodCallOp) -> AggregateOp | None:
+    """Recognize a single reduction over an ungrouped Series, keeping its producer."""
+    func = _extract_aggregations(op)
+    if not isinstance(func, str) or func not in _SERIES_REDUCTIONS or len(op.inputs) != 1:
+        return None
+    src = op.inputs[0]
+    # A bound Series is a ValueOp. Accessors and indexes can also be tagged
+    # SERIES, and a selection on a groupby still denotes a grouped reduction.
+    if not (src.output_type is OutputType.SERIES
+            or isinstance(src, ValueOp) and isinstance(src.value, pd.Series)):
+        return None
+    if isinstance(src, (AttributeReadOp, IndexAccessOp)) or _reads_a_groupby(op):
+        return None
+    params = op.bind_pandas(owner=pd.Series)
+    if params is None:
+        return None
+    if op.method_name in _AGG_FUNCS:
+        if params.keys() - {"func", "kwargs"}:
+            return None
+        params = params.get("kwargs", {})
+    if not all(pd.api.types.is_scalar(v) for v in params.values()):
+        return None
+    entries = _aggregation_entries(func, params)
+    if entries is None:
+        return None
+    return substitute_op(op, AggregateOp(aggregations=entries, output_type=OutputType.SCALAR))
 
 
 def _grouping_exprs(groupby_op: MethodCallOp, folder: _Folder) -> tuple:

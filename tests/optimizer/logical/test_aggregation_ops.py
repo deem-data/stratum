@@ -193,11 +193,10 @@ class TestAggregateOutputType(unittest.TestCase):
                          inputs=[_src(OutputType.FRAME)])
         self.assertEqual(OutputType.SERIES, op.output_type)
 
-    def test_series_reduction_leaves_frame_world(self):
-        # A scalar is not frame-world data; the lattice spells that UNKNOWN.
+    def test_series_reduction_returns_a_scalar(self):
         op = AggregateOp(grouped=False, aggregations=_wildcard(),
                          inputs=[_src(OutputType.SERIES)])
-        self.assertEqual(OutputType.UNKNOWN, op.output_type)
+        self.assertEqual(OutputType.SCALAR, op.output_type)
 
     def test_defaults_to_frame_when_the_source_kind_is_unknown(self):
         self.assertEqual(OutputType.FRAME, AggregateOp().output_type)

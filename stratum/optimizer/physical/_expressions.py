@@ -132,15 +132,12 @@ def _(expr: AggExpr, ctx):
     # The whole-object reduction; a grouped pandas aggregation reads func/params
     # off the node instead (see PandasAggregateOp).
     obj = to_pandas(expr.child, ctx)
-    # TODO: retain numeric_only for frame-valued children such as AllCols.
-    # Dropping numeric_only=True can include nonnumeric columns in reductions.
-    params = {k: v for k, v in expr.params.items() if k != "numeric_only"}
     if expr.func == "size":
         return obj.size
     if expr.func in ("first", "last"):
         # pandas 3.0 has no Series.first/last; they only exist on a groupby.
         return obj.iloc[0 if expr.func == "first" else -1]
-    return getattr(obj, expr.func)(**params)
+    return getattr(obj, expr.func)(**expr.params)
 
 
 def method_fields(expr: ColumnMethodExpr) -> dict:

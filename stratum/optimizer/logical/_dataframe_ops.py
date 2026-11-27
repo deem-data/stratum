@@ -23,9 +23,9 @@ from stratum.optimizer.logical._selection_ops import (
     SliceSelectionOp, SampleSelectionOp, DropLabelsSelectionOp, _SELECTION_METHODS,
     make_selection_op)
 from stratum.optimizer.logical._aggregation_ops import (
-    AggregateOp, _AGG_METHODS, _AGG_FUNCS, _is_groupby_op,
+    AggregateOp, _AGG_METHODS, _AGG_FUNCS, _SERIES_REDUCTIONS, _is_groupby_op,
     _is_aggregation, _is_value_counts, _extract_grouping, _extract_aggregations,
-    make_aggregate_op, make_value_counts_ops)
+    make_aggregate_op, make_scalar_aggregate_op, make_value_counts_ops)
 from stratum.optimizer.logical._sort_ops import SortOp, make_sort_op
 from stratum.optimizer.logical._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp, ProjectionOp, DropOp,
@@ -76,12 +76,6 @@ def _make_scalar_comparison(op: MethodCallOp) -> BinOp | None:
     # A series compared to a scalar is a series.
     return substitute_op(op, BinOp(_SCALAR_COMPARISONS[op.method_name], OperandRef(0), value),
                          keep_kind=True)
-
-
-_SERIES_REDUCTIONS = frozenset({
-    "all", "any", "count", "max", "mean", "median", "min", "nunique", "prod", "sem",
-    "std", "sum", "var",
-})
 
 
 def _opaque_method_output_type(op: MethodCallOp) -> OutputType | None:
@@ -361,7 +355,9 @@ def make_string_method_op(op: MethodCallOp) -> ExpressionMapOp | None:
 def extract_dataframe_op(op: Op, root: Op, map_op = True,
                          column_projection = True) -> tuple[Op, bool]:
     new_op = None
-    if isinstance(op, ConcatOp):
+    if isinstance(op, MethodCallOp) and (scalar := make_scalar_aggregate_op(op)) is not None:
+        new_op = scalar
+    elif isinstance(op, ConcatOp):
         # Concat is built when the skrub graph is converted; its operands' kinds
         # are only known here.
         new_op = make_concat_op(op)
