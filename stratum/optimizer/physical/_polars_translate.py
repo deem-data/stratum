@@ -86,7 +86,7 @@ def _translate_affix(polars_name: str):
 
 
 def _translate_contains(params):
-    _only(params, "pat", "case", "flags", "regex")
+    _only(params, "pat", "case", "flags", "regex", "na")
     pat, regex = params.get("pat"), params.get("regex", True)
     _require(isinstance(pat, str), "only a string pattern translates")
     _require(params.get("case", True) is True and not params.get("flags", 0),
@@ -95,7 +95,12 @@ def _translate_contains(params):
     if regex:
         reason = _regex_unsupported(pat)
         _require(reason is None, reason)
-    return lambda obj: obj.str.contains(pat, literal=not regex)
+
+    if "na" not in params:
+        return lambda obj: obj.str.contains(pat, literal=not regex)
+    na = params["na"]
+    _require(isinstance(na, bool), "only boolean na= translates")
+    return lambda obj: obj.str.contains(pat, literal=not regex).fill_null(na)
 
 
 def _translate_count(params):
